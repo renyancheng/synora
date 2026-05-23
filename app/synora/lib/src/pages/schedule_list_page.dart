@@ -5,6 +5,7 @@ import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
 
+
 class ScheduleListPage extends StatelessWidget {
   const ScheduleListPage({super.key, required this.controller});
 
@@ -19,9 +20,11 @@ class ScheduleListPage extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text('${AppStrings.timeField}：${formatDateTime(item.scheduledAt)}'),
+            Text('${AppStrings.startField}：${formatEventRange(start: item.start, end: item.end, isAllDay: item.isAllDay)}'),
             const SizedBox(height: 8),
-            Text('${AppStrings.reminderField}：${formatDateTime(item.reminderAt)}'),
+            Text('${AppStrings.reminderField}：${formatReminderOffsets(item.reminderOffsetsMinutes)}'),
+            const SizedBox(height: 8),
+            Text('${AppStrings.recurrenceField}：${formatRecurrence(item.recurrence)}'),
             if (item.location != null) ...<Widget>[
               const SizedBox(height: 8),
               Text('${AppStrings.locationField}：${item.location}'),
@@ -29,7 +32,7 @@ class ScheduleListPage extends StatelessWidget {
             const SizedBox(height: 8),
             Text('${AppStrings.detailsField}：${item.details}'),
             const SizedBox(height: 8),
-            Text('${AppStrings.currentInputType}：${AppStrings.sourceLabel(item.sourceType)}'),
+            Text('${AppStrings.timeZoneField}：${item.start.timeZone}'),
             const SizedBox(height: 8),
             Text('${AppStrings.parseConfidenceField}：${(item.parseConfidence * 100).toStringAsFixed(0)}%'),
           ],
@@ -102,10 +105,11 @@ class ScheduleListPage extends StatelessWidget {
                   child: ListTile(
                     title: Text(item.title),
                     subtitle: Text(
-                      '${formatDateTime(item.scheduledAt)}'
-                      '${item.location == null ? '' : '\n${item.location}'}',
+                      '${formatEventRange(start: item.start, end: item.end, isAllDay: item.isAllDay)}'
+                      '${item.location == null ? '' : '\n${item.location}'}\n'
+                      '${formatRecurrence(item.recurrence)}',
                     ),
-                    isThreeLine: item.location != null,
+                    isThreeLine: true,
                     onTap: () => _showDetails(context, item),
                     onLongPress: () => _showDeleteMenu(context, item),
                   ),
@@ -117,6 +121,7 @@ class ScheduleListPage extends StatelessWidget {
     );
   }
 }
+
 
 class _EmptyPanel extends StatelessWidget {
   const _EmptyPanel(this.text);

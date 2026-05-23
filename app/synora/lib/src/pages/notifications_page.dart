@@ -5,6 +5,7 @@ import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
 
+
 class NotificationsPage extends StatelessWidget {
   const NotificationsPage({super.key, required this.controller});
 
@@ -35,6 +36,7 @@ class NotificationsPage extends StatelessWidget {
   }
 }
 
+
 class _NotificationTile extends StatelessWidget {
   const _NotificationTile(this.item);
 
@@ -62,10 +64,10 @@ class _NotificationTile extends StatelessWidget {
         title: Text(item.subject),
         subtitle: Text(
           '${AppStrings.channelLabel(item.channel)} → ${item.recipient}\n'
-          '创建时间：${formatDateTime(item.createdAt)}'
-          '${item.deliveredAt == null ? '' : '\n送达时间：${formatDateTime(item.deliveredAt)}'}'
-          '${localizedError == null ? '' : '\n失败原因：$localizedError'}\n'
-          '重试次数：${item.retryCount}',
+          '${AppStrings.createTimeField}：${formatDateTime(item.createdAt)}'
+          '${item.deliveredAt == null ? '' : '\n${AppStrings.deliveryTimeField}：${formatDateTime(item.deliveredAt)}'}'
+          '${localizedError == null ? '' : '\n${AppStrings.failureReasonField}：$localizedError'}\n'
+          '${AppStrings.retryCountField}：${item.retryCount}',
         ),
         trailing: Chip(
           label: Text(AppStrings.notificationStatus(item.status)),
@@ -77,6 +79,7 @@ class _NotificationTile extends StatelessWidget {
     );
   }
 }
+
 
 class _NotificationsEmpty extends StatelessWidget {
   const _NotificationsEmpty();

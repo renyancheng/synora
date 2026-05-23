@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from datetime import datetime, timezone
 from typing import Any
 
@@ -56,14 +54,23 @@ class Schedule(Base):
     location: Mapped[str] = mapped_column(String(255), nullable=True)
     details: Mapped[str] = mapped_column(Text)
     source_text: Mapped[str] = mapped_column(Text)
-    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
-    reminder_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    status: Mapped[str] = mapped_column(String(40), default="scheduled")
-    source_type: Mapped[str] = mapped_column(String(40), default="text")
+
+    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    time_zone: Mapped[str] = mapped_column(String(80), default="Asia/Shanghai")
+    is_all_day: Mapped[bool] = mapped_column(Boolean, default=False)
+    recurrence_rules_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reminder_offsets_minutes_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+
+    status: Mapped[str] = mapped_column(String(40), default="scheduled", index=True)
     source_attachment_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     parse_confidence: Mapped[float] = mapped_column(default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    duration_minutes: Mapped[int] = mapped_column(Integer, nullable=True)
+    reminder_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="attachment")
 
     user: Mapped["User"] = relationship(back_populates="schedules")
     reminder_jobs: Mapped[list["ReminderJob"]] = relationship(back_populates="schedule")
@@ -93,10 +100,10 @@ class QuickNote(Base):
     content: Mapped[str] = mapped_column(Text)
     tags_csv: Mapped[str] = mapped_column(String(255), default="")
     source_text: Mapped[str] = mapped_column(Text)
-    source_type: Mapped[str] = mapped_column(String(40), default="text")
     source_attachment_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
     topic_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    source_type: Mapped[str] = mapped_column(String(40), default="attachment")
 
     user: Mapped["User"] = relationship(back_populates="quick_notes")
 
@@ -149,7 +156,7 @@ class Attachment(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     file_name: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(120))
-    source_type: Mapped[str] = mapped_column(String(40))
+    source_type: Mapped[str] = mapped_column(String(40), default="attachment")
     object_key: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     storage_bucket: Mapped[str] = mapped_column(String(120))
     size_bytes: Mapped[int] = mapped_column(Integer)
@@ -178,6 +185,11 @@ class AgentRun(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     workflow: Mapped[str] = mapped_column(String(80), index=True)
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversation_threads.id"), nullable=True, index=True)
+    user_message_id: Mapped[int] = mapped_column(ForeignKey("conversation_messages.id"), nullable=True, index=True)
+    assistant_message_id: Mapped[int] = mapped_column(ForeignKey("conversation_messages.id"), nullable=True, index=True)
+    stream_token: Mapped[str] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    stream_status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
     input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     output_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
@@ -228,8 +240,11 @@ class ConversationMessage(Base):
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversation_threads.id"), index=True)
     role: Mapped[str] = mapped_column(String(20), index=True)
     message_type: Mapped[str] = mapped_column(String(40), default="text", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="completed", index=True)
     text_content: Mapped[str] = mapped_column(Text, nullable=True)
     structured_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    action_group_id: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     conversation: Mapped["ConversationThread"] = relationship(back_populates="messages")
@@ -245,7 +260,7 @@ class ConversationPendingState(Base):
     stage: Mapped[str] = mapped_column(String(40), default="pending", index=True)
     draft_hash: Mapped[str] = mapped_column(String(64), nullable=True)
     approval_token: Mapped[str] = mapped_column(String(255), nullable=True)
-    source_type: Mapped[str] = mapped_column(String(40), default="text")
+    source_type: Mapped[str] = mapped_column(String(40), default="attachment")
     attachment_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     meta_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

@@ -1,35 +1,25 @@
 import 'dart:typed_data';
 
-enum InputSourceType { text, screenshot, photo, chatRecord, email }
+enum ConversationTool { schedule, quickNote }
 
-extension InputSourceTypeX on InputSourceType {
+extension ConversationToolX on ConversationTool {
   String get apiValue {
     switch (this) {
-      case InputSourceType.text:
-        return 'text';
-      case InputSourceType.screenshot:
-        return 'screenshot';
-      case InputSourceType.photo:
-        return 'photo';
-      case InputSourceType.chatRecord:
-        return 'chat_record';
-      case InputSourceType.email:
-        return 'email';
+      case ConversationTool.schedule:
+        return 'schedule';
+      case ConversationTool.quickNote:
+        return 'quick_note';
     }
   }
 
-  static InputSourceType fromApiValue(String value) {
+  static ConversationTool? fromApiValue(String? value) {
     switch (value) {
-      case 'screenshot':
-        return InputSourceType.screenshot;
-      case 'photo':
-        return InputSourceType.photo;
-      case 'chat_record':
-        return InputSourceType.chatRecord;
-      case 'email':
-        return InputSourceType.email;
+      case 'schedule':
+        return ConversationTool.schedule;
+      case 'quick_note':
+        return ConversationTool.quickNote;
       default:
-        return InputSourceType.text;
+        return null;
     }
   }
 }
@@ -50,14 +40,12 @@ class UploadedAttachment {
     required this.fileName,
     required this.contentType,
     required this.sizeBytes,
-    required this.sourceType,
   });
 
   final int attachmentId;
   final String fileName;
   final String contentType;
   final int sizeBytes;
-  final InputSourceType sourceType;
 
   factory UploadedAttachment.fromJson(Map<String, dynamic> json) {
     return UploadedAttachment(
@@ -65,7 +53,6 @@ class UploadedAttachment {
       fileName: json['file_name'] as String,
       contentType: json['content_type'] as String,
       sizeBytes: json['size_bytes'] as int,
-      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String),
     );
   }
 }
@@ -133,29 +120,63 @@ class ApprovalInfo {
   }
 }
 
+class EventDateTimeValue {
+  EventDateTimeValue({
+    required this.dateTime,
+    required this.timeZone,
+  });
+
+  final DateTime dateTime;
+  final String timeZone;
+
+  factory EventDateTimeValue.fromJson(Map<String, dynamic> json) {
+    return EventDateTimeValue(
+      dateTime: DateTime.parse(json['dateTime'] as String),
+      timeZone: json['timeZone'] as String,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'dateTime': dateTime.toIso8601String(),
+      'timeZone': timeZone,
+    };
+  }
+
+  EventDateTimeValue copyWith({
+    DateTime? dateTime,
+    String? timeZone,
+  }) {
+    return EventDateTimeValue(
+      dateTime: dateTime ?? this.dateTime,
+      timeZone: timeZone ?? this.timeZone,
+    );
+  }
+}
+
 class ScheduleDraft {
   ScheduleDraft({
     required this.title,
     required this.details,
     required this.sourceText,
-    required this.durationMinutes,
-    required this.sourceType,
+    required this.isAllDay,
+    required this.start,
+    required this.end,
+    required this.recurrence,
     required this.sourceAttachmentIds,
     required this.parseConfidence,
     required this.evidenceDigest,
     this.location,
-    this.scheduledAt,
-    this.reminderAt,
   });
 
   final String title;
   final String? location;
   final String details;
   final String sourceText;
-  final DateTime? scheduledAt;
-  final int durationMinutes;
-  final DateTime? reminderAt;
-  final InputSourceType sourceType;
+  final bool isAllDay;
+  final EventDateTimeValue start;
+  final EventDateTimeValue end;
+  final List<String> recurrence;
   final List<int> sourceAttachmentIds;
   final double parseConfidence;
   final List<String> evidenceDigest;
@@ -166,10 +187,10 @@ class ScheduleDraft {
       location: json['location'] as String?,
       details: json['details'] as String? ?? '',
       sourceText: json['source_text'] as String? ?? '',
-      scheduledAt: json['scheduled_at'] == null ? null : DateTime.parse(json['scheduled_at'] as String),
-      durationMinutes: json['duration_minutes'] as int? ?? 60,
-      reminderAt: json['reminder_at'] == null ? null : DateTime.parse(json['reminder_at'] as String),
-      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String? ?? 'text'),
+      isAllDay: json['isAllDay'] as bool? ?? false,
+      start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
+      end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
+      recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
       sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
       parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
       evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
@@ -182,10 +203,10 @@ class ScheduleDraft {
       'location': location,
       'details': details,
       'source_text': sourceText,
-      'scheduled_at': scheduledAt?.toUtc().toIso8601String(),
-      'duration_minutes': durationMinutes,
-      'reminder_at': reminderAt?.toUtc().toIso8601String(),
-      'source_type': sourceType.apiValue,
+      'isAllDay': isAllDay,
+      'start': start.toJson(),
+      'end': end.toJson(),
+      'recurrence': recurrence,
       'source_attachment_ids': sourceAttachmentIds,
       'parse_confidence': parseConfidence,
       'evidence_digest': evidenceDigest,
@@ -197,10 +218,10 @@ class ScheduleDraft {
     String? location,
     String? details,
     String? sourceText,
-    DateTime? scheduledAt,
-    int? durationMinutes,
-    DateTime? reminderAt,
-    InputSourceType? sourceType,
+    bool? isAllDay,
+    EventDateTimeValue? start,
+    EventDateTimeValue? end,
+    List<String>? recurrence,
     List<int>? sourceAttachmentIds,
     double? parseConfidence,
     List<String>? evidenceDigest,
@@ -210,10 +231,10 @@ class ScheduleDraft {
       location: location ?? this.location,
       details: details ?? this.details,
       sourceText: sourceText ?? this.sourceText,
-      scheduledAt: scheduledAt ?? this.scheduledAt,
-      durationMinutes: durationMinutes ?? this.durationMinutes,
-      reminderAt: reminderAt ?? this.reminderAt,
-      sourceType: sourceType ?? this.sourceType,
+      isAllDay: isAllDay ?? this.isAllDay,
+      start: start ?? this.start,
+      end: end ?? this.end,
+      recurrence: recurrence ?? this.recurrence,
       sourceAttachmentIds: sourceAttachmentIds ?? this.sourceAttachmentIds,
       parseConfidence: parseConfidence ?? this.parseConfidence,
       evidenceDigest: evidenceDigest ?? this.evidenceDigest,
@@ -254,23 +275,23 @@ class ConflictItem {
   ConflictItem({
     required this.scheduleId,
     required this.title,
-    required this.startsAt,
-    required this.endsAt,
+    required this.start,
+    required this.end,
     this.location,
   });
 
   final int scheduleId;
   final String title;
-  final DateTime startsAt;
-  final DateTime endsAt;
+  final EventDateTimeValue start;
+  final EventDateTimeValue end;
   final String? location;
 
   factory ConflictItem.fromJson(Map<String, dynamic> json) {
     return ConflictItem(
       scheduleId: json['schedule_id'] as int,
       title: json['title'] as String,
-      startsAt: DateTime.parse(json['starts_at'] as String),
-      endsAt: DateTime.parse(json['ends_at'] as String),
+      start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
+      end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
       location: json['location'] as String?,
     );
   }
@@ -279,19 +300,19 @@ class ConflictItem {
 class ConflictSuggestion {
   ConflictSuggestion({
     required this.label,
-    required this.candidateStart,
-    required this.candidateEnd,
+    required this.start,
+    required this.end,
   });
 
   final String label;
-  final DateTime candidateStart;
-  final DateTime candidateEnd;
+  final EventDateTimeValue start;
+  final EventDateTimeValue end;
 
   factory ConflictSuggestion.fromJson(Map<String, dynamic> json) {
     return ConflictSuggestion(
       label: json['label'] as String,
-      candidateStart: DateTime.parse(json['candidate_start'] as String),
-      candidateEnd: DateTime.parse(json['candidate_end'] as String),
+      start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
+      end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
     );
   }
 }
@@ -370,12 +391,13 @@ class ScheduleItem {
     required this.id,
     required this.title,
     required this.details,
-    required this.scheduledAt,
-    required this.durationMinutes,
-    required this.reminderAt,
+    required this.isAllDay,
+    required this.start,
+    required this.end,
+    required this.recurrence,
+    required this.reminderOffsetsMinutes,
     required this.status,
     required this.createdAt,
-    required this.sourceType,
     required this.parseConfidence,
     this.location,
   });
@@ -384,12 +406,13 @@ class ScheduleItem {
   final String title;
   final String? location;
   final String details;
-  final DateTime scheduledAt;
-  final int durationMinutes;
-  final DateTime reminderAt;
+  final bool isAllDay;
+  final EventDateTimeValue start;
+  final EventDateTimeValue end;
+  final List<String> recurrence;
+  final List<int> reminderOffsetsMinutes;
   final String status;
   final DateTime createdAt;
-  final InputSourceType sourceType;
   final double parseConfidence;
 
   factory ScheduleItem.fromJson(Map<String, dynamic> json) {
@@ -398,12 +421,13 @@ class ScheduleItem {
       title: json['title'] as String,
       location: json['location'] as String?,
       details: json['details'] as String,
-      scheduledAt: DateTime.parse(json['scheduled_at'] as String),
-      durationMinutes: json['duration_minutes'] as int,
-      reminderAt: DateTime.parse(json['reminder_at'] as String),
+      isAllDay: json['isAllDay'] as bool? ?? false,
+      start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
+      end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
+      recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      reminderOffsetsMinutes: (json['reminder_offsets_minutes'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
       status: json['status'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
-      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String? ?? 'text'),
       parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
     );
   }
@@ -413,7 +437,6 @@ class QuickNoteDraftPreview {
   QuickNoteDraftPreview({
     required this.normalizedContent,
     required this.previewTags,
-    required this.sourceType,
     required this.attachmentIds,
     required this.evidenceDigest,
     required this.approval,
@@ -421,7 +444,6 @@ class QuickNoteDraftPreview {
 
   final String normalizedContent;
   final List<String> previewTags;
-  final InputSourceType sourceType;
   final List<int> attachmentIds;
   final List<String> evidenceDigest;
   final ApprovalInfo approval;
@@ -430,7 +452,6 @@ class QuickNoteDraftPreview {
     return QuickNoteDraftPreview(
       normalizedContent: json['normalized_content'] as String,
       previewTags: (json['preview_tags'] as List<dynamic>).cast<String>(),
-      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String),
       attachmentIds: (json['attachment_ids'] as List<dynamic>).cast<int>(),
       evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
       approval: ApprovalInfo.fromJson(json['approval'] as Map<String, dynamic>),
@@ -461,14 +482,14 @@ class QuickNoteItem {
     required this.content,
     required this.tags,
     required this.createdAt,
-    required this.sourceType,
+    required this.sourceAttachmentIds,
   });
 
   final int id;
   final String content;
   final List<String> tags;
   final DateTime createdAt;
-  final InputSourceType sourceType;
+  final List<int> sourceAttachmentIds;
 
   factory QuickNoteItem.fromJson(Map<String, dynamic> json) {
     return QuickNoteItem(
@@ -476,7 +497,7 @@ class QuickNoteItem {
       content: json['content'] as String,
       tags: (json['tags'] as List<dynamic>).cast<String>(),
       createdAt: DateTime.parse(json['created_at'] as String),
-      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String? ?? 'text'),
+      sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
     );
   }
 }
@@ -553,16 +574,22 @@ class ConversationMessageItem {
     required this.id,
     required this.role,
     required this.messageType,
+    required this.status,
     required this.structuredPayload,
     required this.createdAt,
     this.textContent,
+    this.actionGroupId,
+    this.revision = 1,
   });
 
   final int id;
   final String role;
   final String messageType;
+  final String status;
   final String? textContent;
   final Map<String, dynamic> structuredPayload;
+  final String? actionGroupId;
+  final int revision;
   final DateTime createdAt;
 
   bool get isUser => role == 'user';
@@ -573,31 +600,78 @@ class ConversationMessageItem {
       id: json['id'] as int,
       role: json['role'] as String,
       messageType: json['message_type'] as String,
+      status: json['status'] as String? ?? 'completed',
       textContent: json['text_content'] as String?,
       structuredPayload: (json['structured_payload'] as Map<String, dynamic>? ?? <String, dynamic>{}),
+      actionGroupId: json['action_group_id'] as String?,
+      revision: json['revision'] as int? ?? 1,
       createdAt: DateTime.parse(json['created_at'] as String),
+    );
+  }
+
+  factory ConversationMessageItem.local({
+    required int id,
+    required String role,
+    required String messageType,
+    required String status,
+    String? textContent,
+    Map<String, dynamic> structuredPayload = const <String, dynamic>{},
+  }) {
+    return ConversationMessageItem(
+      id: id,
+      role: role,
+      messageType: messageType,
+      status: status,
+      textContent: textContent,
+      structuredPayload: structuredPayload,
+      createdAt: DateTime.now(),
+    );
+  }
+
+  ConversationMessageItem copyWith({
+    int? id,
+    String? role,
+    String? messageType,
+    String? status,
+    String? textContent,
+    Map<String, dynamic>? structuredPayload,
+    String? actionGroupId,
+    int? revision,
+    DateTime? createdAt,
+  }) {
+    return ConversationMessageItem(
+      id: id ?? this.id,
+      role: role ?? this.role,
+      messageType: messageType ?? this.messageType,
+      status: status ?? this.status,
+      textContent: textContent ?? this.textContent,
+      structuredPayload: structuredPayload ?? this.structuredPayload,
+      actionGroupId: actionGroupId ?? this.actionGroupId,
+      revision: revision ?? this.revision,
+      createdAt: createdAt ?? this.createdAt,
     );
   }
 }
 
-class ConversationSendMessageResult {
-  ConversationSendMessageResult({
+class ConversationSendAcceptedResult {
+  ConversationSendAcceptedResult({
     required this.conversation,
     required this.userMessage,
-    required this.assistantMessages,
+    required this.assistantMessageId,
+    required this.streamId,
   });
 
   final ConversationThreadItem conversation;
   final ConversationMessageItem userMessage;
-  final List<ConversationMessageItem> assistantMessages;
+  final int assistantMessageId;
+  final String streamId;
 
-  factory ConversationSendMessageResult.fromJson(Map<String, dynamic> json) {
-    return ConversationSendMessageResult(
+  factory ConversationSendAcceptedResult.fromJson(Map<String, dynamic> json) {
+    return ConversationSendAcceptedResult(
       conversation: ConversationThreadItem.fromJson(json['conversation'] as Map<String, dynamic>),
       userMessage: ConversationMessageItem.fromJson(json['user_message'] as Map<String, dynamic>),
-      assistantMessages: (json['assistant_messages'] as List<dynamic>)
-          .map((item) => ConversationMessageItem.fromJson(item as Map<String, dynamic>))
-          .toList(),
+      assistantMessageId: json['assistant_message_id'] as int,
+      streamId: json['stream_id'] as String,
     );
   }
 }
@@ -619,4 +693,14 @@ class ConversationActionResult {
           .toList(),
     );
   }
+}
+
+class ConversationStreamEvent {
+  ConversationStreamEvent({
+    required this.event,
+    required this.data,
+  });
+
+  final String event;
+  final Map<String, dynamic> data;
 }

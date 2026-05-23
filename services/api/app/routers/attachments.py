@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -12,7 +12,6 @@ router = APIRouter(prefix="/attachments", tags=["attachments"])
 
 @router.post("/upload", response_model=AttachmentUploadResponse)
 async def upload_attachment_endpoint(
-    source_type: str = Form(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -21,7 +20,6 @@ async def upload_attachment_endpoint(
         attachment = await upload_attachment(
             db,
             user_id=current_user.id,
-            source_type=source_type,
             upload=file,
         )
     except ValueError as exc:
@@ -32,6 +30,5 @@ async def upload_attachment_endpoint(
         file_name=attachment.file_name,
         content_type=attachment.content_type,
         size_bytes=attachment.size_bytes,
-        source_type=attachment.source_type,
         created_at=attachment.created_at,
     )

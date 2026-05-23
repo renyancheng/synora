@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from zoneinfo import ZoneInfo
 
 from app.db import get_db
 from app.dependencies import get_current_user
@@ -19,6 +20,11 @@ from app.schemas.schedule import (
 )
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
+
+
+def _event_value(date_time, time_zone: str):
+    local = date_time.astimezone(ZoneInfo(time_zone))
+    return {"dateTime": local.isoformat(), "timeZone": time_zone}
 
 
 @router.post("/drafts", response_model=ScheduleDraftResponse)
@@ -82,19 +88,20 @@ def list_schedules(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ScheduleItem]:
-    rows = db.scalars(select(Schedule).where(Schedule.user_id == current_user.id).order_by(Schedule.scheduled_at.asc())).all()
+    rows = db.scalars(select(Schedule).where(Schedule.user_id == current_user.id).order_by(Schedule.start_at.asc())).all()
     return [
         ScheduleItem(
             id=row.id,
             title=row.title,
             location=row.location,
             details=row.details,
-            scheduled_at=row.scheduled_at,
-            duration_minutes=row.duration_minutes,
-            reminder_at=row.reminder_at,
+            isAllDay=row.is_all_day,
+            start=_event_value(row.start_at, row.time_zone),
+            end=_event_value(row.end_at, row.time_zone),
+            recurrence=list(row.recurrence_rules_json or []),
+            reminder_offsets_minutes=[int(item) for item in (row.reminder_offsets_minutes_json or [])],
             status=row.status,
             created_at=row.created_at,
-            source_type=row.source_type,
             parse_confidence=row.parse_confidence,
         )
         for row in rows

@@ -10,11 +10,10 @@ from app.schemas.quick_note import QuickNoteDraftRequest
 from app.security import sha256_text
 
 
-def build_note_hash(content: str, tags: list[str], source_type: str, attachment_ids: list[int]) -> str:
+def build_note_hash(content: str, tags: list[str], attachment_ids: list[int]) -> str:
     normalized = {
         "content": content.strip(),
         "tags": sorted(tags),
-        "source_type": source_type,
         "attachment_ids": sorted(attachment_ids),
     }
     return sha256_text(str(normalized))
@@ -30,7 +29,6 @@ def create_quick_note_draft(
         user_id=user_id,
         workflow="quick_note_intake",
         payload={
-            "source_type": payload.source_type,
             "text_content": payload.content,
             "content": payload.content,
             "tags": payload.tags,
@@ -41,7 +39,7 @@ def create_quick_note_draft(
     normalized_content = str(result["normalized_content"]).strip()
     preview_tags = list(result["preview_tags"])
     evidence_digest = list(result.get("evidence_digest", []))
-    draft_hash = build_note_hash(normalized_content, preview_tags, payload.source_type, payload.attachment_ids)
+    draft_hash = build_note_hash(normalized_content, preview_tags, payload.attachment_ids)
     approval, token = ApprovalGate().create(
         db,
         user_id=user_id,
@@ -51,7 +49,6 @@ def create_quick_note_draft(
         normalized_payload={
             "content": normalized_content,
             "tags": preview_tags,
-            "source_type": payload.source_type,
             "attachment_ids": payload.attachment_ids,
         },
         evidence_digest=evidence_digest,
@@ -65,11 +62,10 @@ def save_note_after_approval(
     *,
     content: str,
     tags: list[str],
-    source_type: str,
     attachment_ids: list[int],
     approval_token: str,
 ) -> QuickNote:
-    draft_hash = build_note_hash(content, tags, source_type, attachment_ids)
+    draft_hash = build_note_hash(content, tags, attachment_ids)
     ApprovalGate().consume(
         db,
         user_id=user_id,
@@ -82,7 +78,7 @@ def save_note_after_approval(
         content=content.strip(),
         tags_csv=",".join(tags),
         source_text=content.strip(),
-        source_type=source_type,
+        source_type="attachment",
         source_attachment_ids=attachment_ids,
         topic_tags_json=tags,
     )

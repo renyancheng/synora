@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'api_client.dart';
 import 'models.dart';
 
+
 class AppController extends ChangeNotifier {
   AppController({ApiClient? apiClient}) : _apiClient = apiClient ?? ApiClient();
 
@@ -11,7 +12,10 @@ class AppController extends ChangeNotifier {
   SessionInfo? _session;
   bool _loading = false;
   bool _conversationLoading = false;
+  bool _messageSending = false;
   String? _lastError;
+  String? _streamStatusLabel;
+  int _nextTempMessageId = -1;
   List<ScheduleItem> _schedules = <ScheduleItem>[];
   List<QuickNoteItem> _quickNotes = <QuickNoteItem>[];
   List<NotificationItem> _notifications = <NotificationItem>[];
@@ -23,13 +27,16 @@ class AppController extends ChangeNotifier {
   bool get isAuthenticated => _session != null;
   bool get isLoading => _loading;
   bool get isConversationLoading => _conversationLoading;
+  bool get isMessageSending => _messageSending;
   String? get lastError => _lastError;
+  String? get streamStatusLabel => _streamStatusLabel;
   List<ScheduleItem> get schedules => List<ScheduleItem>.unmodifiable(_schedules);
   List<QuickNoteItem> get quickNotes => List<QuickNoteItem>.unmodifiable(_quickNotes);
   List<NotificationItem> get notifications => List<NotificationItem>.unmodifiable(_notifications);
   List<ConversationThreadItem> get conversations => List<ConversationThreadItem>.unmodifiable(_conversations);
   List<ConversationMessageItem> get messages => List<ConversationMessageItem>.unmodifiable(_messages);
   int? get activeConversationId => _activeConversationId;
+
   ConversationThreadItem? get activeConversation {
     final id = _activeConversationId;
     if (id == null) {
@@ -134,8 +141,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> sendChatMessage({
     required String textContent,
-    required InputSourceType sourceType,
-    required List<int> attachmentIds,
+    required List<LocalAttachmentData> attachments,
+    ConversationTool? selectedTool,
   }) async {
     if (!isAuthenticated) {
       return;
@@ -143,21 +150,83 @@ class AppController extends ChangeNotifier {
     if (_activeConversationId == null) {
       await ensureConversationReady();
     }
+
     final conversationId = _activeConversationId!;
-    final result = await _apiClient.sendConversationMessage(
-      conversationId: conversationId,
+    final tempUserId = _nextTempMessageId--;
+    final tempUserMessage = ConversationMessageItem.local(
+      id: tempUserId,
+      role: 'user',
+      messageType: 'text',
+      status: 'sending',
       textContent: textContent,
-      sourceType: sourceType,
-      attachmentIds: attachmentIds,
     );
-    _activeConversationId = result.conversation.id;
-    _upsertConversation(result.conversation, moveToFront: true);
-    _messages = <ConversationMessageItem>[
-      ..._messages,
-      result.userMessage,
-      ...result.assistantMessages,
-    ];
+    _messages = <ConversationMessageItem>[..._messages, tempUserMessage];
+    _messageSending = true;
+    _streamStatusLabel = null;
+    _lastError = null;
     notifyListeners();
+
+    int? assistantMessageId;
+    try {
+      final uploadedIds = <int>[];
+      for (final attachment in attachments) {
+        final uploaded = await _apiClient.uploadAttachment(attachment);
+        uploadedIds.add(uploaded.attachmentId);
+      }
+
+      final accepted = await _apiClient.sendConversationMessage(
+        conversationId: conversationId,
+        textContent: textContent,
+        attachmentIds: uploadedIds,
+        selectedTool: selectedTool,
+      );
+      _activeConversationId = accepted.conversation.id;
+      _upsertConversation(accepted.conversation, moveToFront: true);
+      _replaceMessage(tempUserId, accepted.userMessage.copyWith(status: 'sent'));
+
+      assistantMessageId = accepted.assistantMessageId;
+      _replaceOrAppendMessage(
+        ConversationMessageItem.local(
+          id: assistantMessageId,
+          role: 'assistant',
+          messageType: 'text',
+          status: 'streaming',
+          textContent: '',
+        ),
+      );
+      notifyListeners();
+
+      await for (final event in _apiClient.streamConversation(
+        conversationId: conversationId,
+        streamId: accepted.streamId,
+      )) {
+        _handleStreamEvent(event, assistantMessageId: assistantMessageId);
+      }
+      await _refreshCollectionsOnly();
+    } catch (error) {
+      _lastError = error.toString();
+      final tempIndex = _messages.indexWhere((item) => item.id == tempUserId);
+      if (tempIndex >= 0) {
+        _messages[tempIndex] = _messages[tempIndex].copyWith(status: 'failed');
+      }
+      if (assistantMessageId != null) {
+        _replaceOrAppendMessage(
+          ConversationMessageItem.local(
+            id: assistantMessageId,
+            role: 'assistant',
+            messageType: 'text',
+            status: 'failed',
+            textContent: '这次生成没有完成，请稍后再试。',
+          ),
+        );
+      }
+      notifyListeners();
+      rethrow;
+    } finally {
+      _messageSending = false;
+      _streamStatusLabel = null;
+      notifyListeners();
+    }
   }
 
   Future<void> performConversationAction({
@@ -167,25 +236,17 @@ class AppController extends ChangeNotifier {
     if (!isAuthenticated || _activeConversationId == null) {
       return;
     }
+    final conversationId = _activeConversationId!;
     final result = await _apiClient.performConversationAction(
-      conversationId: _activeConversationId!,
+      conversationId: conversationId,
       action: action,
       payload: payload,
     );
     _upsertConversation(result.conversation, moveToFront: true);
-    _messages = <ConversationMessageItem>[
-      ..._messages,
-      ...result.assistantMessages,
-    ];
+    final refreshed = await _apiClient.fetchConversationMessages(conversationId);
+    _messages = refreshed.$2;
     await _refreshCollectionsOnly();
     notifyListeners();
-  }
-
-  Future<UploadedAttachment> uploadAttachment(
-    InputSourceType sourceType,
-    LocalAttachmentData attachment,
-  ) {
-    return _apiClient.uploadAttachment(sourceType, attachment);
   }
 
   Future<void> deleteScheduleItem(int scheduleId) async {
@@ -215,6 +276,61 @@ class AppController extends ChangeNotifier {
     _messages = <ConversationMessageItem>[];
     _activeConversationId = null;
     _lastError = null;
+    _streamStatusLabel = null;
+    _messageSending = false;
+    notifyListeners();
+  }
+
+  void _handleStreamEvent(ConversationStreamEvent event, {required int assistantMessageId}) {
+    switch (event.event) {
+      case 'assistant_started':
+        _replaceOrAppendMessage(
+          ConversationMessageItem.local(
+            id: assistantMessageId,
+            role: 'assistant',
+            messageType: 'text',
+            status: 'streaming',
+            textContent: '',
+          ),
+        );
+        break;
+      case 'assistant_delta':
+        final delta = event.data['delta'] as String? ?? '';
+        final index = _messages.indexWhere((item) => item.id == assistantMessageId);
+        if (index >= 0) {
+          final current = _messages[index];
+          _messages[index] = current.copyWith(
+            status: 'streaming',
+            textContent: '${current.textContent ?? ''}$delta',
+          );
+        }
+        break;
+      case 'assistant_message':
+        final messageJson = event.data['message'] as Map<String, dynamic>? ?? <String, dynamic>{};
+        _replaceOrAppendMessage(ConversationMessageItem.fromJson(messageJson));
+        break;
+      case 'card_upsert':
+        final messageJson = event.data['message'] as Map<String, dynamic>? ?? <String, dynamic>{};
+        _replaceOrAppendMessage(ConversationMessageItem.fromJson(messageJson));
+        break;
+      case 'tool_status':
+        _streamStatusLabel = event.data['label'] as String?;
+        break;
+      case 'run_failed':
+        final index = _messages.indexWhere((item) => item.id == assistantMessageId);
+        if (index >= 0) {
+          _messages[index] = _messages[index].copyWith(status: 'failed');
+        }
+        _lastError = event.data['message'] as String?;
+        break;
+      case 'run_completed':
+        _streamStatusLabel = null;
+        final index = _messages.indexWhere((item) => item.id == assistantMessageId);
+        if (index >= 0) {
+          _messages[index] = _messages[index].copyWith(status: 'completed');
+        }
+        break;
+    }
     notifyListeners();
   }
 
@@ -232,6 +348,24 @@ class AppController extends ChangeNotifier {
     _quickNotes = results[1] as List<QuickNoteItem>;
     _notifications = results[2] as List<NotificationItem>;
     _conversations = results[3] as List<ConversationThreadItem>;
+  }
+
+  void _replaceMessage(int targetId, ConversationMessageItem replacement) {
+    final index = _messages.indexWhere((item) => item.id == targetId);
+    if (index >= 0) {
+      _messages[index] = replacement;
+      return;
+    }
+    _messages = <ConversationMessageItem>[..._messages, replacement];
+  }
+
+  void _replaceOrAppendMessage(ConversationMessageItem item) {
+    final index = _messages.indexWhere((current) => current.id == item.id);
+    if (index >= 0) {
+      _messages[index] = item;
+      return;
+    }
+    _messages = <ConversationMessageItem>[..._messages, item];
   }
 
   void _upsertConversation(ConversationThreadItem item, {required bool moveToFront}) {

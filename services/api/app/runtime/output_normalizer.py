@@ -30,12 +30,7 @@ class OutputNormalizer:
         tz_name = timezone_name or get_settings().default_timezone
         tz = ZoneInfo(tz_name)
         now = reference_time.astimezone(tz) if reference_time else datetime.now(tz)
-        normalized = (
-            text.replace("：", ":")
-            .replace("（", "(")
-            .replace("）", ")")
-            .replace("，", ",")
-        )
+        normalized = re.sub(r"\s+", " ", text.strip())
 
         day = None
         if "今天" in normalized:
@@ -45,33 +40,28 @@ class OutputNormalizer:
         elif "后天" in normalized:
             day = (now + timedelta(days=2)).date()
         else:
-            weekday_match = re.search(r"(本周|这周|下周)([一二三四五六日天])", normalized)
+            weekday_match = re.search(r"(本周|这周|下周)(一|二|三|四|五|六|日|天)", normalized)
             if weekday_match:
                 prefix, weekday_text = weekday_match.groups()
                 weekday_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
                 target = weekday_map[weekday_text]
-                current = now.weekday()
-                delta = target - current
+                delta = target - now.weekday()
                 if prefix == "下周":
                     delta += 7 if delta <= 0 else 7
                 elif delta < 0:
                     delta += 7
                 day = (now + timedelta(days=delta)).date()
             else:
-                full_date_match = re.search(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日", normalized)
-                if full_date_match:
-                    year_text, month_text, day_text = full_date_match.groups()
+                date_match = re.search(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日", normalized)
+                if date_match:
+                    year_text, month_text, day_text = date_match.groups()
                     year = int(year_text) if year_text else now.year
                     month = int(month_text)
                     day_number = int(day_text)
-                    try:
-                        candidate = datetime(year, month, day_number, tzinfo=tz)
-                    except ValueError:
-                        candidate = None
-                    if candidate is not None and not year_text and candidate.date() < now.date():
+                    candidate = datetime(year, month, day_number, tzinfo=tz)
+                    if not year_text and candidate.date() < now.date():
                         candidate = datetime(year + 1, month, day_number, tzinfo=tz)
-                    if candidate is not None:
-                        day = candidate.date()
+                    day = candidate.date()
 
         if day is None:
             return None, False
@@ -80,10 +70,10 @@ class OutputNormalizer:
         minute = 0
         precise = False
 
-        hm_match = re.search(r"(\d{1,2})[:：](\d{1,2})", normalized)
-        if hm_match:
-            hour = int(hm_match.group(1))
-            minute = int(hm_match.group(2))
+        time_match = re.search(r"(\d{1,2}):(\d{1,2})", normalized)
+        if time_match:
+            hour = int(time_match.group(1))
+            minute = int(time_match.group(2))
             precise = True
         else:
             half_match = re.search(r"(\d{1,2})点半", normalized)
@@ -92,10 +82,10 @@ class OutputNormalizer:
                 minute = 30
                 precise = True
             else:
-                full_match = re.search(r"(\d{1,2})点(?:(\d{1,2})分?)?", normalized)
-                if full_match:
-                    hour = int(full_match.group(1))
-                    minute = int(full_match.group(2) or 0)
+                hour_match = re.search(r"(\d{1,2})点(?:(\d{1,2})分)?", normalized)
+                if hour_match:
+                    hour = int(hour_match.group(1))
+                    minute = int(hour_match.group(2) or 0)
                     precise = True
 
         if hour is None:
@@ -108,8 +98,7 @@ class OutputNormalizer:
         elif "凌晨" in normalized and hour == 12:
             hour = 0
 
-        inferred = datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz)
-        return inferred, precise
+        return datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz), precise
 
     @staticmethod
     def coerce_string_list(items: object) -> list[str]:

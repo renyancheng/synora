@@ -1,15 +1,13 @@
-import 'models.dart';
-
 class AppStrings {
   static const appTitle = 'Synora';
-  static const loginSubtitle = '登录后即可直接和 Synora 对话，由 AI 帮你整理日程、速记与提醒。';
+  static const loginSubtitle = '登录后，直接把事情交给 Synora。';
   static const loginButton = '登录';
   static const emailLabel = '邮箱';
   static const passwordLabel = '密码';
-  static const emailRequired = '请输入邮箱。';
-  static const passwordRequired = '请输入密码。';
-  static const loggingIn = '登录中…';
-  static const loginRequired = '请先登录。';
+  static const emailRequired = '请输入邮箱';
+  static const passwordRequired = '请输入密码';
+  static const loggingIn = '登录中...';
+  static const loginRequired = '请先登录';
   static const loginExpired = '登录已失效，请重新登录。';
 
   static const settings = '设置';
@@ -23,12 +21,13 @@ class AppStrings {
   static const logoutConfirmTitle = '退出登录';
   static const logoutConfirmMessage = '确定退出当前账号吗？';
 
-  static const composerHint = '直接告诉我你的安排、灵感，或发送截图、聊天记录、邮件内容。';
-  static const send = '发送';
-  static const attach = '附件';
+  static const composerHint = '把事情说明白';
+  static const attach = '添加附件';
   static const voice = '语音';
-  static const voiceComingSoon = '语音输入即将支持。';
-  static const loading = '加载中…';
+  static const send = '发送';
+  static const sending = '发送中';
+  static const voiceComingSoon = '语音即将支持。';
+  static const loading = '加载中...';
   static const loadFailed = '加载失败，请稍后重试。';
   static const emptyConversation = '开始一段新对话吧。';
   static const emptyConversationHistory = '还没有历史对话。';
@@ -36,30 +35,31 @@ class AppStrings {
   static const emptyQuickNotes = '还没有速记，有想法时随时记下来。';
   static const emptyNotifications = '还没有提醒记录。';
   static const noContent = '暂无内容';
+  static const sendEmptyMessage = '请输入内容或先添加附件。';
 
-  static const currentInputType = '当前输入类型';
-  static const chooseInputType = '选择输入方式';
-  static const plainText = '普通文本';
-  static const pasteChatRecord = '将本次输入标记为聊天记录';
-  static const pasteEmail = '将本次输入标记为邮件内容';
-  static const importScreenshot = '导入截图/图片';
-  static const importPhoto = '拍照导入';
-  static const importChatFile = '导入聊天文件';
-  static const importEmailFile = '导入邮件文件';
+  static const attachmentGallery = '相册';
+  static const attachmentCamera = '相机';
+  static const attachmentFile = '文件';
   static const selectedAttachments = '已选附件';
   static const removeAttachment = '移除附件';
-  static const sendEmptyMessage = '请输入内容或先添加附件。';
-  static const uploadHint = '如果 OCR 失败，可以改为手动粘贴文本。';
+  static const unsupportedMailFile = '可直接粘贴邮件正文，不支持导入邮件文件。';
+
+  static const scheduleTool = '日程';
+  static const scheduleToolDescription = '提取时间地点，生成可提醒的安排';
+  static const quickNoteTool = '速记';
+  static const quickNoteToolDescription = '整理想法与待办，留待稍后回看';
+  static const toolAuto = '自动判断';
+  static const selectedToolPrefix = '本次工具';
 
   static const scheduleDraft = '日程草稿';
-  static const conflictCheck = '冲突检测';
+  static const conflictCheck = '冲突检查';
   static const quickNotePreview = '速记预览';
   static const resultCard = '处理结果';
   static const titleField = '标题';
-  static const timeField = '时间';
+  static const startField = '开始时间';
+  static const endField = '结束时间';
   static const locationField = '地点';
   static const detailsField = '详情';
-  static const reminderField = '提醒时间';
   static const tagsField = '标签';
   static const evidenceField = '提取依据';
   static const ambiguityField = '歧义提示';
@@ -68,8 +68,13 @@ class AppStrings {
   static const conflictItemsField = '冲突项';
   static const suggestionsField = '建议时段';
   static const riskLevelField = '风险等级';
+  static const recurrenceField = '重复规则';
+  static const allDayField = '全天';
+  static const timeZoneField = '时区';
+  static const reminderField = '提醒策略';
+  static const lifecycleField = '当前状态';
   static const confirmSave = '确认保存';
-  static const confirmAction = '确认';
+  static const confirmAction = '知道了';
   static const submitMissingFields = '提交补充信息';
   static const cancelPendingAction = '取消本次操作';
   static const saveSuccess = '保存成功。';
@@ -79,7 +84,7 @@ class AppStrings {
   static const delete = '删除';
   static const deleteScheduleTitle = '删除日程';
   static const deleteQuickNoteTitle = '删除速记';
-  static const deleteScheduleMessage = '删除后将同步移除相关提醒记录，确定继续吗？';
+  static const deleteScheduleMessage = '删除后会同步移除相关提醒记录，确定继续吗？';
   static const deleteQuickNoteMessage = '删除后无法恢复，确定继续吗？';
   static const cancel = '取消';
   static const deleteDone = '已删除。';
@@ -87,47 +92,40 @@ class AppStrings {
   static const scheduleCreatedSummary = '日程已创建并安排提醒。';
   static const quickNoteSavedSummary = '速记已保存。';
 
-  static String sourceLabel(InputSourceType sourceType) {
-    switch (sourceType) {
-      case InputSourceType.text:
-        return plainText;
-      case InputSourceType.screenshot:
-        return '截图';
-      case InputSourceType.photo:
-        return '拍照';
-      case InputSourceType.chatRecord:
-        return '聊天记录';
-      case InputSourceType.email:
-        return '邮件内容';
+  static const createTimeField = '创建时间';
+  static const deliveryTimeField = '送达时间';
+  static const failureReasonField = '失败原因';
+  static const retryCountField = '重试次数';
+
+  static String toolLabel(String? tool) {
+    switch (tool) {
+      case 'schedule':
+        return scheduleTool;
+      case 'quick_note':
+        return quickNoteTool;
+      default:
+        return toolAuto;
     }
   }
 
-  static String sourceFieldLabel(InputSourceType sourceType) {
-    switch (sourceType) {
-      case InputSourceType.text:
-        return '输入内容';
-      case InputSourceType.screenshot:
-      case InputSourceType.photo:
-        return '补充说明（可选）';
-      case InputSourceType.chatRecord:
-        return '粘贴聊天记录（可选）';
-      case InputSourceType.email:
-        return '粘贴邮件正文（可选）';
-    }
-  }
-
-  static String sourceHint(InputSourceType sourceType) {
-    switch (sourceType) {
-      case InputSourceType.text:
-        return '例如：明天下午三点在学院会议室开教学例会';
-      case InputSourceType.screenshot:
-        return '可以补充截图来源或备注。';
-      case InputSourceType.photo:
-        return '可以补充照片背景或上下文。';
-      case InputSourceType.chatRecord:
-        return '支持直接粘贴聊天内容，也支持导入截图、TXT、JSON、PDF。';
-      case InputSourceType.email:
-        return '支持直接粘贴邮件正文，也支持导入 EML、截图、PDF。';
+  static String lifecycleLabel(String lifecycle) {
+    switch (lifecycle) {
+      case 'needs_input':
+        return '待补充';
+      case 'approval_pending':
+        return '待确认';
+      case 'conflict_review':
+        return '待检查';
+      case 'completed':
+        return '已完成';
+      case 'cancelled':
+        return '已取消';
+      case 'expired':
+        return '已过期';
+      case 'superseded':
+        return '已替代';
+      default:
+        return '处理中';
     }
   }
 
@@ -135,8 +133,10 @@ class AppStrings {
     switch (field) {
       case 'title':
         return titleField;
-      case 'scheduled_at':
-        return timeField;
+      case 'start_at':
+        return startField;
+      case 'end_at':
+        return endField;
       case 'location':
         return locationField;
       case 'details':
@@ -151,7 +151,7 @@ class AppStrings {
       case 'time_ambiguous':
         return '时间可能存在歧义';
       case 'year_inferred':
-        return '年份为系统推断';
+        return '年份由系统推断';
       case 'location_ambiguous':
         return '地点可能存在歧义';
       default:
@@ -215,19 +215,13 @@ class AppStrings {
       if (message.contains('网络') || lower.contains('connection') || lower.contains('network')) {
         return '企业微信网络请求失败，请检查服务端网络。';
       }
-      if (message.contains('http')) {
-        return '企业微信服务暂时不可用，请稍后重试。';
-      }
       if (message.contains('无法解析') || lower.contains('json')) {
         return '企业微信返回了异常响应，请稍后重试。';
       }
-      final codeMatch = RegExp(r'(\d{4,6})').firstMatch(message);
+      final match = RegExp(r'(\d{4,6})').firstMatch(message);
       if (message.contains('错误码') || message.contains('errcode')) {
-        final code = codeMatch?.group(1);
-        if (code != null) {
-          return '企业微信机器人拒绝了本次消息（错误码 $code）。';
-        }
-        return '企业微信机器人拒绝了本次消息。';
+        final code = match?.group(1);
+        return code == null ? '企业微信机器人拒绝了本次消息。' : '企业微信机器人拒绝了本次消息（错误码 $code）。';
       }
       return '企业微信推送失败，请稍后重试。';
     }

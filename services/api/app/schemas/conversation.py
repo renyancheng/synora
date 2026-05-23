@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.schemas.common import SourceType
+from app.schemas.common import SelectedTool
 
 
 class ConversationThreadItem(BaseModel):
@@ -20,8 +20,11 @@ class ConversationMessageItem(BaseModel):
     id: int
     role: str
     message_type: str
+    status: str = "completed"
     text_content: str | None = None
     structured_payload: dict[str, Any] = Field(default_factory=dict)
+    action_group_id: str | None = None
+    revision: int = 1
     created_at: datetime
 
 
@@ -46,17 +49,18 @@ class ConversationMessagesResponse(BaseModel):
 
 
 class ConversationSendMessageRequest(BaseModel):
-    source_type: SourceType = "text"
     text_content: str | None = None
     attachment_ids: list[int] = Field(default_factory=list)
+    selected_tool: SelectedTool | None = None
     context: dict[str, str] = Field(default_factory=dict)
 
 
 class ConversationSendMessageResponse(BaseModel):
-    status: str = "ok"
+    status: str = "accepted"
     conversation: ConversationThreadItem
     user_message: ConversationMessageItem
-    assistant_messages: list[ConversationMessageItem]
+    assistant_message_id: int
+    stream_id: str
 
 
 class ConversationActionRequest(BaseModel):

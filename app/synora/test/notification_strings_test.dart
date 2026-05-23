@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synora/src/strings.dart';
 
+
 void main() {
   test('企业微信错误原因映射为中文', () {
     expect(

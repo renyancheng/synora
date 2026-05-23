@@ -5,6 +5,7 @@ import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
 
+
 class QuickNoteListPage extends StatelessWidget {
   const QuickNoteListPage({super.key, required this.controller});
 
@@ -23,9 +24,9 @@ class QuickNoteListPage extends StatelessWidget {
             const SizedBox(height: 12),
             Text('${AppStrings.tagsField}：${item.tags.isEmpty ? AppStrings.noContent : item.tags.join('、')}'),
             const SizedBox(height: 8),
-            Text('${AppStrings.currentInputType}：${AppStrings.sourceLabel(item.sourceType)}'),
+            Text('${AppStrings.selectedAttachments}：${item.sourceAttachmentIds.length}'),
             const SizedBox(height: 8),
-            Text('创建时间：${formatDateTime(item.createdAt)}'),
+            Text('${AppStrings.createTimeField}：${formatDateTime(item.createdAt)}'),
           ],
         ),
         actions: <Widget>[
@@ -111,6 +112,7 @@ class QuickNoteListPage extends StatelessWidget {
     );
   }
 }
+
 
 class _EmptyPanel extends StatelessWidget {
   const _EmptyPanel(this.text);

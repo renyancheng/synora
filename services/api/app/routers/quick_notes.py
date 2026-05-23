@@ -30,7 +30,6 @@ def create_quick_note_draft_endpoint(
     return QuickNoteDraftResponse(
         normalized_content=normalized_content,
         preview_tags=preview_tags,
-        source_type=payload.source_type,
         attachment_ids=payload.attachment_ids,
         evidence_digest=evidence_digest,
         approval={
@@ -54,7 +53,6 @@ def confirm_quick_note(
             current_user.id,
             content=payload.content,
             tags=payload.tags,
-            source_type=payload.source_type,
             attachment_ids=payload.attachment_ids,
             approval_token=payload.approval_token,
         )
@@ -75,7 +73,7 @@ def get_quick_notes(
             content=row.content,
             tags=[tag for tag in row.tags_csv.split(",") if tag],
             created_at=row.created_at,
-            source_type=row.source_type,
+            source_attachment_ids=list(row.source_attachment_ids or []),
         )
         for row in rows
     ]

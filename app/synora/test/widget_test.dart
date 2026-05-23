@@ -6,6 +6,7 @@ import 'package:synora/src/app_controller.dart';
 import 'package:synora/src/models.dart';
 import 'package:synora/src/strings.dart';
 
+
 class FakeApiClient extends ApiClient {
   FakeApiClient() : super(baseUrl: 'http://localhost:8000');
 
@@ -59,6 +60,7 @@ class FakeApiClient extends ApiClient {
           id: 1,
           role: 'assistant',
           messageType: 'text',
+          status: 'completed',
           textContent: '你好，我在这里。',
           structuredPayload: const <String, dynamic>{},
           createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
@@ -67,6 +69,7 @@ class FakeApiClient extends ApiClient {
     );
   }
 }
+
 
 void main() {
   testWidgets('默认显示中文登录页', (tester) async {
@@ -87,7 +90,7 @@ void main() {
     expect(find.text(AppStrings.appTitle), findsOneWidget);
     expect(find.text('你好，我在这里。'), findsOneWidget);
 
-    await tester.tap(find.byIcon(Icons.menu));
+    await tester.tap(find.byTooltip('打开导航菜单'));
     await tester.pumpAndSettle();
 
     expect(find.text(AppStrings.mySchedules), findsOneWidget);

@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from app.runtime.executor import Executor
-from app.runtime.model_adapter import ModelAdapter
-from app.runtime.planner import Planner
-from app.runtime.tool_impls import parse_schedule_draft, record_quick_note
-from app.runtime.tool_registry import ToolRegistry
-
 
 @lru_cache
-def get_runtime_executor() -> Executor:
+def get_runtime_executor():
+    from app.runtime.executor import Executor
+    from app.runtime.model_adapter import ModelAdapter
+    from app.runtime.planner import Planner
+    from app.runtime.tool_impls import parse_schedule_draft, record_quick_note
+    from app.runtime.tool_registry import ToolRegistry
+
     model_adapter = ModelAdapter()
     planner = Planner(model_adapter)
     registry = ToolRegistry()

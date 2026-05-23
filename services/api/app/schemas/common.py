@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
-SourceType = Literal["text", "screenshot", "photo", "chat_record", "email"]
+SelectedTool = Literal["schedule", "quick_note"]
 
 
 class ApiEnvelope(BaseModel):
@@ -25,3 +25,9 @@ class ApprovalInfo(BaseModel):
     expires_at: datetime
     draft_hash: str
 
+
+class EventDateTimeValue(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    date_time: datetime = Field(alias="dateTime")
+    time_zone: str = Field(alias="timeZone")

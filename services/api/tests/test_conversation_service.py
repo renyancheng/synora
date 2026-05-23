@@ -7,13 +7,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import Base
-from app.domains.conversation.service import apply_action, create_conversation, send_message
+from app.domains.conversation.service import apply_action, consume_stream, create_conversation, queue_message
 from app.domains.quick_note.service import delete_note
 from app.domains.schedule.service import delete_schedule
 from app.models import ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
 from app.runtime.model_adapter import ModelAdapter
+from app.schemas.common import EventDateTimeValue
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
-from app.schemas.schedule import ConflictCheckResponse, ScheduleDraft
+from app.schemas.schedule import ConflictCheckResponse, ScheduleEventDraft
 
 
 class ConversationServiceTests(unittest.TestCase):
@@ -36,38 +37,39 @@ class ConversationServiceTests(unittest.TestCase):
         self.db.close()
         self.engine.dispose()
 
-    def _draft(self) -> ScheduleDraft:
-        return ScheduleDraft(
+    def _draft(self) -> ScheduleEventDraft:
+        return ScheduleEventDraft(
             title="教学例会",
             location="学院会议室",
             details="讨论课程安排",
             source_text="明天下午三点开教学例会",
-            scheduled_at=datetime(2026, 5, 24, 15, 0, tzinfo=timezone.utc),
-            duration_minutes=60,
-            reminder_at=datetime(2026, 5, 24, 14, 30, tzinfo=timezone.utc),
-            source_type="text",
+            isAllDay=False,
+            start=EventDateTimeValue(dateTime=datetime.fromisoformat("2026-05-24T15:00:00+08:00"), timeZone="Asia/Shanghai"),
+            end=EventDateTimeValue(dateTime=datetime.fromisoformat("2026-05-24T16:00:00+08:00"), timeZone="Asia/Shanghai"),
+            recurrence=[],
             source_attachment_ids=[],
             parse_confidence=0.92,
             evidence_digest=["明天下午三点", "教学例会"],
         )
 
-    @patch.object(ModelAdapter, "generate_chat_reply", return_value="好的，我来帮你一起整理。")
+    @patch.object(ModelAdapter, "stream_chat_reply_chunks", return_value=iter(["好的，", "我来帮你一起整理。"]))
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学安排")
     @patch.object(ModelAdapter, "route_conversation_intent", return_value="general_chat")
     def test_send_general_chat_message(self, _intent_mock, _title_mock, _reply_mock) -> None:
         thread = create_conversation(self.db, self.user.id)
-
-        _, user_message, assistant_messages = send_message(
+        _, user_message, assistant_message, agent_run = queue_message(
             self.db,
             self.user.id,
             thread.id,
             ConversationSendMessageRequest(text_content="你好，帮我看看今天安排。"),
         )
 
+        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
+
         self.assertEqual(user_message.text_content, "你好，帮我看看今天安排。")
-        self.assertEqual(assistant_messages[0].text_content, "好的，我来帮你一起整理。")
-        refreshed = self.db.get(type(thread), thread.id)
-        self.assertEqual(refreshed.title, "教学安排")
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertEqual(self.db.get(type(thread), thread.id).title, "教学安排")
+        self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "好的，我来帮你一起整理。")
 
     @patch("app.domains.conversation.service.detect_conflicts")
     @patch("app.domains.conversation.service.create_schedule_draft")
@@ -89,17 +91,19 @@ class ConversationServiceTests(unittest.TestCase):
         )
         thread = create_conversation(self.db, self.user.id)
 
-        _, _, assistant_messages = send_message(
+        _, _, _, agent_run = queue_message(
             self.db,
             self.user.id,
             thread.id,
             ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会。"),
         )
+        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
 
-        self.assertEqual([item.message_type for item in assistant_messages], ["text", "schedule_draft_card", "conflict_card"])
+        card_events = [item for item in events if item["event"] == "card_upsert"]
+        self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["schedule_draft_card", "conflict_card"])
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNotNone(pending)
-        self.assertEqual(pending.stage, "awaiting_confirmation")
+        self.assertEqual(pending.stage, "approval_pending")
 
     @patch("app.domains.conversation.service.create_schedule_after_approval")
     @patch("app.domains.conversation.service.detect_conflicts")
@@ -131,19 +135,20 @@ class ConversationServiceTests(unittest.TestCase):
             SimpleNamespace(
                 id=10,
                 title="教学例会",
-                scheduled_at=draft.scheduled_at,
-                reminder_at=draft.reminder_at,
-                location="学院会议室",
+                start_at=datetime.fromisoformat("2026-05-24T07:00:00+00:00"),
+                end_at=datetime.fromisoformat("2026-05-24T08:00:00+00:00"),
+                time_zone="Asia/Shanghai",
             ),
             [SimpleNamespace(channel="email"), SimpleNamespace(channel="wecom_robot")],
         )
         thread = create_conversation(self.db, self.user.id)
-        send_message(
+        _, _, _, agent_run = queue_message(
             self.db,
             self.user.id,
             thread.id,
             ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会。"),
         )
+        list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
 
         _, assistant_messages = apply_action(
             self.db,
@@ -180,14 +185,16 @@ class ConversationServiceTests(unittest.TestCase):
             topic_tags_json=["科研", "待办"],
         )
         thread = create_conversation(self.db, self.user.id)
-        _, _, assistant_messages = send_message(
+        _, _, _, agent_run = queue_message(
             self.db,
             self.user.id,
             thread.id,
             ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录。"),
         )
+        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
+        card_events = [item for item in events if item["event"] == "card_upsert"]
 
-        self.assertEqual([item.message_type for item in assistant_messages], ["text", "quick_note_preview_card"])
+        self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["quick_note_preview_card"])
 
         _, confirm_messages = apply_action(
             self.db,
@@ -204,12 +211,18 @@ class ConversationServiceTests(unittest.TestCase):
             location="会议室",
             details="测试",
             source_text="测试",
+            start_at=datetime.now(timezone.utc),
+            end_at=datetime.now(timezone.utc),
+            time_zone="Asia/Shanghai",
+            is_all_day=False,
+            recurrence_rules_json=[],
+            reminder_offsets_minutes_json=[-30],
+            source_attachment_ids=[],
+            parse_confidence=0.8,
             scheduled_at=datetime.now(timezone.utc),
             duration_minutes=60,
             reminder_at=datetime.now(timezone.utc),
             source_type="text",
-            source_attachment_ids=[],
-            parse_confidence=0.8,
         )
         self.db.add(schedule)
         self.db.commit()

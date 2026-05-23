@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from app.schemas.common import SourceType
-
 
 class PolicyGuard:
-    allowed_source_types: set[SourceType] = {"text", "screenshot", "photo", "chat_record", "email"}
+    allowed_tools: set[str] = {"schedule", "quick_note"}
 
-    def validate_source_type(self, source_type: str) -> None:
-        if source_type not in self.allowed_source_types:
-            raise ValueError("不支持的输入类型。")
+    def validate_selected_tool(self, selected_tool: str | None) -> None:
+        if selected_tool is not None and selected_tool not in self.allowed_tools:
+            raise ValueError("不支持的工具选择。")
 
     def ensure_write_allowed(self, approval_token: str | None) -> None:
         if not approval_token:

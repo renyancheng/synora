@@ -3,13 +3,30 @@ import 'package:image_picker/image_picker.dart';
 
 import 'models.dart';
 
+
 class AttachmentPicker {
-  static Future<List<LocalAttachmentData>> pickFiles({List<String>? allowedExtensions}) async {
+  static Future<List<LocalAttachmentData>> pickGalleryImages() async {
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
       withData: true,
-      type: allowedExtensions == null ? FileType.any : FileType.custom,
-      allowedExtensions: allowedExtensions,
+      type: FileType.custom,
+      allowedExtensions: <String>['png', 'jpg', 'jpeg', 'webp'],
+    );
+    if (result == null) {
+      return <LocalAttachmentData>[];
+    }
+    return result.files
+        .where((file) => file.bytes != null)
+        .map((file) => LocalAttachmentData(fileName: file.name, bytes: file.bytes!))
+        .toList();
+  }
+
+  static Future<List<LocalAttachmentData>> pickFiles() async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      withData: true,
+      type: FileType.custom,
+      allowedExtensions: <String>['png', 'jpg', 'jpeg', 'webp', 'pdf', 'txt', 'json', 'csv', 'md'],
     );
     if (result == null) {
       return <LocalAttachmentData>[];
@@ -22,7 +39,7 @@ class AttachmentPicker {
 
   static Future<LocalAttachmentData?> pickPhoto() async {
     final picker = ImagePicker();
-    final image = await picker.pickImage(source: ImageSource.camera, imageQuality: 75);
+    final image = await picker.pickImage(source: ImageSource.camera, imageQuality: 80);
     if (image == null) {
       return null;
     }

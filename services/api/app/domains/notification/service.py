@@ -5,6 +5,7 @@ import smtplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from json import JSONDecodeError
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -135,7 +136,9 @@ def send_wecom_robot_notification(db: Session, audit_id: int) -> NotificationAud
 def collect_due_jobs(db: Session) -> list[ReminderJob]:
     now = datetime.now(timezone.utc)
     return db.scalars(
-        select(ReminderJob).where(ReminderJob.status == "pending", ReminderJob.scheduled_for <= now).order_by(ReminderJob.scheduled_for.asc())
+        select(ReminderJob)
+        .where(ReminderJob.status == "pending", ReminderJob.scheduled_for <= now)
+        .order_by(ReminderJob.scheduled_for.asc())
     ).all()
 
 
@@ -149,18 +152,31 @@ def mark_job_status(db: Session, job: ReminderJob, status: str, error_message: s
     return job
 
 
+def _format_event_time(schedule: Schedule) -> str:
+    start = schedule.start_at.astimezone(ZoneInfo(schedule.time_zone))
+    end = schedule.end_at.astimezone(ZoneInfo(schedule.time_zone))
+    if schedule.is_all_day:
+        return f"{start.year}年{start.month:02d}月{start.day:02d}日 全天"
+    return (
+        f"{start.year}年{start.month:02d}月{start.day:02d}日 {start.hour:02d}:{start.minute:02d}"
+        f" - {end.hour:02d}:{end.minute:02d}"
+    )
+
+
 def build_notification_payload(schedule: Schedule) -> dict[str, str]:
+    time_label = _format_event_time(schedule)
+    location = schedule.location or "未填写"
     body = (
         f"提醒事项：{schedule.title}\n"
-        f"时间：{schedule.scheduled_at.astimezone(timezone.utc).isoformat()}\n"
-        f"地点：{schedule.location or '未填写'}\n"
+        f"时间：{time_label}\n"
+        f"地点：{location}\n"
         f"备注：{schedule.details}"
     )
     markdown = (
         f"**Synora 日程提醒**\n"
         f"> 事项：{schedule.title}\n"
-        f"> 时间：{schedule.scheduled_at.astimezone(timezone.utc).isoformat()}\n"
-        f"> 地点：{schedule.location or '未填写'}\n"
+        f"> 时间：{time_label}\n"
+        f"> 地点：{location}\n"
         f"> 备注：{schedule.details}"
     )
     return {

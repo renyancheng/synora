@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+
 
 class ApiException implements Exception {
   ApiException(this.message);
@@ -13,6 +15,7 @@ class ApiException implements Exception {
   @override
   String toString() => message;
 }
+
 
 class ApiClient {
   ApiClient({String? baseUrl}) : _baseUrl = baseUrl ?? _defaultBaseUrl();
@@ -46,15 +49,11 @@ class ApiClient {
     return session;
   }
 
-  Future<UploadedAttachment> uploadAttachment(
-    InputSourceType sourceType,
-    LocalAttachmentData attachment,
-  ) async {
+  Future<UploadedAttachment> uploadAttachment(LocalAttachmentData attachment) async {
     final request = http.MultipartRequest(
       'POST',
       Uri.parse('${_normalizedBase()}/attachments/upload'),
     );
-    request.fields['source_type'] = sourceType.apiValue;
     request.headers.addAll(_authHeaders(includeJson: false));
     request.files.add(
       http.MultipartFile.fromBytes(
@@ -114,11 +113,11 @@ class ApiClient {
     return (conversation, items);
   }
 
-  Future<ConversationSendMessageResult> sendConversationMessage({
+  Future<ConversationSendAcceptedResult> sendConversationMessage({
     required int conversationId,
     required String textContent,
-    required InputSourceType sourceType,
     required List<int> attachmentIds,
+    ConversationTool? selectedTool,
     Map<String, String> context = const <String, String>{},
   }) async {
     final json = await _sendJson(
@@ -126,12 +125,50 @@ class ApiClient {
       '/agent/conversations/$conversationId/messages',
       body: {
         'text_content': textContent,
-        'source_type': sourceType.apiValue,
         'attachment_ids': attachmentIds,
+        'selected_tool': selectedTool?.apiValue,
         'context': context,
       },
     );
-    return ConversationSendMessageResult.fromJson(json as Map<String, dynamic>);
+    return ConversationSendAcceptedResult.fromJson(json as Map<String, dynamic>);
+  }
+
+  Stream<ConversationStreamEvent> streamConversation({
+    required int conversationId,
+    required String streamId,
+  }) async* {
+    final request = http.Request(
+      'GET',
+      Uri.parse('${_normalizedBase()}/agent/conversations/$conversationId/streams/$streamId'),
+    );
+    request.headers.addAll(_authHeaders(includeJson: false));
+    request.headers['Accept'] = 'text/event-stream';
+    final response = await _httpClient.send(request);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final body = await response.stream.bytesToString();
+      final decoded = body.isEmpty ? null : jsonDecode(body);
+      throw ApiException(_extractErrorMessage(decoded, response.statusCode));
+    }
+
+    String? currentEvent;
+    final dataLines = <String>[];
+    await for (final line in response.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+      if (line.isEmpty) {
+        if (currentEvent != null) {
+          final dataText = dataLines.join('\n').trim();
+          final decoded = dataText.isEmpty ? <String, dynamic>{} : jsonDecode(dataText) as Map<String, dynamic>;
+          yield ConversationStreamEvent(event: currentEvent, data: decoded);
+        }
+        currentEvent = null;
+        dataLines.clear();
+        continue;
+      }
+      if (line.startsWith('event:')) {
+        currentEvent = line.substring(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.add(line.substring(5).trim());
+      }
+    }
   }
 
   Future<ConversationActionResult> performConversationAction({

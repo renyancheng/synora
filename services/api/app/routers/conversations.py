@@ -1,14 +1,19 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies import get_current_user
 from app.domains.conversation.service import (
     apply_action,
+    consume_stream,
     create_conversation,
+    get_conversation,
     list_conversations,
     list_messages,
-    send_message,
+    queue_message,
 )
 from app.models import ConversationMessage, ConversationThread, User
 from app.schemas.conversation import (
@@ -42,8 +47,11 @@ def _message_item(message: ConversationMessage) -> ConversationMessageItem:
         id=message.id,
         role=message.role,
         message_type=message.message_type,
+        status=message.status,
         text_content=message.text_content,
         structured_payload=dict(message.structured_payload_json or {}),
+        action_group_id=message.action_group_id,
+        revision=message.revision,
         created_at=message.created_at,
     )
 
@@ -91,13 +99,47 @@ def send_conversation_message(
     current_user: User = Depends(get_current_user),
 ) -> ConversationSendMessageResponse:
     try:
-        thread, user_message, assistant_messages = send_message(db, current_user.id, conversation_id, payload)
+        thread, user_message, assistant_message, agent_run = queue_message(db, current_user.id, conversation_id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return ConversationSendMessageResponse(
         conversation=_thread_item(thread),
         user_message=_message_item(user_message),
-        assistant_messages=[_message_item(item) for item in assistant_messages],
+        assistant_message_id=assistant_message.id,
+        stream_id=agent_run.stream_token or "",
+    )
+
+
+@router.get("/{conversation_id}/streams/{stream_id}")
+def stream_conversation_message(
+    conversation_id: int,
+    stream_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    try:
+        get_conversation(db, current_user.id, conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    def event_source():
+        try:
+            for item in consume_stream(db, current_user.id, conversation_id, stream_id):
+                event = item["event"]
+                data = json.dumps(item["data"], ensure_ascii=False)
+                yield f"event: {event}\ndata: {data}\n\n"
+        except ValueError as exc:
+            payload = json.dumps({"message": str(exc)}, ensure_ascii=False)
+            yield f"event: run_failed\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

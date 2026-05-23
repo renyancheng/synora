@@ -2,27 +2,28 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.common import ApprovalInfo, SourceType
+from app.schemas.common import ApprovalInfo, EventDateTimeValue
 
 
 class ScheduleDraftInput(BaseModel):
-    source_type: SourceType
     text_content: str | None = None
     attachment_ids: list[int] = Field(default_factory=list)
     context: dict[str, str] = Field(default_factory=dict)
 
 
-class ScheduleDraft(BaseModel):
+class ScheduleEventDraft(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     title: str
     location: str | None = None
     details: str
     source_text: str
-    scheduled_at: datetime | None = None
-    duration_minutes: int = 60
-    reminder_at: datetime | None = None
-    source_type: SourceType = "text"
+    is_all_day: bool = Field(default=False, alias="isAllDay")
+    start: EventDateTimeValue
+    end: EventDateTimeValue
+    recurrence: list[str] = Field(default_factory=list)
     source_attachment_ids: list[int] = Field(default_factory=list)
     parse_confidence: float = 0.0
     evidence_digest: list[str] = Field(default_factory=list)
@@ -30,7 +31,7 @@ class ScheduleDraft(BaseModel):
 
 class ScheduleDraftResponse(BaseModel):
     status: str = "ok"
-    draft: ScheduleDraft
+    draft: ScheduleEventDraft
     draft_hash: str
     missing_fields: list[str]
     ambiguity_flags: list[str]
@@ -39,22 +40,22 @@ class ScheduleDraftResponse(BaseModel):
 
 
 class ConflictCheckRequest(BaseModel):
-    draft: ScheduleDraft
+    draft: ScheduleEventDraft
     draft_hash: str
 
 
 class ConflictItem(BaseModel):
     schedule_id: int
     title: str
-    starts_at: datetime
-    ends_at: datetime
+    start: EventDateTimeValue
+    end: EventDateTimeValue
     location: str | None = None
 
 
 class ConflictSuggestion(BaseModel):
     label: str
-    candidate_start: datetime
-    candidate_end: datetime
+    start: EventDateTimeValue
+    end: EventDateTimeValue
 
 
 class ConflictCheckResponse(BaseModel):
@@ -67,7 +68,7 @@ class ConflictCheckResponse(BaseModel):
 
 class ScheduleConfirmRequest(BaseModel):
     approval_token: str
-    normalized_draft: ScheduleDraft
+    normalized_draft: ScheduleEventDraft
 
 
 class ReminderJobInfo(BaseModel):
@@ -84,15 +85,17 @@ class ScheduleConfirmResponse(BaseModel):
 
 
 class ScheduleItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: int
     title: str
     location: str | None = None
     details: str
-    scheduled_at: datetime
-    duration_minutes: int
-    reminder_at: datetime
+    is_all_day: bool = Field(alias="isAllDay")
+    start: EventDateTimeValue
+    end: EventDateTimeValue
+    recurrence: list[str] = Field(default_factory=list)
+    reminder_offsets_minutes: list[int]
     status: str
     created_at: datetime
-    source_type: SourceType
     parse_confidence: float
-
