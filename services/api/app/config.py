@@ -4,7 +4,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore", env_prefix="SYNORA_")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        env_prefix="SYNORA_",
+    )
 
     app_name: str = "Synora API"
     env: str = "development"
@@ -31,17 +36,15 @@ class Settings(BaseSettings):
     notification_to_email: str = "han.teacher@example.com"
     wecom_robot_webhook: str = ""
 
-    deepseek_api_key: str = ""
-    deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-v4-flash"
-    deepseek_timeout_seconds: int = 45
+    llm_api_key: str = ""
+    llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_model: str = "qwen3.6-plus"
+    llm_timeout_seconds: int = 90
+    llm_max_pdf_pages: int = 6
+    llm_max_image_side: int = 1568
 
-    ocr_space_api_key: str = ""
-    ocr_space_base_url: str = "https://api.ocr.space/parse/image"
-    ocr_space_language: str = "chs"
-    ocr_space_engine: int = 2
-    ocr_max_file_size_bytes: int = 1_000_000
-    ocr_max_pdf_pages: int = 3
+    mcp_bearer_token: str = ""
+    mcp_mount_path: str = "/mcp"
 
     minio_endpoint: str = "minio:9000"
     minio_access_key: str = "synora"
@@ -50,7 +53,7 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     minio_region: str = "us-east-1"
 
-    attachment_max_size_bytes: int = 1_000_000
+    attachment_max_size_bytes: int = 8_000_000
 
 
 @lru_cache

@@ -62,6 +62,8 @@ services:
       SYNORA_MINIO_SECRET_KEY: synora123
       SYNORA_SMTP_HOST: mailhog
       SYNORA_SMTP_PORT: 1025
+      SYNORA_MCP_BEARER_TOKEN: ${SYNORA_MCP_BEARER_TOKEN:-}
+      SYNORA_MCP_MOUNT_PATH: ${SYNORA_MCP_MOUNT_PATH:-/mcp}
     ports:
       - "8000:8000"
     depends_on:
