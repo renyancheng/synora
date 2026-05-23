@@ -9,7 +9,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         workflow = ModelAdapter._fallback_route_workflow(
             {
                 "source_type": "text",
-                "text_content": "明天下午3点在信息楼A302参加软件工程教研会。",
+                "text_content": "明天下午3点在信息楼302参加软件工程教研会。",
             }
         )
         self.assertEqual(workflow, "schedule_intake")
@@ -18,7 +18,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         workflow = ModelAdapter._fallback_route_workflow(
             {
                 "source_type": "text",
-                "text_content": "下周整理科研周报和实验记录。",
+                "text_content": "下周整理论文实验记录和科研周报。",
             }
         )
         self.assertEqual(workflow, "quick_note_intake")
@@ -28,7 +28,7 @@ class RuntimeRoutingTests(unittest.TestCase):
         workflow = ModelAdapter().route_workflow(
             {
                 "source_type": "text",
-                "text_content": "下周整理科研周报和实验记录。",
+                "text_content": "下周整理论文实验记录和科研周报。",
                 "context": {"client_timezone": "Asia/Shanghai"},
             }
         )

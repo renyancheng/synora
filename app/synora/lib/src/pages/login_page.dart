@@ -57,7 +57,7 @@ class _LoginPageState extends State<LoginPage> {
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
-            colors: <Color>[Color(0xFFEEF7F3), Color(0xFFD7EFE7)],
+            colors: <Color>[Color(0xFFF2FBF7), Color(0xFFD8EFE7)],
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
           ),
@@ -76,31 +76,40 @@ class _LoginPageState extends State<LoginPage> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text(AppStrings.appTitle, style: theme.textTheme.headlineSmall),
-                      const SizedBox(height: 8),
+                      Text(
+                        AppStrings.appTitle,
+                        style: theme.textTheme.headlineMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: const Color(0xFF11483E),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
                       Text(
                         AppStrings.loginSubtitle,
-                        style: theme.textTheme.bodyMedium?.copyWith(color: const Color(0xFF275C52)),
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: const Color(0xFF275C52),
+                          height: 1.5,
+                        ),
                       ),
                       const SizedBox(height: 24),
                       TextFormField(
                         controller: _emailController,
-                        decoration: const InputDecoration(labelText: '邮箱'),
-                        validator: (value) => (value == null || value.trim().isEmpty) ? '请输入邮箱。' : null,
+                        decoration: const InputDecoration(labelText: AppStrings.emailLabel),
+                        validator: (value) => (value == null || value.trim().isEmpty) ? AppStrings.emailRequired : null,
                       ),
                       const SizedBox(height: 16),
                       TextFormField(
                         controller: _passwordController,
-                        decoration: const InputDecoration(labelText: '密码'),
+                        decoration: const InputDecoration(labelText: AppStrings.passwordLabel),
                         obscureText: true,
-                        validator: (value) => (value == null || value.isEmpty) ? '请输入密码。' : null,
+                        validator: (value) => (value == null || value.isEmpty) ? AppStrings.passwordRequired : null,
                       ),
                       const SizedBox(height: 24),
                       SizedBox(
                         width: double.infinity,
                         child: FilledButton(
                           onPressed: widget.controller.isLoading ? null : _submit,
-                          child: Text(widget.controller.isLoading ? '登录中…' : AppStrings.loginButton),
+                          child: Text(widget.controller.isLoading ? AppStrings.loggingIn : AppStrings.loginButton),
                         ),
                       ),
                     ],

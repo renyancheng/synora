@@ -108,7 +108,7 @@ def send_wecom_robot_notification(db: Session, audit_id: int) -> NotificationAud
         return _fail_notification_audit(db, audit, "企业微信群机器人请求超时。")
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else "unknown"
-        return _fail_notification_audit(db, audit, f"企业微信群机器人 HTTP 错误：{status_code}。")
+        return _fail_notification_audit(db, audit, f"企业微信群机器人 HTTP 错误：{status_code}")
     except httpx.RequestError:
         return _fail_notification_audit(db, audit, "企业微信群机器人网络请求失败。")
     except Exception:

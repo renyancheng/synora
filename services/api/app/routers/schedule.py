@@ -4,8 +4,9 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies import get_current_user
-from app.domains.schedule.service import create_schedule_after_approval, create_schedule_draft, detect_conflicts
+from app.domains.schedule.service import create_schedule_after_approval, create_schedule_draft, delete_schedule, detect_conflicts
 from app.models import Schedule, User
+from app.schemas.common import ApiEnvelope
 from app.schemas.schedule import (
     ConflictCheckRequest,
     ConflictCheckResponse,
@@ -98,3 +99,16 @@ def list_schedules(
         )
         for row in rows
     ]
+
+
+@router.delete("/{schedule_id}", response_model=ApiEnvelope)
+def delete_schedule_endpoint(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiEnvelope:
+    try:
+        delete_schedule(db, current_user.id, schedule_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return ApiEnvelope(message="日程已删除。")

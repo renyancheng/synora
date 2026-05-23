@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
@@ -14,7 +14,11 @@ from app.runtime.output_normalizer import OutputNormalizer
 
 def _fallback_schedule_parse(merged_text: str, source_type: str, attachment_ids: list[int], timezone_name: str) -> dict:
     now = datetime.now(ZoneInfo(timezone_name))
-    scheduled_at, precise = OutputNormalizer.infer_datetime_from_text(merged_text, timezone_name=timezone_name, reference_time=now)
+    scheduled_at, precise = OutputNormalizer.infer_datetime_from_text(
+        merged_text,
+        timezone_name=timezone_name,
+        reference_time=now,
+    )
     title = merged_text.splitlines()[0].strip()[:30] if merged_text.strip() else "待确认事项"
     details = merged_text.strip()[:500] or "待补充详情"
     evidence = [line.strip() for line in merged_text.splitlines() if line.strip()][:3] or ["根据输入内容生成"]
@@ -65,6 +69,7 @@ def parse_schedule_draft(
         )
     except Exception:
         parsed = _fallback_schedule_parse(assembled["merged_text"], source_type, attachment_ids, timezone_name)
+
     normalized = OutputNormalizer()
     scheduled_at = normalized.parse_datetime(parsed.get("scheduled_at"))
     inferred_precise = False
@@ -85,7 +90,7 @@ def parse_schedule_draft(
     return {
         "draft": {
             "title": str(parsed.get("title") or "待确认事项").strip()[:30],
-            "location": (parsed.get("location") or None),
+            "location": parsed.get("location") or None,
             "details": str(parsed.get("details") or assembled["merged_text"] or "待补充详情").strip(),
             "source_text": assembled["merged_text"],
             "scheduled_at": scheduled_at.isoformat() if scheduled_at else None,

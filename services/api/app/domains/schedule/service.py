@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models import ReminderJob, Schedule
+from app.models import NotificationAudit, ReminderJob, Schedule
 from app.runtime import get_runtime_executor
 from app.runtime.approval_gate import ApprovalGate
 from app.schemas.schedule import ConflictCheckResponse, ConflictItem, ConflictSuggestion, ScheduleDraft, ScheduleDraftInput
@@ -175,3 +175,16 @@ def create_schedule_after_approval(db: Session, user_id: int, approval_token: st
     schedule = db.get(Schedule, result["schedule_id"])
     jobs = db.scalars(select(ReminderJob).where(ReminderJob.schedule_id == schedule.id).order_by(ReminderJob.id.asc())).all()
     return schedule, list(jobs)
+
+
+def delete_schedule(db: Session, user_id: int, schedule_id: int) -> None:
+    schedule = db.scalar(select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user_id))
+    if not schedule:
+        raise ValueError("日程不存在或已被删除。")
+
+    reminder_job_ids = db.scalars(select(ReminderJob.id).where(ReminderJob.schedule_id == schedule.id)).all()
+    if reminder_job_ids:
+        db.execute(delete(NotificationAudit).where(NotificationAudit.reminder_job_id.in_(list(reminder_job_ids))))
+    db.execute(delete(ReminderJob).where(ReminderJob.schedule_id == schedule.id))
+    db.delete(schedule)
+    db.commit()

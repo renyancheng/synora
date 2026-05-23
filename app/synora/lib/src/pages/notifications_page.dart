@@ -16,22 +16,19 @@ class NotificationsPage extends StatelessWidget {
       animation: controller,
       builder: (context, _) => Scaffold(
         appBar: AppBar(
-          title: const Text(AppStrings.notifications),
-          actions: <Widget>[
-            IconButton(
-              onPressed: controller.loadDashboard,
-              icon: const Icon(Icons.refresh),
-            ),
-          ],
+          title: const Text(AppStrings.notificationHistory),
         ),
-        body: ListView(
-          padding: const EdgeInsets.all(16),
-          children: <Widget>[
-            if (controller.notifications.isEmpty)
-              const _NotificationsEmpty()
-            else
-              ...controller.notifications.map(_NotificationTile.new),
-          ],
+        body: RefreshIndicator(
+          onRefresh: controller.refreshNotifications,
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: <Widget>[
+              if (controller.notifications.isEmpty)
+                const _NotificationsEmpty()
+              else
+                ...controller.notifications.map(_NotificationTile.new),
+            ],
+          ),
         ),
       ),
     );
@@ -57,18 +54,23 @@ class _NotificationTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final localizedError = AppStrings.notificationFailureReason(item.channel, item.errorMessage);
+    final statusColor = _statusColor();
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: ListTile(
         title: Text(item.subject),
         subtitle: Text(
-          '${AppStrings.channelLabel(item.channel)} → ${item.recipient}\n创建时间：${formatDateTime(item.createdAt)}${item.deliveredAt == null ? '' : '\n送达时间：${formatDateTime(item.deliveredAt)}'}${localizedError == null ? '' : '\n失败原因：$localizedError'}\n重试次数：${item.retryCount}',
+          '${AppStrings.channelLabel(item.channel)} → ${item.recipient}\n'
+          '创建时间：${formatDateTime(item.createdAt)}'
+          '${item.deliveredAt == null ? '' : '\n送达时间：${formatDateTime(item.deliveredAt)}'}'
+          '${localizedError == null ? '' : '\n失败原因：$localizedError'}\n'
+          '重试次数：${item.retryCount}',
         ),
         trailing: Chip(
           label: Text(AppStrings.notificationStatus(item.status)),
-          backgroundColor: _statusColor().withValues(alpha: 0.12),
-          labelStyle: TextStyle(color: _statusColor()),
+          backgroundColor: statusColor.withValues(alpha: 0.12),
+          labelStyle: TextStyle(color: statusColor),
         ),
         isThreeLine: true,
       ),

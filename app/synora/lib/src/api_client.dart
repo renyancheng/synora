@@ -87,90 +87,75 @@ class ApiClient {
     return _asList(json).map(NotificationItem.fromJson).toList();
   }
 
-  Future<ScheduleDraftResult> createScheduleDraft({
-    required InputSourceType sourceType,
+  Future<List<ConversationThreadItem>> fetchConversations() async {
+    final json = await _sendJson('GET', '/agent/conversations');
+    final items = ((json as Map<String, dynamic>)['items'] as List<dynamic>? ?? <dynamic>[])
+        .map((item) => ConversationThreadItem.fromJson(item as Map<String, dynamic>))
+        .toList();
+    return items;
+  }
+
+  Future<ConversationThreadItem> createConversation({String? title}) async {
+    final json = await _sendJson(
+      'POST',
+      '/agent/conversations',
+      body: title == null ? <String, dynamic>{} : <String, dynamic>{'title': title},
+    );
+    return ConversationThreadItem.fromJson((json as Map<String, dynamic>)['conversation'] as Map<String, dynamic>);
+  }
+
+  Future<(ConversationThreadItem, List<ConversationMessageItem>)> fetchConversationMessages(int conversationId) async {
+    final json = await _sendJson('GET', '/agent/conversations/$conversationId/messages');
+    final map = json as Map<String, dynamic>;
+    final conversation = ConversationThreadItem.fromJson(map['conversation'] as Map<String, dynamic>);
+    final items = (map['items'] as List<dynamic>? ?? <dynamic>[])
+        .map((item) => ConversationMessageItem.fromJson(item as Map<String, dynamic>))
+        .toList();
+    return (conversation, items);
+  }
+
+  Future<ConversationSendMessageResult> sendConversationMessage({
+    required int conversationId,
     required String textContent,
+    required InputSourceType sourceType,
     required List<int> attachmentIds,
+    Map<String, String> context = const <String, String>{},
   }) async {
     final json = await _sendJson(
       'POST',
-      '/schedule/drafts',
+      '/agent/conversations/$conversationId/messages',
       body: {
-        'source_type': sourceType.apiValue,
         'text_content': textContent,
+        'source_type': sourceType.apiValue,
         'attachment_ids': attachmentIds,
-        'context': <String, String>{},
+        'context': context,
       },
     );
-    return ScheduleDraftResult.fromJson(json as Map<String, dynamic>);
+    return ConversationSendMessageResult.fromJson(json as Map<String, dynamic>);
   }
 
-  Future<ConflictCheckResult> checkScheduleConflicts(
-    ScheduleDraft draft,
-    String draftHash,
-  ) async {
-    final json = await _sendJson(
-      'POST',
-      '/schedule/conflicts',
-      body: {'draft': draft.toJson(), 'draft_hash': draftHash},
-    );
-    return ConflictCheckResult.fromJson(json as Map<String, dynamic>);
-  }
-
-  Future<ScheduleConfirmResult> confirmSchedule(
-    String approvalToken,
-    ScheduleDraft draft,
-  ) async {
-    final json = await _sendJson(
-      'POST',
-      '/schedule/confirm',
-      body: {
-        'approval_token': approvalToken,
-        'normalized_draft': draft.toJson(),
-      },
-    );
-    return ScheduleConfirmResult.fromJson(json as Map<String, dynamic>);
-  }
-
-  Future<QuickNoteDraftPreview> createQuickNoteDraft({
-    required InputSourceType sourceType,
-    required String content,
-    required List<String> tags,
-    required List<int> attachmentIds,
+  Future<ConversationActionResult> performConversationAction({
+    required int conversationId,
+    required String action,
+    Map<String, dynamic> payload = const <String, dynamic>{},
   }) async {
     final json = await _sendJson(
       'POST',
-      '/quick-notes/drafts',
+      '/agent/conversations/$conversationId/actions',
       body: {
-        'source_type': sourceType.apiValue,
-        'content': content,
-        'tags': tags,
-        'attachment_ids': attachmentIds,
-        'context': <String, String>{},
+        'action': action,
+        'payload': payload,
       },
     );
-    return QuickNoteDraftPreview.fromJson(json as Map<String, dynamic>);
+    return ConversationActionResult.fromJson(json as Map<String, dynamic>);
   }
 
-  Future<QuickNoteSaveResult> confirmQuickNote({
-    required String content,
-    required List<String> tags,
-    required InputSourceType sourceType,
-    required List<int> attachmentIds,
-    required String approvalToken,
-  }) async {
-    final json = await _sendJson(
-      'POST',
-      '/quick-notes/confirm',
-      body: {
-        'content': content,
-        'tags': tags,
-        'source_type': sourceType.apiValue,
-        'attachment_ids': attachmentIds,
-        'approval_token': approvalToken,
-      },
-    );
-    return QuickNoteSaveResult.fromJson(json as Map<String, dynamic>);
+  Future<void> deleteSchedule(int scheduleId) async {
+    await _sendJson('DELETE', '/schedule/$scheduleId');
+  }
+
+  Future<void> deleteQuickNote(int noteId) async {
+    await _sendJson('DELETE', '/quick-notes/$noteId');
   }
 
   Future<dynamic> _sendJson(
@@ -203,7 +188,7 @@ class ApiClient {
     if (authenticated) {
       final token = _accessToken;
       if (token == null || token.isEmpty) {
-        throw ApiException('请先登录后再操作。');
+        throw ApiException('请先登录。');
       }
       headers['Authorization'] = 'Bearer $token';
     }
@@ -216,9 +201,21 @@ class ApiClient {
 
   String _extractErrorMessage(dynamic decoded, int statusCode) {
     if (decoded is Map<String, dynamic> && decoded['detail'] is String) {
-      return decoded['detail'] as String;
+      final detail = (decoded['detail'] as String).trim();
+      if (detail.isNotEmpty) {
+        return detail;
+      }
     }
-    return '请求失败（$statusCode），请稍后重试。';
+    switch (statusCode) {
+      case 401:
+        return '登录已失效，请重新登录。';
+      case 404:
+        return '请求的内容不存在。';
+      case 422:
+        return '提交内容不完整，请检查后重试。';
+      default:
+        return '请求失败（$statusCode），请稍后重试。';
+    }
   }
 
   List<Map<String, dynamic>> _asList(dynamic json) {

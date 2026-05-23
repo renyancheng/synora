@@ -30,7 +30,12 @@ class OutputNormalizer:
         tz_name = timezone_name or get_settings().default_timezone
         tz = ZoneInfo(tz_name)
         now = reference_time.astimezone(tz) if reference_time else datetime.now(tz)
-        normalized = text.replace("：", ":").replace("（", "(").replace("）", ")")
+        normalized = (
+            text.replace("：", ":")
+            .replace("（", "(")
+            .replace("）", ")")
+            .replace("，", ",")
+        )
 
         day = None
         if "今天" in normalized:

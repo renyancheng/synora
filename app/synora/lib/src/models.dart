@@ -521,3 +521,102 @@ class NotificationItem {
     );
   }
 }
+
+class ConversationThreadItem {
+  ConversationThreadItem({
+    required this.id,
+    required this.title,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.lastMessageAt,
+  });
+
+  final int id;
+  final String title;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final DateTime lastMessageAt;
+
+  factory ConversationThreadItem.fromJson(Map<String, dynamic> json) {
+    return ConversationThreadItem(
+      id: json['id'] as int,
+      title: json['title'] as String,
+      createdAt: DateTime.parse(json['created_at'] as String),
+      updatedAt: DateTime.parse(json['updated_at'] as String),
+      lastMessageAt: DateTime.parse(json['last_message_at'] as String),
+    );
+  }
+}
+
+class ConversationMessageItem {
+  ConversationMessageItem({
+    required this.id,
+    required this.role,
+    required this.messageType,
+    required this.structuredPayload,
+    required this.createdAt,
+    this.textContent,
+  });
+
+  final int id;
+  final String role;
+  final String messageType;
+  final String? textContent;
+  final Map<String, dynamic> structuredPayload;
+  final DateTime createdAt;
+
+  bool get isUser => role == 'user';
+  bool get isAssistant => role == 'assistant';
+
+  factory ConversationMessageItem.fromJson(Map<String, dynamic> json) {
+    return ConversationMessageItem(
+      id: json['id'] as int,
+      role: json['role'] as String,
+      messageType: json['message_type'] as String,
+      textContent: json['text_content'] as String?,
+      structuredPayload: (json['structured_payload'] as Map<String, dynamic>? ?? <String, dynamic>{}),
+      createdAt: DateTime.parse(json['created_at'] as String),
+    );
+  }
+}
+
+class ConversationSendMessageResult {
+  ConversationSendMessageResult({
+    required this.conversation,
+    required this.userMessage,
+    required this.assistantMessages,
+  });
+
+  final ConversationThreadItem conversation;
+  final ConversationMessageItem userMessage;
+  final List<ConversationMessageItem> assistantMessages;
+
+  factory ConversationSendMessageResult.fromJson(Map<String, dynamic> json) {
+    return ConversationSendMessageResult(
+      conversation: ConversationThreadItem.fromJson(json['conversation'] as Map<String, dynamic>),
+      userMessage: ConversationMessageItem.fromJson(json['user_message'] as Map<String, dynamic>),
+      assistantMessages: (json['assistant_messages'] as List<dynamic>)
+          .map((item) => ConversationMessageItem.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
+class ConversationActionResult {
+  ConversationActionResult({
+    required this.conversation,
+    required this.assistantMessages,
+  });
+
+  final ConversationThreadItem conversation;
+  final List<ConversationMessageItem> assistantMessages;
+
+  factory ConversationActionResult.fromJson(Map<String, dynamic> json) {
+    return ConversationActionResult(
+      conversation: ConversationThreadItem.fromJson(json['conversation'] as Map<String, dynamic>),
+      assistantMessages: (json['assistant_messages'] as List<dynamic>)
+          .map((item) => ConversationMessageItem.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}

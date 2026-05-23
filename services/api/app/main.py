@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.bootstrap import init_db
 from app.config import get_settings
-from app.routers import agent_sessions, approvals, attachments, auth, health, notifications, quick_notes, schedule
+from app.routers import agent_sessions, approvals, attachments, auth, conversations, health, notifications, quick_notes, schedule
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name)
@@ -36,6 +36,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(attachments.router)
 app.include_router(agent_sessions.router)
+app.include_router(conversations.router)
 app.include_router(schedule.router)
 app.include_router(quick_notes.router)
 app.include_router(approvals.router)

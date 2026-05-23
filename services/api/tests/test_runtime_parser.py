@@ -36,20 +36,20 @@ class RuntimeParserTests(unittest.TestCase):
     def test_parse_schedule_infers_relative_time_when_model_returns_null(self, extract_schedule_mock, _attachment_mock) -> None:
         extract_schedule_mock.return_value = {
             "title": "软件工程教研会",
-            "location": "信息楼A302",
+            "location": "信息楼302",
             "details": "讨论下周课程安排",
             "scheduled_at": None,
             "duration_minutes": 60,
             "missing_fields": ["scheduled_at"],
             "ambiguity_flags": ["time_ambiguous"],
             "parse_confidence": 0.9,
-            "evidence_digest": ["明天下午3点", "信息楼A302"],
+            "evidence_digest": ["明天下午3点", "信息楼302"],
         }
         result = parse_schedule_draft(
             db=None,
             user_id=1,
             source_type="text",
-            text_content="明天下午3点在信息楼A302参加软件工程教研会，讨论下周课程安排。",
+            text_content="明天下午3点在信息楼302参加软件工程教研会，讨论下周课程安排。",
             attachment_ids=[],
             context={"client_timezone": "Asia/Shanghai"},
         )

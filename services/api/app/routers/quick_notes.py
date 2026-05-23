@@ -3,8 +3,9 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies import get_current_user
-from app.domains.quick_note.service import create_quick_note_draft, list_notes, save_note_after_approval
+from app.domains.quick_note.service import create_quick_note_draft, delete_note, list_notes, save_note_after_approval
 from app.models import User
+from app.schemas.common import ApiEnvelope
 from app.schemas.quick_note import (
     QuickNoteConfirmRequest,
     QuickNoteDraftRequest,
@@ -78,3 +79,16 @@ def get_quick_notes(
         )
         for row in rows
     ]
+
+
+@router.delete("/{note_id}", response_model=ApiEnvelope)
+def delete_quick_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ApiEnvelope:
+    try:
+        delete_note(db, current_user.id, note_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return ApiEnvelope(message="速记已删除。")

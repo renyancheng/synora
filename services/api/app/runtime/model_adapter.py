@@ -34,6 +34,19 @@ class ModelAdapter:
         content = response.choices[0].message.content or "{}"
         return json.loads(content)
 
+    def _text_completion(self, system_prompt: str, user_prompt: str) -> str:
+        if not self._settings.deepseek_api_key:
+            raise ValueError("未配置 DeepSeek API Key。")
+        response = self._client.chat.completions.create(
+            model=self._settings.deepseek_model,
+            temperature=0.3,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return (response.choices[0].message.content or "").strip()
+
     @staticmethod
     def _looks_like_precise_schedule(text: str) -> bool:
         precise_patterns = [
@@ -46,13 +59,29 @@ class ModelAdapter:
         return any(re.search(pattern, text) for pattern in precise_patterns)
 
     @staticmethod
+    def _looks_like_quick_note(text: str) -> bool:
+        if not text.strip():
+            return False
+        explicit_keywords = ["记一下", "帮我记", "记住", "速记", "备忘", "记录一个", "存一个", "灵感", "想法", "待办"]
+        return any(keyword in text for keyword in explicit_keywords)
+
+    @staticmethod
+    def _looks_like_general_chat(text: str) -> bool:
+        if not text.strip():
+            return True
+        general_keywords = ["你好", "hi", "hello", "谢谢", "怎么", "为什么", "介绍", "你是谁", "帮我分析", "聊聊", "建议"]
+        return any(keyword.lower() in text.lower() for keyword in general_keywords) or "？" in text or "?" in text
+
+    @staticmethod
     def _fallback_route_workflow(payload: dict) -> str:
         source_type = str(payload.get("source_type", "text"))
+        text = str(payload.get("text_content") or payload.get("content") or "")
         if source_type in {"screenshot", "photo"}:
             return "schedule_intake"
-        text = str(payload.get("text_content") or payload.get("content") or "")
         if ModelAdapter._looks_like_precise_schedule(text):
             return "schedule_intake"
+        if ModelAdapter._looks_like_quick_note(text):
+            return "quick_note_intake"
         schedule_context_hints = [
             r"(会议|开会|上课|答辩|教研会|日程)",
             r"(教室|会议室|信息楼|实验室|办公室|A\d{3}|B\d{3})",
@@ -60,6 +89,19 @@ class ModelAdapter:
         if all(re.search(pattern, text) for pattern in schedule_context_hints):
             return "schedule_intake"
         return "quick_note_intake"
+
+    @staticmethod
+    def _fallback_conversation_intent(payload: dict) -> str:
+        source_type = str(payload.get("source_type", "text"))
+        attachment_ids = list(payload.get("attachment_ids") or [])
+        text = str(payload.get("text_content") or payload.get("content") or "")
+        if source_type in {"screenshot", "photo", "chat_record", "email"} or attachment_ids:
+            return ModelAdapter._fallback_route_workflow(payload)
+        if ModelAdapter._looks_like_precise_schedule(text):
+            return "schedule_intake"
+        if ModelAdapter._looks_like_quick_note(text):
+            return "quick_note_intake"
+        return "general_chat" if ModelAdapter._looks_like_general_chat(text) else "general_chat"
 
     def route_workflow(self, payload: dict) -> str:
         if payload.get("preferred_workflow") in {"schedule_intake", "quick_note_intake"}:
@@ -91,6 +133,34 @@ class ModelAdapter:
             pass
 
         return self._fallback_route_workflow(payload)
+
+    def route_conversation_intent(self, payload: dict) -> str:
+        if payload.get("preferred_workflow") in {"schedule_intake", "quick_note_intake", "general_chat"}:
+            return str(payload["preferred_workflow"])
+
+        if not self._settings.deepseek_api_key:
+            return self._fallback_conversation_intent(payload)
+
+        try:
+            result = self._json_completion(
+                "你是 Synora 的对话意图路由器，只能输出 JSON，workflow 只能是 schedule_intake、quick_note_intake、general_chat 之一。",
+                json.dumps(
+                    {
+                        "source_type": payload.get("source_type"),
+                        "text_content": payload.get("text_content"),
+                        "attachment_ids": payload.get("attachment_ids", []),
+                        "context": payload.get("context", {}),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            workflow = str(result.get("workflow") or "").strip()
+            if workflow in {"schedule_intake", "quick_note_intake", "general_chat"}:
+                return workflow
+        except Exception:
+            pass
+
+        return self._fallback_conversation_intent(payload)
 
     def extract_schedule(
         self,
@@ -143,6 +213,59 @@ class ModelAdapter:
             ensure_ascii=False,
         )
         return self._json_completion(system_prompt, user_prompt)
+
+    def generate_conversation_title(self, first_message: str) -> str:
+        fallback = self._fallback_conversation_title(first_message)
+        if not self._settings.deepseek_api_key:
+            return fallback
+        try:
+            response = self._json_completion(
+                "你是对话标题生成器，只输出 JSON，字段为 title。标题需要简短、自然、中文，控制在 8 个字以内，不能加书名号和引号。",
+                json.dumps({"first_message": first_message}, ensure_ascii=False),
+            )
+            title = str(response.get("title") or "").strip()
+            if title:
+                return title[:18]
+        except Exception:
+            pass
+        return fallback
+
+    def generate_chat_reply(self, *, user_message: str, recent_messages: list[dict[str, str]]) -> str:
+        fallback = self._fallback_chat_reply(user_message)
+        if not self._settings.deepseek_api_key:
+            return fallback
+        try:
+            reply = self._text_completion(
+                "你是 Synora 的中文个人助理。语气自然、简洁、友好。如果用户没有明确要求创建日程或速记，就直接正常回答，不要伪造工具结果。",
+                json.dumps(
+                    {
+                        "recent_messages": recent_messages[-6:],
+                        "user_message": user_message,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            return reply or fallback
+        except Exception:
+            return fallback
+
+    @staticmethod
+    def _fallback_conversation_title(first_message: str) -> str:
+        cleaned = re.sub(r"\s+", " ", first_message).strip()
+        if not cleaned:
+            return "新对话"
+        return cleaned[:18]
+
+    @staticmethod
+    def _fallback_chat_reply(user_message: str) -> str:
+        text = user_message.strip()
+        if not text:
+            return "我在这里，你可以继续告诉我想安排的事情。"
+        if any(keyword in text.lower() for keyword in ["你好", "hi", "hello"]):
+            return "你好，我是 Synora。你可以直接告诉我想安排的日程、想保存的速记，或者先和我聊聊。"
+        if "谢谢" in text:
+            return "不客气，我会继续帮你把事情整理清楚。"
+        return "我收到了。你可以继续补充背景，或者直接告诉我需要帮你创建日程、记录速记、查看已有内容。"
 
     @staticmethod
     def compute_reminder_at(scheduled_at: datetime) -> datetime:

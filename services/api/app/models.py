@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -26,6 +28,10 @@ class User(Base):
     quick_notes: Mapped[list["QuickNote"]] = relationship(back_populates="user")
     approvals: Mapped[list["ApprovalRequest"]] = relationship(back_populates="user")
     notifications: Mapped[list["NotificationAudit"]] = relationship(back_populates="user")
+    conversations: Mapped[list["ConversationThread"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class SessionState(Base):
@@ -47,7 +53,7 @@ class Schedule(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(String(255))
-    location: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    location: Mapped[str] = mapped_column(String(255), nullable=True)
     details: Mapped[str] = mapped_column(Text)
     source_text: Mapped[str] = mapped_column(Text)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -72,7 +78,7 @@ class ReminderJob(Base):
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
-    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     schedule: Mapped["Schedule"] = relationship(back_populates="reminder_jobs")
@@ -109,7 +115,7 @@ class ApprovalRequest(Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="approvals")
 
@@ -119,21 +125,21 @@ class NotificationAudit(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    reminder_job_id: Mapped[Optional[int]] = mapped_column(ForeignKey("reminder_jobs.id"), nullable=True, index=True)
+    reminder_job_id: Mapped[int] = mapped_column(ForeignKey("reminder_jobs.id"), nullable=True, index=True)
     channel: Mapped[str] = mapped_column(String(40))
     recipient: Mapped[str] = mapped_column(String(255))
     subject: Mapped[str] = mapped_column(String(255))
     payload_json: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(40), default="queued", index=True)
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
     provider: Mapped[str] = mapped_column(String(80), default="")
-    external_id: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    external_id: Mapped[str] = mapped_column(String(120), nullable=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="notifications")
-    reminder_job: Mapped[Optional["ReminderJob"]] = relationship(back_populates="notification_audits")
+    reminder_job: Mapped["ReminderJob"] = relationship(back_populates="notification_audits")
 
 
 class Attachment(Base):
@@ -160,7 +166,7 @@ class AttachmentParseResult(Base):
     raw_text: Mapped[str] = mapped_column(Text, default="")
     structured_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(40), default="pending")
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
@@ -174,9 +180,9 @@ class AgentRun(Base):
     status: Mapped[str] = mapped_column(String(40), default="running", index=True)
     input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     output_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AgentToolCallAudit(Base):
@@ -188,5 +194,62 @@ class AgentToolCallAudit(Base):
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(40), default="ok", index=True)
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ConversationThread(Base):
+    __tablename__ = "conversation_threads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(120), default="新对话")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+    last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+
+    user: Mapped["User"] = relationship(back_populates="conversations")
+    messages: Mapped[list["ConversationMessage"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="ConversationMessage.created_at.asc()",
+    )
+    pending_state: Mapped["ConversationPendingState"] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversation_threads.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    message_type: Mapped[str] = mapped_column(String(40), default="text", index=True)
+    text_content: Mapped[str] = mapped_column(Text, nullable=True)
+    structured_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    conversation: Mapped["ConversationThread"] = relationship(back_populates="messages")
+
+
+class ConversationPendingState(Base):
+    __tablename__ = "conversation_pending_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversation_threads.id"), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    pending_type: Mapped[str] = mapped_column(String(40), index=True)
+    stage: Mapped[str] = mapped_column(String(40), default="pending", index=True)
+    draft_hash: Mapped[str] = mapped_column(String(64), nullable=True)
+    approval_token: Mapped[str] = mapped_column(String(255), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(40), default="text")
+    attachment_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    meta_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    conversation: Mapped["ConversationThread"] = relationship(back_populates="pending_state")

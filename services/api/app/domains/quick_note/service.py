@@ -94,3 +94,11 @@ def save_note_after_approval(
 
 def list_notes(db: Session, user_id: int) -> list[QuickNote]:
     return db.scalars(select(QuickNote).where(QuickNote.user_id == user_id).order_by(QuickNote.created_at.desc())).all()
+
+
+def delete_note(db: Session, user_id: int, note_id: int) -> None:
+    note = db.scalar(select(QuickNote).where(QuickNote.id == note_id, QuickNote.user_id == user_id))
+    if not note:
+        raise ValueError("速记不存在或已被删除。")
+    db.delete(note)
+    db.commit()
