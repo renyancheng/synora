@@ -56,12 +56,14 @@ class _NotificationTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final localizedError = AppStrings.notificationFailureReason(item.channel, item.errorMessage);
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: ListTile(
         title: Text(item.subject),
         subtitle: Text(
-          '${AppStrings.channelLabel(item.channel)} → ${item.recipient}\n创建时间：${formatDateTime(item.createdAt)}${item.deliveredAt == null ? '' : '\n送达时间：${formatDateTime(item.deliveredAt)}'}${item.errorMessage == null ? '' : '\n失败原因：${item.errorMessage}'}\n重试次数：${item.retryCount}',
+          '${AppStrings.channelLabel(item.channel)} → ${item.recipient}\n创建时间：${formatDateTime(item.createdAt)}${item.deliveredAt == null ? '' : '\n送达时间：${formatDateTime(item.deliveredAt)}'}${localizedError == null ? '' : '\n失败原因：$localizedError'}\n重试次数：${item.retryCount}',
         ),
         trailing: Chip(
           label: Text(AppStrings.notificationStatus(item.status)),

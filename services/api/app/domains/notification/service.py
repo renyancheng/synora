@@ -4,6 +4,7 @@ import json
 import smtplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from json import JSONDecodeError
 
 import httpx
 from sqlalchemy import select
@@ -11,6 +12,19 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import NotificationAudit, ReminderJob, Schedule
+
+
+def _finalize_notification_audit(db: Session, audit: NotificationAudit) -> NotificationAudit:
+    db.commit()
+    db.refresh(audit)
+    return audit
+
+
+def _fail_notification_audit(db: Session, audit: NotificationAudit, message: str) -> NotificationAudit:
+    audit.status = "failed"
+    audit.error_message = message
+    audit.retry_count += 1
+    return _finalize_notification_audit(db, audit)
 
 
 def queue_notification_audit(
@@ -67,9 +81,7 @@ def send_email_notification(db: Session, audit_id: int) -> NotificationAudit:
         audit.status = "failed"
         audit.error_message = str(exc)
         audit.retry_count += 1
-    db.commit()
-    db.refresh(audit)
-    return audit
+    return _finalize_notification_audit(db, audit)
 
 
 def send_wecom_robot_notification(db: Session, audit_id: int) -> NotificationAudit:
@@ -80,12 +92,7 @@ def send_wecom_robot_notification(db: Session, audit_id: int) -> NotificationAud
 
     payload = json.loads(audit.payload_json)
     if not settings.wecom_robot_webhook:
-        audit.status = "failed"
-        audit.error_message = "未配置企业微信群机器人 Webhook。"
-        audit.retry_count += 1
-        db.commit()
-        db.refresh(audit)
-        return audit
+        return _fail_notification_audit(db, audit, "未配置企业微信群机器人 Webhook。")
 
     try:
         response = httpx.post(
@@ -97,16 +104,32 @@ def send_wecom_robot_notification(db: Session, audit_id: int) -> NotificationAud
             timeout=15,
         )
         response.raise_for_status()
-        audit.status = "delivered"
-        audit.delivered_at = datetime.now(timezone.utc)
-        audit.external_id = f"wecom-{audit.id}"
-    except Exception as exc:
-        audit.status = "failed"
-        audit.error_message = str(exc)
-        audit.retry_count += 1
-    db.commit()
-    db.refresh(audit)
-    return audit
+    except httpx.TimeoutException:
+        return _fail_notification_audit(db, audit, "企业微信群机器人请求超时。")
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code if exc.response is not None else "unknown"
+        return _fail_notification_audit(db, audit, f"企业微信群机器人 HTTP 错误：{status_code}。")
+    except httpx.RequestError:
+        return _fail_notification_audit(db, audit, "企业微信群机器人网络请求失败。")
+    except Exception:
+        return _fail_notification_audit(db, audit, "企业微信群机器人发送失败。")
+
+    try:
+        response_payload = response.json()
+    except (JSONDecodeError, ValueError):
+        return _fail_notification_audit(db, audit, "企业微信群机器人返回了无法解析的响应。")
+
+    errcode = response_payload.get("errcode")
+    errmsg = str(response_payload.get("errmsg") or "").strip()
+    if errcode != 0:
+        if errmsg:
+            return _fail_notification_audit(db, audit, f"企业微信群机器人返回错误码 {errcode}：{errmsg}")
+        return _fail_notification_audit(db, audit, f"企业微信群机器人返回错误码 {errcode}。")
+
+    audit.status = "delivered"
+    audit.delivered_at = datetime.now(timezone.utc)
+    audit.external_id = f"wecom-{audit.id}"
+    return _finalize_notification_audit(db, audit)
 
 
 def collect_due_jobs(db: Session) -> list[ReminderJob]:

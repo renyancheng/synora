@@ -17,3 +17,6 @@ celery_app.conf.beat_schedule = {
     }
 }
 celery_app.conf.timezone = settings.default_timezone
+
+# Ensure task modules are imported so Celery workers register them.
+from app.tasks import notifications as _notifications  # noqa: E402,F401

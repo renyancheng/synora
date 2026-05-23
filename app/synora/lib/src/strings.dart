@@ -87,4 +87,54 @@ class AppStrings {
         return channel;
     }
   }
+
+  static String? notificationFailureReason(String channel, String? errorMessage) {
+    if (errorMessage == null || errorMessage.trim().isEmpty) {
+      return null;
+    }
+    final message = errorMessage.trim();
+    final lower = message.toLowerCase();
+
+    if (channel == 'wecom_robot') {
+      if (message.contains('未配置企业微信群机器人')) {
+        return '未配置企业微信群机器人，请检查服务端配置。';
+      }
+      if (message.contains('请求超时') || lower.contains('timed out')) {
+        return '企业微信推送超时，请稍后重试。';
+      }
+      if (message.contains('网络请求失败') || lower.contains('connection') || lower.contains('network')) {
+        return '企业微信网络请求失败，请检查服务网络。';
+      }
+      if (message.contains('HTTP 错误')) {
+        return '企业微信服务暂时不可用，请稍后重试。';
+      }
+      if (message.contains('无法解析的响应')) {
+        return '企业微信返回了异常响应，请稍后重试。';
+      }
+      final codeMatch = RegExp(r'错误码\s*(\d+)').firstMatch(message);
+      if (message.contains('返回错误码')) {
+        final code = codeMatch?.group(1);
+        if (code != null) {
+          return '企业微信机器人拒绝了本次消息（错误码 $code）。';
+        }
+        return '企业微信机器人拒绝了本次消息。';
+      }
+      return '企业微信推送失败，请稍后重试。';
+    }
+
+    if (channel == 'email') {
+      if (lower.contains('timed out')) {
+        return '邮件发送超时，请稍后重试。';
+      }
+      if (lower.contains('authentication')) {
+        return '邮件服务认证失败，请检查 SMTP 配置。';
+      }
+      if (lower.contains('connection') || lower.contains('refused')) {
+        return '邮件服务连接失败，请检查 SMTP 配置。';
+      }
+      return '邮件发送失败，请稍后重试。';
+    }
+
+    return '发送失败，请稍后重试。';
+  }
 }
