@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../date_utils.dart';
 import '../models.dart';
+import '../strings.dart';
 import 'notifications_page.dart';
 import 'quick_note_page.dart';
 import 'schedule_draft_page.dart';
@@ -13,8 +14,8 @@ class HomePage extends StatelessWidget {
   final AppController controller;
 
   Future<void> _openScheduleComposer(BuildContext context) async {
-    await Navigator.of(context).push<bool>(
-      MaterialPageRoute<bool>(
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
         builder: (_) => ScheduleDraftPage(controller: controller),
       ),
     );
@@ -41,15 +42,15 @@ class HomePage extends StatelessWidget {
     final user = controller.session?.user;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Synora Workspace'),
+        title: const Text(AppStrings.appTitle),
         actions: <Widget>[
           IconButton(
-            tooltip: 'Refresh',
+            tooltip: AppStrings.refresh,
             onPressed: controller.isLoading ? null : controller.loadDashboard,
             icon: const Icon(Icons.refresh),
           ),
           IconButton(
-            tooltip: 'Sign out',
+            tooltip: AppStrings.logout,
             onPressed: controller.logout,
             icon: const Icon(Icons.logout),
           ),
@@ -74,15 +75,12 @@ class HomePage extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   Text(
-                    'Welcome back, ${user?.displayName ?? 'Teacher Han'}',
-                    style: Theme.of(context)
-                        .textTheme
-                        .headlineSmall
-                        ?.copyWith(color: Colors.white),
+                    '${user?.displayName ?? '韩老师'}，欢迎回来',
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white),
                   ),
                   const SizedBox(height: 8),
                   const Text(
-                    'Handle important reminders first, then capture ideas quickly. This MVP focuses on text flows plus explicit approval.',
+                    AppStrings.homeGreeting,
                     style: TextStyle(color: Colors.white70, height: 1.5),
                   ),
                 ],
@@ -93,8 +91,8 @@ class HomePage extends StatelessWidget {
               children: <Widget>[
                 Expanded(
                   child: _ActionCard(
-                    title: 'New schedule',
-                    subtitle: 'Text parsing, conflict checks, approval save',
+                    title: AppStrings.newSchedule,
+                    subtitle: '支持文本、截图、拍照、聊天记录、邮件内容',
                     icon: Icons.event_note,
                     onTap: () => _openScheduleComposer(context),
                   ),
@@ -102,9 +100,9 @@ class HomePage extends StatelessWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: _ActionCard(
-                    title: 'Quick note',
-                    subtitle: 'Preview tags first, then approve save',
-                    icon: Icons.sticky_note_2_outlined,
+                    title: AppStrings.quickNote,
+                    subtitle: '先预览标签，再确认保存速记',
+                    icon: Icons.lightbulb_outline,
                     onTap: () => _openQuickNotes(context),
                   ),
                 ),
@@ -112,22 +110,18 @@ class HomePage extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             _ActionCard(
-              title: 'Notification history',
-              subtitle: 'Check email and mock WeCom delivery records',
+              title: AppStrings.notifications,
+              subtitle: '查看邮件和企业微信群机器人的送达记录',
               icon: Icons.mark_email_read_outlined,
               onTap: () => _openNotifications(context),
             ),
             const SizedBox(height: 24),
-            Text(
-              'Upcoming schedules',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
+            Text('近期日程', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 12),
             if (controller.schedules.isEmpty)
               const _EmptyState(
-                title: 'No schedules yet',
-                subtitle:
-                    'Start with "New schedule" and paste a short natural-language note.',
+                title: '暂无日程',
+                subtitle: AppStrings.emptySchedules,
               )
             else
               ...controller.schedules.map(_ScheduleTile.new),
@@ -155,7 +149,6 @@ class _ActionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       elevation: 1,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(20),
@@ -193,7 +186,7 @@ class _ScheduleTile extends StatelessWidget {
         ),
         title: Text(item.title),
         subtitle: Text(
-          '${formatDateTime(item.scheduledAt)}\nReminder: ${formatDateTime(item.reminderAt)}${item.location == null ? '' : '\nLocation: ${item.location}'}',
+          '${formatDateTime(item.scheduledAt)}\n提醒时间：${formatDateTime(item.reminderAt)}${item.location == null ? '' : '\n地点：${item.location}'}',
         ),
         isThreeLine: item.location != null,
       ),
@@ -217,11 +210,7 @@ class _EmptyState extends StatelessWidget {
       ),
       child: Column(
         children: <Widget>[
-          const Icon(
-            Icons.inbox_outlined,
-            size: 36,
-            color: Color(0xFF5B8178),
-          ),
+          const Icon(Icons.inbox_outlined, size: 36, color: Color(0xFF5B8178)),
           const SizedBox(height: 12),
           Text(title, style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 6),

@@ -14,6 +14,16 @@ def ensure_bootstrap_user(db: Session) -> User:
     settings = get_settings()
     user = db.scalar(select(User).where(User.email == settings.bootstrap_email))
     if user:
+        updated = False
+        if user.display_name != settings.bootstrap_display_name:
+            user.display_name = settings.bootstrap_display_name
+            updated = True
+        if not verify_password(settings.bootstrap_password, user.password_hash):
+            user.password_hash = hash_password(settings.bootstrap_password)
+            updated = True
+        if updated:
+            db.commit()
+            db.refresh(user)
         return user
 
     user = User(
@@ -31,7 +41,7 @@ def login_user(db: Session, email: str, password: str) -> tuple[User, str, datet
     ensure_bootstrap_user(db)
     user = db.scalar(select(User).where(User.email == email, User.is_active.is_(True)))
     if not user or not verify_password(password, user.password_hash):
-        raise ValueError("邮箱或密码错误")
+        raise ValueError("邮箱或密码错误。")
 
     expires_at = future_utc(get_settings().session_ttl_hours)
     token = mint_token()

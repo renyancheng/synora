@@ -1,8 +1,11 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../app_controller.dart';
-import '../date_utils.dart';
 import '../models.dart';
+import '../strings.dart';
+import 'schedule_confirm_page.dart';
 
 class ScheduleDraftPage extends StatefulWidget {
   const ScheduleDraftPage({super.key, required this.controller});
@@ -14,130 +17,83 @@ class ScheduleDraftPage extends StatefulWidget {
 }
 
 class _ScheduleDraftPageState extends State<ScheduleDraftPage> {
-  late final TextEditingController _inputController;
-  late final TextEditingController _titleController;
-  late final TextEditingController _detailsController;
-  late final TextEditingController _locationController;
-  late final TextEditingController _scheduledAtController;
-
-  ScheduleDraftResult? _draftResult;
-  ConflictCheckResult? _conflictResult;
+  late final TextEditingController _textController;
+  InputSourceType _sourceType = InputSourceType.text;
+  final List<LocalAttachmentData> _attachments = <LocalAttachmentData>[];
   bool _submitting = false;
 
   @override
   void initState() {
     super.initState();
-    _inputController = TextEditingController();
-    _titleController = TextEditingController();
-    _detailsController = TextEditingController();
-    _locationController = TextEditingController();
-    _scheduledAtController = TextEditingController();
+    _textController = TextEditingController();
   }
 
   @override
   void dispose() {
-    _inputController.dispose();
-    _titleController.dispose();
-    _detailsController.dispose();
-    _locationController.dispose();
-    _scheduledAtController.dispose();
+    _textController.dispose();
     super.dispose();
   }
 
-  Future<void> _parseDraft() async {
-    if (_inputController.text.trim().isEmpty) {
-      _showMessage('Enter a schedule note first.');
-      return;
-    }
-    setState(() => _submitting = true);
-    try {
-      final result = await widget.controller.createScheduleDraft(
-        _inputController.text.trim(),
-      );
-      _titleController.text = result.draft.title;
-      _detailsController.text = result.draft.details;
-      _locationController.text = result.draft.location ?? '';
-      _scheduledAtController.text = result.draft.scheduledAt == null
-          ? ''
-          : formatDateTime(result.draft.scheduledAt);
-      setState(() {
-        _draftResult = result;
-        _conflictResult = null;
-      });
-    } catch (error) {
-      _showMessage(error.toString());
-    } finally {
-      if (mounted) {
-        setState(() => _submitting = false);
-      }
-    }
-  }
-
-  ScheduleDraft? _buildDraft() {
-    final scheduledAt = parseEditableDateTime(_scheduledAtController.text);
-    if (scheduledAt == null) {
-      _showMessage('Use datetime format like 2026-05-25 14:30.');
-      return null;
-    }
-    return ScheduleDraft(
-      title: _titleController.text.trim().isEmpty
-          ? 'Needs confirmation'
-          : _titleController.text.trim(),
-      location: _locationController.text.trim().isEmpty
-          ? null
-          : _locationController.text.trim(),
-      details: _detailsController.text.trim().isEmpty
-          ? _inputController.text.trim()
-          : _detailsController.text.trim(),
-      sourceText: _inputController.text.trim(),
-      scheduledAt: scheduledAt,
-      durationMinutes: 60,
-      reminderAt: computeReminderAt(scheduledAt),
+  Future<void> _pickFile({List<String>? allowedExtensions}) async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      withData: true,
+      type: allowedExtensions == null ? FileType.any : FileType.custom,
+      allowedExtensions: allowedExtensions,
     );
-  }
-
-  Future<void> _checkConflicts() async {
-    final draft = _buildDraft();
-    if (draft == null) {
+    if (result == null) {
       return;
     }
-    setState(() => _submitting = true);
-    try {
-      final result = await widget.controller.checkScheduleConflicts(
-        draft,
-        _draftResult?.draftHash ?? '',
-      );
-      setState(() => _conflictResult = result);
-    } catch (error) {
-      _showMessage(error.toString());
-    } finally {
-      if (mounted) {
-        setState(() => _submitting = false);
+    setState(() {
+      for (final file in result.files) {
+        if (file.bytes != null) {
+          _attachments.add(LocalAttachmentData(fileName: file.name, bytes: file.bytes!));
+        }
       }
-    }
+    });
   }
 
-  Future<void> _confirmSchedule() async {
-    final conflictResult = _conflictResult;
-    if (conflictResult == null) {
-      _showMessage('Run conflict checks before saving.');
+  Future<void> _pickPhoto() async {
+    final picker = ImagePicker();
+    final image = await picker.pickImage(source: ImageSource.camera, imageQuality: 75);
+    if (image == null) {
       return;
     }
-    final draft = _buildDraft();
-    if (draft == null) {
+    final bytes = await image.readAsBytes();
+    setState(() {
+      _attachments.add(LocalAttachmentData(fileName: image.name, bytes: bytes));
+    });
+  }
+
+  Future<void> _submit() async {
+    final text = _textController.text.trim();
+    if (text.isEmpty && _attachments.isEmpty) {
+      _showMessage('请输入内容或上传附件。');
       return;
     }
     setState(() => _submitting = true);
     try {
-      await widget.controller.confirmSchedule(
-        conflictResult.approval.approvalToken,
-        draft,
+      final uploadedIds = <int>[];
+      for (final attachment in _attachments) {
+        final uploaded = await widget.controller.uploadAttachment(_sourceType, attachment);
+        uploadedIds.add(uploaded.attachmentId);
+      }
+      final result = await widget.controller.createScheduleDraft(
+        sourceType: _sourceType,
+        textContent: text,
+        attachmentIds: uploadedIds,
       );
       if (!mounted) {
         return;
       }
-      _showMessage('Schedule saved and reminder jobs created.');
-      Navigator.of(context).pop(true);
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => ScheduleConfirmPage(
+            controller: widget.controller,
+            draftResult: result,
+          ),
+        ),
+      );
     } catch (error) {
       _showMessage(error.toString());
     } finally {
@@ -148,175 +104,104 @@ class _ScheduleDraftPageState extends State<ScheduleDraftPage> {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
-  }
-
-  void _showAttachmentPlaceholder() {
-    _showMessage(
-      'Attachments are planned for the next phase. This MVP is text-first.',
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
-    final draftResult = _draftResult;
-    final conflictResult = _conflictResult;
     return Scaffold(
-      appBar: AppBar(title: const Text('New schedule')),
+      appBar: AppBar(title: const Text('新增日程')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: <Widget>[
-          TextField(
-            controller: _inputController,
-            maxLines: 6,
-            decoration: InputDecoration(
-              labelText: 'Schedule text',
-              hintText:
-                  'Example: Tomorrow 14:30 in the faculty room to discuss course Q&A planning',
-              suffixIcon: IconButton(
-                onPressed: _showAttachmentPlaceholder,
-                icon: const Icon(Icons.attach_file),
-                tooltip: 'Attachment placeholder',
-              ),
-            ),
+          Text('输入来源', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: InputSourceType.values
+                .map(
+                  (item) => ChoiceChip(
+                    label: Text(AppStrings.sourceLabel(item)),
+                    selected: _sourceType == item,
+                    onSelected: (_) => setState(() => _sourceType = item),
+                  ),
+                )
+                .toList(),
           ),
           const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _submitting ? null : _parseDraft,
-            child: Text(_submitting ? 'Working...' : 'Parse draft'),
+          TextField(
+            controller: _textController,
+            maxLines: 6,
+            decoration: InputDecoration(
+              labelText: AppStrings.sourceFieldLabel(_sourceType),
+              hintText: AppStrings.sourceHint(_sourceType),
+            ),
           ),
-          if (draftResult != null) ...<Widget>[
-            const SizedBox(height: 20),
-            if (draftResult.missingFields.isNotEmpty)
-              _InfoCard(
-                title: 'Missing fields',
-                child: Wrap(
-                  spacing: 8,
-                  children: draftResult.missingFields
-                      .map((item) => Chip(label: Text(item)))
-                      .toList(),
+          const SizedBox(height: 12),
+          Text(
+            AppStrings.uploadHint,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFF5B8178)),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: <Widget>[
+              if (_sourceType == InputSourceType.photo)
+                OutlinedButton.icon(
+                  onPressed: _submitting ? null : _pickPhoto,
+                  icon: const Icon(Icons.photo_camera_outlined),
+                  label: const Text('拍照导入'),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: _submitting
+                      ? null
+                      : () => _pickFile(
+                            allowedExtensions: _sourceType == InputSourceType.email
+                                ? <String>['eml', 'png', 'jpg', 'jpeg', 'pdf']
+                                : _sourceType == InputSourceType.chatRecord
+                                    ? <String>['txt', 'json', 'png', 'jpg', 'jpeg', 'pdf']
+                                    : <String>['png', 'jpg', 'jpeg', 'pdf'],
+                          ),
+                  icon: const Icon(Icons.attach_file),
+                  label: Text(
+                    _sourceType == InputSourceType.email
+                        ? '导入邮件文件'
+                        : _sourceType == InputSourceType.chatRecord
+                            ? '导入聊天文件'
+                            : '上传附件',
+                  ),
                 ),
-              ),
-            if (draftResult.ambiguityFlags.isNotEmpty)
-              _InfoCard(
-                title: 'Parser hints',
-                child: Wrap(
-                  spacing: 8,
-                  children: draftResult.ambiguityFlags
-                      .map((item) => Chip(label: Text(item)))
-                      .toList(),
-                ),
-              ),
-            _InfoCard(
-              title: 'Review draft',
-              child: Column(
-                children: <Widget>[
-                  TextField(
-                    controller: _titleController,
-                    decoration: const InputDecoration(labelText: 'Title'),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _scheduledAtController,
-                    decoration: const InputDecoration(
-                      labelText: 'Scheduled at',
-                      hintText: '2026-05-25 14:30',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _locationController,
-                    decoration: const InputDecoration(
-                      labelText: 'Location (optional)',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _detailsController,
-                    minLines: 3,
-                    maxLines: 5,
-                    decoration: const InputDecoration(labelText: 'Details'),
-                  ),
-                  const SizedBox(height: 16),
-                  FilledButton.tonal(
-                    onPressed: _submitting ? null : _checkConflicts,
-                    child: const Text('Check conflicts'),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (conflictResult != null) ...<Widget>[
+            ],
+          ),
+          if (_attachments.isNotEmpty) ...<Widget>[
             const SizedBox(height: 16),
-            _InfoCard(
-              title: 'Conflict review',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text('Risk level: ${conflictResult.riskLevel}'),
-                  const SizedBox(height: 12),
-                  if (conflictResult.conflictItems.isEmpty)
-                    const Text(
-                      'No conflict detected. You can save this schedule now.',
-                    )
-                  else
-                    ...conflictResult.conflictItems.map(
-                      (item) => ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(item.title),
-                        subtitle: Text(
-                          '${formatDateTime(item.startsAt)} - ${formatDateTime(item.endsAt)}',
-                        ),
+            Text('待上传附件', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            ..._attachments.asMap().entries.map(
+                  (entry) => Card(
+                    child: ListTile(
+                      title: Text(entry.value.fileName),
+                      trailing: IconButton(
+                        onPressed: _submitting
+                            ? null
+                            : () => setState(() {
+                                  _attachments.removeAt(entry.key);
+                                }),
+                        icon: const Icon(Icons.close),
                       ),
                     ),
-                  if (conflictResult.suggestions.isNotEmpty) ...<Widget>[
-                    const Divider(),
-                    const Text('Suggestions'),
-                    const SizedBox(height: 8),
-                    ...conflictResult.suggestions.map(
-                      (item) => Text(
-                        '${item.label}: ${formatDateTime(item.candidateStart)}',
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
-                  FilledButton(
-                    onPressed: _submitting ? null : _confirmSchedule,
-                    child: const Text('Approve and save'),
                   ),
-                ],
-              ),
-            ),
+                ),
           ],
+          const SizedBox(height: 20),
+          FilledButton(
+            onPressed: _submitting ? null : _submit,
+            child: Text(_submitting ? '解析中…' : '解析并进入确认页'),
+          ),
         ],
-      ),
-    );
-  }
-}
-
-class _InfoCard extends StatelessWidget {
-  const _InfoCard({required this.title, required this.child});
-
-  final String title;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 16),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            child,
-          ],
-        ),
       ),
     );
   }

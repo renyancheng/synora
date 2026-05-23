@@ -22,10 +22,12 @@ def list_notifications(
         NotificationItem(
             id=row.id,
             channel=row.channel,
+            provider=row.provider,
             recipient=row.recipient,
             subject=row.subject,
             status=row.status,
             error_message=row.error_message,
+            retry_count=row.retry_count,
             created_at=row.created_at,
             delivered_at=row.delivered_at,
         )

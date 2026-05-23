@@ -4,11 +4,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.schemas.common import ApprovalInfo
+from app.schemas.common import ApprovalInfo, SourceType
 
 
 class ScheduleDraftInput(BaseModel):
-    input_text: str = Field(min_length=1)
+    source_type: SourceType
+    text_content: str | None = None
+    attachment_ids: list[int] = Field(default_factory=list)
     context: dict[str, str] = Field(default_factory=dict)
 
 
@@ -20,6 +22,10 @@ class ScheduleDraft(BaseModel):
     scheduled_at: datetime | None = None
     duration_minutes: int = 60
     reminder_at: datetime | None = None
+    source_type: SourceType = "text"
+    source_attachment_ids: list[int] = Field(default_factory=list)
+    parse_confidence: float = 0.0
+    evidence_digest: list[str] = Field(default_factory=list)
 
 
 class ScheduleDraftResponse(BaseModel):
@@ -28,6 +34,8 @@ class ScheduleDraftResponse(BaseModel):
     draft_hash: str
     missing_fields: list[str]
     ambiguity_flags: list[str]
+    evidence_digest: list[str]
+    parse_confidence: float
 
 
 class ConflictCheckRequest(BaseModel):
@@ -85,3 +93,6 @@ class ScheduleItem(BaseModel):
     reminder_at: datetime
     status: str
     created_at: datetime
+    source_type: SourceType
+    parse_confidence: float
+

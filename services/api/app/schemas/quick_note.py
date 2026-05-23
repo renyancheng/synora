@@ -4,18 +4,32 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.schemas.common import ApprovalInfo
+from app.schemas.common import ApprovalInfo, SourceType
 
 
-class QuickNoteRequest(BaseModel):
-    content: str = Field(min_length=1)
+class QuickNoteDraftRequest(BaseModel):
+    source_type: SourceType
+    content: str | None = None
     tags: list[str] = Field(default_factory=list)
-    approval_token: str | None = None
+    attachment_ids: list[int] = Field(default_factory=list)
+    context: dict[str, str] = Field(default_factory=dict)
 
 
-class QuickNotePreviewResponse(BaseModel):
+class QuickNoteConfirmRequest(BaseModel):
+    approval_token: str
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    source_type: SourceType
+    attachment_ids: list[int] = Field(default_factory=list)
+
+
+class QuickNoteDraftResponse(BaseModel):
     status: str = "pending_approval"
+    normalized_content: str
     preview_tags: list[str]
+    source_type: SourceType
+    attachment_ids: list[int]
+    evidence_digest: list[str]
     approval: ApprovalInfo
 
 
@@ -30,3 +44,5 @@ class QuickNoteItem(BaseModel):
     content: str
     tags: list[str]
     created_at: datetime
+    source_type: SourceType
+

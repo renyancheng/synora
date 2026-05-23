@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
+import '../strings.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key, required this.controller});
@@ -67,9 +68,6 @@ class _LoginPageState extends State<LoginPage> {
             child: Card(
               margin: const EdgeInsets.all(24),
               elevation: 2,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(24),
-              ),
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Form(
@@ -78,46 +76,31 @@ class _LoginPageState extends State<LoginPage> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text('Synora', style: theme.textTheme.headlineMedium),
+                      Text(AppStrings.appTitle, style: theme.textTheme.headlineSmall),
                       const SizedBox(height: 8),
                       Text(
-                        'Life Memo Assistant MVP',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          color: const Color(0xFF275C52),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Sign in to manage schedules, quick notes, and reminder history. Attachments stay as placeholders in this MVP.',
-                        style: theme.textTheme.bodyMedium,
+                        AppStrings.loginSubtitle,
+                        style: theme.textTheme.bodyMedium?.copyWith(color: const Color(0xFF275C52)),
                       ),
                       const SizedBox(height: 24),
                       TextFormField(
                         controller: _emailController,
-                        decoration: const InputDecoration(labelText: 'Email'),
-                        validator: (value) => (value == null || value.trim().isEmpty)
-                            ? 'Email is required.'
-                            : null,
+                        decoration: const InputDecoration(labelText: '邮箱'),
+                        validator: (value) => (value == null || value.trim().isEmpty) ? '请输入邮箱。' : null,
                       ),
                       const SizedBox(height: 16),
                       TextFormField(
                         controller: _passwordController,
-                        decoration: const InputDecoration(labelText: 'Password'),
+                        decoration: const InputDecoration(labelText: '密码'),
                         obscureText: true,
-                        validator: (value) => (value == null || value.isEmpty)
-                            ? 'Password is required.'
-                            : null,
+                        validator: (value) => (value == null || value.isEmpty) ? '请输入密码。' : null,
                       ),
                       const SizedBox(height: 24),
                       SizedBox(
                         width: double.infinity,
                         child: FilledButton(
                           onPressed: widget.controller.isLoading ? null : _submit,
-                          child: Text(
-                            widget.controller.isLoading
-                                ? 'Signing in...'
-                                : 'Open workspace',
-                          ),
+                          child: Text(widget.controller.isLoading ? '登录中…' : AppStrings.loginButton),
                         ),
                       ),
                     ],

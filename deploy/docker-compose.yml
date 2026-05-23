@@ -9,11 +9,38 @@ services:
       - "5432:5432"
     volumes:
       - synora-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synora -d synora"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: synora
+      MINIO_ROOT_PASSWORD: synora123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - synora-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   mailhog:
     image: mailhog/mailhog:v1.0.1
@@ -25,50 +52,74 @@ services:
     build:
       context: ../services/api
     env_file:
-      - .env.example
+      - .env
     environment:
       SYNORA_DATABASE_URL: postgresql+psycopg://synora:synora@postgres:5432/synora
       SYNORA_CELERY_BROKER_URL: redis://redis:6379/0
       SYNORA_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SYNORA_MINIO_ENDPOINT: minio:9000
+      SYNORA_MINIO_ACCESS_KEY: synora
+      SYNORA_MINIO_SECRET_KEY: synora123
       SYNORA_SMTP_HOST: mailhog
       SYNORA_SMTP_PORT: 1025
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
-      - redis
-      - mailhog
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
 
   worker:
     build:
       context: ../services/api
     command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info
     env_file:
-      - .env.example
+      - .env
     environment:
       SYNORA_DATABASE_URL: postgresql+psycopg://synora:synora@postgres:5432/synora
       SYNORA_CELERY_BROKER_URL: redis://redis:6379/0
       SYNORA_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SYNORA_MINIO_ENDPOINT: minio:9000
+      SYNORA_MINIO_ACCESS_KEY: synora
+      SYNORA_MINIO_SECRET_KEY: synora123
       SYNORA_SMTP_HOST: mailhog
       SYNORA_SMTP_PORT: 1025
     depends_on:
-      - postgres
-      - redis
-      - mailhog
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
 
   beat:
     build:
       context: ../services/api
     command: celery -A app.tasks.celery_app.celery_app beat --loglevel=info
     env_file:
-      - .env.example
+      - .env
     environment:
       SYNORA_DATABASE_URL: postgresql+psycopg://synora:synora@postgres:5432/synora
       SYNORA_CELERY_BROKER_URL: redis://redis:6379/0
       SYNORA_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      SYNORA_MINIO_ENDPOINT: minio:9000
+      SYNORA_MINIO_ACCESS_KEY: synora
+      SYNORA_MINIO_SECRET_KEY: synora123
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
 
 volumes:
   synora-postgres:
+  synora-minio:

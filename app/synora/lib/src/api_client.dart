@@ -1,5 +1,7 @@
 import 'dart:convert';
-import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import 'models.dart';
 
@@ -13,20 +15,23 @@ class ApiException implements Exception {
 }
 
 class ApiClient {
-  ApiClient({String? baseUrl})
-      : _baseUrl = baseUrl ??
-            const String.fromEnvironment(
-              'SYNORA_API_BASE_URL',
-              defaultValue: 'http://10.0.2.2:8000',
-            );
+  ApiClient({String? baseUrl}) : _baseUrl = baseUrl ?? _defaultBaseUrl();
 
   final String _baseUrl;
-  final HttpClient _httpClient = HttpClient();
+  final http.Client _httpClient = http.Client();
 
   String? _accessToken;
 
   void setAccessToken(String? token) {
     _accessToken = token;
+  }
+
+  static String _defaultBaseUrl() {
+    const configured = String.fromEnvironment('SYNORA_API_BASE_URL');
+    if (configured.isNotEmpty) {
+      return configured;
+    }
+    return kIsWeb ? 'http://localhost:8000' : 'http://10.0.2.2:8000';
   }
 
   Future<SessionInfo> login(String email, String password) async {
@@ -39,6 +44,32 @@ class ApiClient {
     final session = SessionInfo.fromJson(json as Map<String, dynamic>);
     setAccessToken(session.accessToken);
     return session;
+  }
+
+  Future<UploadedAttachment> uploadAttachment(
+    InputSourceType sourceType,
+    LocalAttachmentData attachment,
+  ) async {
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('${_normalizedBase()}/attachments/upload'),
+    );
+    request.fields['source_type'] = sourceType.apiValue;
+    request.headers.addAll(_authHeaders(includeJson: false));
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'file',
+        attachment.bytes,
+        filename: attachment.fileName,
+      ),
+    );
+    final response = await request.send();
+    final body = await response.stream.bytesToString();
+    final decoded = body.isEmpty ? null : jsonDecode(body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ApiException(_extractErrorMessage(decoded, response.statusCode));
+    }
+    return UploadedAttachment.fromJson(decoded as Map<String, dynamic>);
   }
 
   Future<List<ScheduleItem>> fetchSchedules() async {
@@ -56,11 +87,20 @@ class ApiClient {
     return _asList(json).map(NotificationItem.fromJson).toList();
   }
 
-  Future<ScheduleDraftResult> createScheduleDraft(String inputText) async {
+  Future<ScheduleDraftResult> createScheduleDraft({
+    required InputSourceType sourceType,
+    required String textContent,
+    required List<int> attachmentIds,
+  }) async {
     final json = await _sendJson(
       'POST',
       '/schedule/drafts',
-      body: {'input_text': inputText, 'context': <String, String>{}},
+      body: {
+        'source_type': sourceType.apiValue,
+        'text_content': textContent,
+        'attachment_ids': attachmentIds,
+        'context': <String, String>{},
+      },
     );
     return ScheduleDraftResult.fromJson(json as Map<String, dynamic>);
   }
@@ -92,29 +132,41 @@ class ApiClient {
     return ScheduleConfirmResult.fromJson(json as Map<String, dynamic>);
   }
 
-  Future<QuickNotePreview> previewQuickNote(
-    String content,
-    List<String> tags,
-  ) async {
+  Future<QuickNoteDraftPreview> createQuickNoteDraft({
+    required InputSourceType sourceType,
+    required String content,
+    required List<String> tags,
+    required List<int> attachmentIds,
+  }) async {
     final json = await _sendJson(
       'POST',
-      '/quick-notes',
-      body: {'content': content, 'tags': tags},
+      '/quick-notes/drafts',
+      body: {
+        'source_type': sourceType.apiValue,
+        'content': content,
+        'tags': tags,
+        'attachment_ids': attachmentIds,
+        'context': <String, String>{},
+      },
     );
-    return QuickNotePreview.fromJson(json as Map<String, dynamic>);
+    return QuickNoteDraftPreview.fromJson(json as Map<String, dynamic>);
   }
 
-  Future<QuickNoteSaveResult> confirmQuickNote(
-    String content,
-    List<String> tags,
-    String approvalToken,
-  ) async {
+  Future<QuickNoteSaveResult> confirmQuickNote({
+    required String content,
+    required List<String> tags,
+    required InputSourceType sourceType,
+    required List<int> attachmentIds,
+    required String approvalToken,
+  }) async {
     final json = await _sendJson(
       'POST',
-      '/quick-notes',
+      '/quick-notes/confirm',
       body: {
         'content': content,
         'tags': tags,
+        'source_type': sourceType.apiValue,
+        'attachment_ids': attachmentIds,
         'approval_token': approvalToken,
       },
     );
@@ -127,39 +179,51 @@ class ApiClient {
     Map<String, dynamic>? body,
     bool authenticated = true,
   }) async {
-    final normalizedBase =
-        _baseUrl.endsWith('/') ? _baseUrl.substring(0, _baseUrl.length - 1) : _baseUrl;
-    final request = await _httpClient.openUrl(
-      method,
-      Uri.parse('$normalizedBase$path'),
-    );
-    request.headers.contentType = ContentType.json;
-    if (authenticated) {
-      final token = _accessToken;
-      if (token == null || token.isEmpty) {
-        throw ApiException('Please log in first.');
-      }
-      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-    }
-    if (body != null) {
-      request.write(jsonEncode(body));
-    }
-
-    final response = await request.close();
-    final responseBody = await response.transform(utf8.decoder).join();
+    final uri = Uri.parse('${_normalizedBase()}$path');
+    final request = http.Request(method, uri);
+    request.headers.addAll(_authHeaders(includeJson: true, authenticated: authenticated));
+    request.body = body == null ? '' : jsonEncode(body);
+    final response = await _httpClient.send(request);
+    final responseBody = await response.stream.bytesToString();
     final decoded = responseBody.isEmpty ? null : jsonDecode(responseBody);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      if (decoded is Map<String, dynamic> && decoded['detail'] is String) {
-        throw ApiException(decoded['detail'] as String);
-      }
-      throw ApiException('Request failed: ${response.statusCode}');
+      throw ApiException(_extractErrorMessage(decoded, response.statusCode));
     }
     return decoded;
   }
 
+  Map<String, String> _authHeaders({
+    required bool includeJson,
+    bool authenticated = true,
+  }) {
+    final headers = <String, String>{};
+    if (includeJson) {
+      headers['Content-Type'] = 'application/json';
+    }
+    if (authenticated) {
+      final token = _accessToken;
+      if (token == null || token.isEmpty) {
+        throw ApiException('请先登录后再操作。');
+      }
+      headers['Authorization'] = 'Bearer $token';
+    }
+    return headers;
+  }
+
+  String _normalizedBase() {
+    return _baseUrl.endsWith('/') ? _baseUrl.substring(0, _baseUrl.length - 1) : _baseUrl;
+  }
+
+  String _extractErrorMessage(dynamic decoded, int statusCode) {
+    if (decoded is Map<String, dynamic> && decoded['detail'] is String) {
+      return decoded['detail'] as String;
+    }
+    return '请求失败（$statusCode），请稍后重试。';
+  }
+
   List<Map<String, dynamic>> _asList(dynamic json) {
     if (json is! List<dynamic>) {
-      throw ApiException('Unexpected response payload.');
+      throw ApiException('返回数据格式不正确。');
     }
     return json.map((item) => item as Map<String, dynamic>).toList();
   }

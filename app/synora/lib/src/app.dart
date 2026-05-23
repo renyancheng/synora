@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'app_controller.dart';
 import 'app_scope.dart';
 import 'pages/home_page.dart';
 import 'pages/login_page.dart';
+import 'strings.dart';
 
 class SynoraApp extends StatefulWidget {
   const SynoraApp({super.key});
@@ -39,7 +41,11 @@ class _SynoraAppState extends State<SynoraApp> {
         animation: _controller,
         builder: (context, _) {
           return MaterialApp(
-            title: 'Synora',
+            title: AppStrings.appTitle,
+            debugShowCheckedModeBanner: false,
+            locale: const Locale('zh', 'CN'),
+            supportedLocales: const [Locale('zh', 'CN')],
+            localizationsDelegates: GlobalMaterialLocalizations.delegates,
             theme: ThemeData(
               colorScheme: colorScheme,
               useMaterial3: true,
@@ -47,7 +53,7 @@ class _SynoraAppState extends State<SynoraApp> {
               inputDecorationTheme: InputDecorationTheme(
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
               ),
-              cardTheme: CardTheme(
+              cardTheme: CardThemeData(
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
               ),
             ),

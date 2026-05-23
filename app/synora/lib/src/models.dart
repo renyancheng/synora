@@ -1,3 +1,75 @@
+import 'dart:typed_data';
+
+enum InputSourceType { text, screenshot, photo, chatRecord, email }
+
+extension InputSourceTypeX on InputSourceType {
+  String get apiValue {
+    switch (this) {
+      case InputSourceType.text:
+        return 'text';
+      case InputSourceType.screenshot:
+        return 'screenshot';
+      case InputSourceType.photo:
+        return 'photo';
+      case InputSourceType.chatRecord:
+        return 'chat_record';
+      case InputSourceType.email:
+        return 'email';
+    }
+  }
+
+  static InputSourceType fromApiValue(String value) {
+    switch (value) {
+      case 'screenshot':
+        return InputSourceType.screenshot;
+      case 'photo':
+        return InputSourceType.photo;
+      case 'chat_record':
+        return InputSourceType.chatRecord;
+      case 'email':
+        return InputSourceType.email;
+      default:
+        return InputSourceType.text;
+    }
+  }
+}
+
+class LocalAttachmentData {
+  LocalAttachmentData({
+    required this.fileName,
+    required this.bytes,
+  });
+
+  final String fileName;
+  final Uint8List bytes;
+}
+
+class UploadedAttachment {
+  UploadedAttachment({
+    required this.attachmentId,
+    required this.fileName,
+    required this.contentType,
+    required this.sizeBytes,
+    required this.sourceType,
+  });
+
+  final int attachmentId;
+  final String fileName;
+  final String contentType;
+  final int sizeBytes;
+  final InputSourceType sourceType;
+
+  factory UploadedAttachment.fromJson(Map<String, dynamic> json) {
+    return UploadedAttachment(
+      attachmentId: json['attachment_id'] as int,
+      fileName: json['file_name'] as String,
+      contentType: json['content_type'] as String,
+      sizeBytes: json['size_bytes'] as int,
+      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String),
+    );
+  }
+}
+
 class UserProfile {
   UserProfile({
     required this.id,
@@ -67,6 +139,10 @@ class ScheduleDraft {
     required this.details,
     required this.sourceText,
     required this.durationMinutes,
+    required this.sourceType,
+    required this.sourceAttachmentIds,
+    required this.parseConfidence,
+    required this.evidenceDigest,
     this.location,
     this.scheduledAt,
     this.reminderAt,
@@ -79,6 +155,10 @@ class ScheduleDraft {
   final DateTime? scheduledAt;
   final int durationMinutes;
   final DateTime? reminderAt;
+  final InputSourceType sourceType;
+  final List<int> sourceAttachmentIds;
+  final double parseConfidence;
+  final List<String> evidenceDigest;
 
   factory ScheduleDraft.fromJson(Map<String, dynamic> json) {
     return ScheduleDraft(
@@ -89,6 +169,10 @@ class ScheduleDraft {
       scheduledAt: json['scheduled_at'] == null ? null : DateTime.parse(json['scheduled_at'] as String),
       durationMinutes: json['duration_minutes'] as int? ?? 60,
       reminderAt: json['reminder_at'] == null ? null : DateTime.parse(json['reminder_at'] as String),
+      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String? ?? 'text'),
+      sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
+      parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
+      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
     );
   }
 
@@ -101,6 +185,10 @@ class ScheduleDraft {
       'scheduled_at': scheduledAt?.toUtc().toIso8601String(),
       'duration_minutes': durationMinutes,
       'reminder_at': reminderAt?.toUtc().toIso8601String(),
+      'source_type': sourceType.apiValue,
+      'source_attachment_ids': sourceAttachmentIds,
+      'parse_confidence': parseConfidence,
+      'evidence_digest': evidenceDigest,
     };
   }
 
@@ -112,6 +200,10 @@ class ScheduleDraft {
     DateTime? scheduledAt,
     int? durationMinutes,
     DateTime? reminderAt,
+    InputSourceType? sourceType,
+    List<int>? sourceAttachmentIds,
+    double? parseConfidence,
+    List<String>? evidenceDigest,
   }) {
     return ScheduleDraft(
       title: title ?? this.title,
@@ -121,6 +213,10 @@ class ScheduleDraft {
       scheduledAt: scheduledAt ?? this.scheduledAt,
       durationMinutes: durationMinutes ?? this.durationMinutes,
       reminderAt: reminderAt ?? this.reminderAt,
+      sourceType: sourceType ?? this.sourceType,
+      sourceAttachmentIds: sourceAttachmentIds ?? this.sourceAttachmentIds,
+      parseConfidence: parseConfidence ?? this.parseConfidence,
+      evidenceDigest: evidenceDigest ?? this.evidenceDigest,
     );
   }
 }
@@ -131,12 +227,16 @@ class ScheduleDraftResult {
     required this.draftHash,
     required this.missingFields,
     required this.ambiguityFlags,
+    required this.evidenceDigest,
+    required this.parseConfidence,
   });
 
   final ScheduleDraft draft;
   final String draftHash;
   final List<String> missingFields;
   final List<String> ambiguityFlags;
+  final List<String> evidenceDigest;
+  final double parseConfidence;
 
   factory ScheduleDraftResult.fromJson(Map<String, dynamic> json) {
     return ScheduleDraftResult(
@@ -144,6 +244,8 @@ class ScheduleDraftResult {
       draftHash: json['draft_hash'] as String,
       missingFields: (json['missing_fields'] as List<dynamic>).cast<String>(),
       ambiguityFlags: (json['ambiguity_flags'] as List<dynamic>).cast<String>(),
+      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
     );
   }
 }
@@ -273,6 +375,8 @@ class ScheduleItem {
     required this.reminderAt,
     required this.status,
     required this.createdAt,
+    required this.sourceType,
+    required this.parseConfidence,
     this.location,
   });
 
@@ -285,6 +389,8 @@ class ScheduleItem {
   final DateTime reminderAt;
   final String status;
   final DateTime createdAt;
+  final InputSourceType sourceType;
+  final double parseConfidence;
 
   factory ScheduleItem.fromJson(Map<String, dynamic> json) {
     return ScheduleItem(
@@ -297,22 +403,36 @@ class ScheduleItem {
       reminderAt: DateTime.parse(json['reminder_at'] as String),
       status: json['status'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
+      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String? ?? 'text'),
+      parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
     );
   }
 }
 
-class QuickNotePreview {
-  QuickNotePreview({
+class QuickNoteDraftPreview {
+  QuickNoteDraftPreview({
+    required this.normalizedContent,
     required this.previewTags,
+    required this.sourceType,
+    required this.attachmentIds,
+    required this.evidenceDigest,
     required this.approval,
   });
 
+  final String normalizedContent;
   final List<String> previewTags;
+  final InputSourceType sourceType;
+  final List<int> attachmentIds;
+  final List<String> evidenceDigest;
   final ApprovalInfo approval;
 
-  factory QuickNotePreview.fromJson(Map<String, dynamic> json) {
-    return QuickNotePreview(
+  factory QuickNoteDraftPreview.fromJson(Map<String, dynamic> json) {
+    return QuickNoteDraftPreview(
+      normalizedContent: json['normalized_content'] as String,
       previewTags: (json['preview_tags'] as List<dynamic>).cast<String>(),
+      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String),
+      attachmentIds: (json['attachment_ids'] as List<dynamic>).cast<int>(),
+      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
       approval: ApprovalInfo.fromJson(json['approval'] as Map<String, dynamic>),
     );
   }
@@ -341,12 +461,14 @@ class QuickNoteItem {
     required this.content,
     required this.tags,
     required this.createdAt,
+    required this.sourceType,
   });
 
   final int id;
   final String content;
   final List<String> tags;
   final DateTime createdAt;
+  final InputSourceType sourceType;
 
   factory QuickNoteItem.fromJson(Map<String, dynamic> json) {
     return QuickNoteItem(
@@ -354,6 +476,7 @@ class QuickNoteItem {
       content: json['content'] as String,
       tags: (json['tags'] as List<dynamic>).cast<String>(),
       createdAt: DateTime.parse(json['created_at'] as String),
+      sourceType: InputSourceTypeX.fromApiValue(json['source_type'] as String? ?? 'text'),
     );
   }
 }
@@ -362,9 +485,11 @@ class NotificationItem {
   NotificationItem({
     required this.id,
     required this.channel,
+    required this.provider,
     required this.recipient,
     required this.subject,
     required this.status,
+    required this.retryCount,
     required this.createdAt,
     this.errorMessage,
     this.deliveredAt,
@@ -372,9 +497,11 @@ class NotificationItem {
 
   final int id;
   final String channel;
+  final String provider;
   final String recipient;
   final String subject;
   final String status;
+  final int retryCount;
   final String? errorMessage;
   final DateTime createdAt;
   final DateTime? deliveredAt;
@@ -383,9 +510,11 @@ class NotificationItem {
     return NotificationItem(
       id: json['id'] as int,
       channel: json['channel'] as String,
+      provider: json['provider'] as String? ?? '',
       recipient: json['recipient'] as String,
       subject: json['subject'] as String,
       status: json['status'] as String,
+      retryCount: json['retry_count'] as int? ?? 0,
       errorMessage: json['error_message'] as String?,
       createdAt: DateTime.parse(json['created_at'] as String),
       deliveredAt: json['delivered_at'] == null ? null : DateTime.parse(json['delivered_at'] as String),

@@ -8,9 +8,12 @@ from pydantic import BaseModel
 class NotificationItem(BaseModel):
     id: int
     channel: str
+    provider: str
     recipient: str
     subject: str
     status: str
     error_message: str | None = None
+    retry_count: int
     created_at: datetime
     delivered_at: datetime | None = None
+

@@ -11,13 +11,24 @@ from app.models import ApprovalRequest
 from app.security import future_utc, mint_token, sha256_text
 
 
-def create_approval_request(db: Session, user_id: int, action: str, payload: dict, draft_hash: str) -> tuple[ApprovalRequest, str]:
+def create_approval_request(
+    db: Session,
+    *,
+    user_id: int,
+    action: str,
+    payload: dict,
+    draft_hash: str,
+    normalized_payload: dict,
+    evidence_digest: list[str],
+) -> tuple[ApprovalRequest, str]:
     token = mint_token()
     approval = ApprovalRequest(
         user_id=user_id,
         action=action,
         draft_hash=draft_hash,
         payload_json=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        normalized_payload_json=json.dumps(normalized_payload, ensure_ascii=False, sort_keys=True),
+        evidence_digest_json=json.dumps(evidence_digest, ensure_ascii=False),
         token_hash=sha256_text(token),
         expires_at=future_utc(get_settings().approval_ttl_hours),
     )
@@ -27,7 +38,7 @@ def create_approval_request(db: Session, user_id: int, action: str, payload: dic
     return approval, token
 
 
-def consume_approval_request(db: Session, user_id: int, action: str, approval_token: str, draft_hash: str) -> ApprovalRequest:
+def consume_approval_request(db: Session, *, user_id: int, action: str, approval_token: str, draft_hash: str) -> ApprovalRequest:
     approval = db.scalar(
         select(ApprovalRequest).where(
             ApprovalRequest.user_id == user_id,
@@ -37,13 +48,13 @@ def consume_approval_request(db: Session, user_id: int, action: str, approval_to
         )
     )
     if not approval:
-        raise ValueError("审批令牌无效")
+        raise ValueError("审批令牌无效。")
     if approval.expires_at <= datetime.now(timezone.utc):
         approval.status = "expired"
         db.commit()
-        raise ValueError("审批令牌已过期")
+        raise ValueError("审批令牌已过期，请重新生成。")
     if approval.draft_hash != draft_hash:
-        raise ValueError("审批草稿校验失败")
+        raise ValueError("审批草稿校验失败，请重新确认。")
 
     approval.status = "confirmed"
     approval.confirmed_at = datetime.now(timezone.utc)

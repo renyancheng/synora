@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies import get_current_user
-from app.domains.schedule.service import create_schedule_after_approval, detect_conflicts, parse_schedule
+from app.domains.schedule.service import create_schedule_after_approval, create_schedule_draft, detect_conflicts
 from app.models import Schedule, User
 from app.schemas.schedule import (
     ConflictCheckRequest,
@@ -12,8 +12,8 @@ from app.schemas.schedule import (
     ReminderJobInfo,
     ScheduleConfirmRequest,
     ScheduleConfirmResponse,
-    ScheduleDraftResponse,
     ScheduleDraftInput,
+    ScheduleDraftResponse,
     ScheduleItem,
 )
 
@@ -23,14 +23,24 @@ router = APIRouter(prefix="/schedule", tags=["schedule"])
 @router.post("/drafts", response_model=ScheduleDraftResponse)
 def create_draft(
     payload: ScheduleDraftInput,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ScheduleDraftResponse:
-    draft, draft_hash, missing_fields, ambiguity_flags = parse_schedule(current_user.id, payload.input_text)
+    try:
+        draft, draft_hash, missing_fields, ambiguity_flags, evidence_digest, parse_confidence = create_schedule_draft(
+            db,
+            current_user.id,
+            payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return ScheduleDraftResponse(
         draft=draft,
         draft_hash=draft_hash,
         missing_fields=missing_fields,
         ambiguity_flags=ambiguity_flags,
+        evidence_digest=evidence_digest,
+        parse_confidence=parse_confidence,
     )
 
 
@@ -83,6 +93,8 @@ def list_schedules(
             reminder_at=row.reminder_at,
             status=row.status,
             created_at=row.created_at,
+            source_type=row.source_type,
+            parse_confidence=row.parse_confidence,
         )
         for row in rows
     ]

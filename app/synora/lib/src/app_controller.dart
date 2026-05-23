@@ -58,9 +58,29 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<ScheduleDraftResult> createScheduleDraft(String inputText) => _apiClient.createScheduleDraft(inputText);
+  Future<UploadedAttachment> uploadAttachment(
+    InputSourceType sourceType,
+    LocalAttachmentData attachment,
+  ) {
+    return _apiClient.uploadAttachment(sourceType, attachment);
+  }
 
-  Future<ConflictCheckResult> checkScheduleConflicts(ScheduleDraft draft, String draftHash) {
+  Future<ScheduleDraftResult> createScheduleDraft({
+    required InputSourceType sourceType,
+    required String textContent,
+    required List<int> attachmentIds,
+  }) {
+    return _apiClient.createScheduleDraft(
+      sourceType: sourceType,
+      textContent: textContent,
+      attachmentIds: attachmentIds,
+    );
+  }
+
+  Future<ConflictCheckResult> checkScheduleConflicts(
+    ScheduleDraft draft,
+    String draftHash,
+  ) {
     return _apiClient.checkScheduleConflicts(draft, draftHash);
   }
 
@@ -70,12 +90,34 @@ class AppController extends ChangeNotifier {
     return result;
   }
 
-  Future<QuickNotePreview> previewQuickNote(String content, List<String> tags) {
-    return _apiClient.previewQuickNote(content, tags);
+  Future<QuickNoteDraftPreview> createQuickNoteDraft({
+    required InputSourceType sourceType,
+    required String content,
+    required List<String> tags,
+    required List<int> attachmentIds,
+  }) {
+    return _apiClient.createQuickNoteDraft(
+      sourceType: sourceType,
+      content: content,
+      tags: tags,
+      attachmentIds: attachmentIds,
+    );
   }
 
-  Future<QuickNoteSaveResult> confirmQuickNote(String content, List<String> tags, String approvalToken) async {
-    final result = await _apiClient.confirmQuickNote(content, tags, approvalToken);
+  Future<QuickNoteSaveResult> confirmQuickNote({
+    required String content,
+    required List<String> tags,
+    required InputSourceType sourceType,
+    required List<int> attachmentIds,
+    required String approvalToken,
+  }) async {
+    final result = await _apiClient.confirmQuickNote(
+      content: content,
+      tags: tags,
+      sourceType: sourceType,
+      attachmentIds: attachmentIds,
+      approvalToken: approvalToken,
+    );
     await loadDashboard();
     return result;
   }

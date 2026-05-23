@@ -1,18 +1,80 @@
 import unittest
+from unittest.mock import patch
 
-from app.runtime.agent_runtime_stub import parse_schedule_draft, suggest_note_tags
+from app.runtime.tool_impls import parse_schedule_draft, record_quick_note
 
 
 class RuntimeParserTests(unittest.TestCase):
-    def test_parse_relative_datetime(self) -> None:
-        result = parse_schedule_draft("明天 14:30 在实验室 讨论项目进度")
-        self.assertIsNotNone(result.draft.scheduled_at)
-        self.assertEqual(result.draft.location, "实验室 讨论项目进度")
-        self.assertEqual(result.missing_fields, [])
+    @patch("app.runtime.tool_impls.build_attachment_summaries", return_value=[])
+    @patch("app.runtime.tool_impls.ModelAdapter.extract_schedule")
+    def test_parse_schedule_with_model_result(self, extract_schedule_mock, _attachment_mock) -> None:
+        extract_schedule_mock.return_value = {
+            "title": "教学例会",
+            "location": "学院会议室",
+            "details": "讨论课程安排",
+            "scheduled_at": "2026-05-25T14:30:00+08:00",
+            "duration_minutes": 60,
+            "missing_fields": [],
+            "ambiguity_flags": [],
+            "parse_confidence": 0.92,
+            "evidence_digest": ["明天下午三点", "学院会议室", "讨论课程安排"],
+        }
+        result = parse_schedule_draft(
+            db=None,
+            user_id=1,
+            source_type="text",
+            text_content="明天下午三点在学院会议室讨论课程安排",
+            attachment_ids=[],
+            context={"client_timezone": "Asia/Shanghai"},
+        )
+        self.assertEqual(result["draft"]["title"], "教学例会")
+        self.assertEqual(result["missing_fields"], [])
+        self.assertAlmostEqual(result["parse_confidence"], 0.92)
 
-    def test_suggest_note_tags(self) -> None:
-        tags = suggest_note_tags("准备论文投稿清单和实验结果整理", [])
-        self.assertIn("科研", tags)
+    @patch("app.runtime.tool_impls.build_attachment_summaries", return_value=[])
+    @patch("app.runtime.tool_impls.ModelAdapter.extract_schedule")
+    def test_parse_schedule_infers_relative_time_when_model_returns_null(self, extract_schedule_mock, _attachment_mock) -> None:
+        extract_schedule_mock.return_value = {
+            "title": "软件工程教研会",
+            "location": "信息楼A302",
+            "details": "讨论下周课程安排",
+            "scheduled_at": None,
+            "duration_minutes": 60,
+            "missing_fields": ["scheduled_at"],
+            "ambiguity_flags": ["time_ambiguous"],
+            "parse_confidence": 0.9,
+            "evidence_digest": ["明天下午3点", "信息楼A302"],
+        }
+        result = parse_schedule_draft(
+            db=None,
+            user_id=1,
+            source_type="text",
+            text_content="明天下午3点在信息楼A302参加软件工程教研会，讨论下周课程安排。",
+            attachment_ids=[],
+            context={"client_timezone": "Asia/Shanghai"},
+        )
+        self.assertEqual(result["missing_fields"], [])
+        self.assertIsNotNone(result["draft"]["scheduled_at"])
+
+    @patch("app.runtime.tool_impls.build_attachment_summaries", return_value=[])
+    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    def test_quick_note_preview_tags(self, suggest_tags_mock, _attachment_mock) -> None:
+        suggest_tags_mock.return_value = {
+            "normalized_content": "整理论文实验图表并准备投稿清单",
+            "preview_tags": ["科研", "论文", "待办"],
+            "evidence_digest": ["论文", "实验图表", "投稿清单"],
+        }
+        result = record_quick_note(
+            db=None,
+            user_id=1,
+            source_type="text",
+            content="整理论文实验图表并准备投稿清单",
+            tags=[],
+            attachment_ids=[],
+            context={},
+        )
+        self.assertEqual(result["preview_tags"], ["科研", "论文", "待办"])
+        self.assertEqual(result["normalized_content"], "整理论文实验图表并准备投稿清单")
 
 
 if __name__ == "__main__":

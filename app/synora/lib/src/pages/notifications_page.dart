@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../date_utils.dart';
 import '../models.dart';
+import '../strings.dart';
 
 class NotificationsPage extends StatelessWidget {
   const NotificationsPage({super.key, required this.controller});
@@ -15,7 +16,7 @@ class NotificationsPage extends StatelessWidget {
       animation: controller,
       builder: (context, _) => Scaffold(
         appBar: AppBar(
-          title: const Text('Notification history'),
+          title: const Text(AppStrings.notifications),
           actions: <Widget>[
             IconButton(
               onPressed: controller.loadDashboard,
@@ -60,11 +61,11 @@ class _NotificationTile extends StatelessWidget {
       child: ListTile(
         title: Text(item.subject),
         subtitle: Text(
-          '${item.channel} -> ${item.recipient}\nCreated: ${formatDateTime(item.createdAt)}${item.deliveredAt == null ? '' : '\nDelivered: ${formatDateTime(item.deliveredAt)}'}${item.errorMessage == null ? '' : '\nError: ${item.errorMessage}'}',
+          '${AppStrings.channelLabel(item.channel)} → ${item.recipient}\n创建时间：${formatDateTime(item.createdAt)}${item.deliveredAt == null ? '' : '\n送达时间：${formatDateTime(item.deliveredAt)}'}${item.errorMessage == null ? '' : '\n失败原因：${item.errorMessage}'}\n重试次数：${item.retryCount}',
         ),
         trailing: Chip(
-          label: Text(item.status),
-          backgroundColor: _statusColor().withOpacity(0.12),
+          label: Text(AppStrings.notificationStatus(item.status)),
+          backgroundColor: _statusColor().withValues(alpha: 0.12),
           labelStyle: TextStyle(color: _statusColor()),
         ),
         isThreeLine: true,
@@ -84,9 +85,7 @@ class _NotificationsEmpty extends StatelessWidget {
         color: const Color(0xFFF5FAF8),
         borderRadius: BorderRadius.circular(20),
       ),
-      child: const Text(
-        'No reminder records yet. Create a schedule and the reminder history will appear here.',
-      ),
+      child: const Text(AppStrings.emptyNotifications),
     );
   }
 }

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
+
+SourceType = Literal["text", "screenshot", "photo", "chat_record", "email"]
 
 
 class ApiEnvelope(BaseModel):
@@ -21,3 +24,4 @@ class ApprovalInfo(BaseModel):
     action: str
     expires_at: datetime
     draft_hash: str
+

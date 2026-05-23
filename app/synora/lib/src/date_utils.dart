@@ -3,13 +3,18 @@ DateTime? parseEditableDateTime(String input) {
   if (trimmed.isEmpty) {
     return null;
   }
-  final normalized = trimmed.contains('T') ? trimmed : trimmed.replaceFirst(' ', 'T');
+  final normalized = trimmed
+      .replaceAll('年', '-')
+      .replaceAll('月', '-')
+      .replaceAll('日', '')
+      .replaceAll('/', '-')
+      .replaceFirst(' ', 'T');
   return DateTime.tryParse(normalized);
 }
 
 String formatDateTime(DateTime? value) {
   if (value == null) {
-    return 'TBD';
+    return '待补充';
   }
   final local = value.toLocal();
   final year = local.year.toString().padLeft(4, '0');
@@ -17,17 +22,5 @@ String formatDateTime(DateTime? value) {
   final day = local.day.toString().padLeft(2, '0');
   final hour = local.hour.toString().padLeft(2, '0');
   final minute = local.minute.toString().padLeft(2, '0');
-  return '$year-$month-$day $hour:$minute';
-}
-
-DateTime computeReminderAt(DateTime scheduledAt) {
-  final now = DateTime.now();
-  var reminderAt = scheduledAt.subtract(const Duration(days: 1));
-  if (!reminderAt.isAfter(now)) {
-    reminderAt = scheduledAt.subtract(const Duration(minutes: 30));
-  }
-  if (!reminderAt.isAfter(now)) {
-    reminderAt = now.add(const Duration(minutes: 5));
-  }
-  return reminderAt;
+  return '$year年$month月$day日 $hour:$minute';
 }
