@@ -129,7 +129,14 @@ def stream_conversation_message(
                 data = json.dumps(item["data"], ensure_ascii=False)
                 yield f"event: {event}\ndata: {data}\n\n"
         except ValueError as exc:
-            payload = json.dumps({"message": str(exc)}, ensure_ascii=False)
+            payload = json.dumps(
+                {
+                    "code": "conversation_stream_error",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+                ensure_ascii=False,
+            )
             yield f"event: run_failed\ndata: {payload}\n\n"
 
     return StreamingResponse(

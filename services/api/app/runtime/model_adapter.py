@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, OpenAI, RateLimitError
 
 from app.config import Settings, get_settings
-from app.runtime.output_normalizer import OutputNormalizer
+from app.runtime.errors import LLMServiceError
+
+logger = logging.getLogger(__name__)
 
 
 class ModelAdapter:
@@ -21,9 +24,16 @@ class ModelAdapter:
             timeout=self._settings.llm_timeout_seconds,
         )
 
-    def _require_api_key(self) -> None:
+    def _require_api_key(self, *, operation: str) -> None:
         if not self._settings.llm_api_key:
-            raise ValueError("未配置大模型 API Key。")
+            error = LLMServiceError(
+                "llm_not_configured",
+                "智能服务尚未配置，请检查服务端环境变量后重启容器。",
+                retryable=False,
+                debug_message=f"LLM api key missing while running {operation}",
+            )
+            self._log_error(error, operation=operation, streaming=False)
+            raise error
 
     def _build_message_content(self, *, user_text: str, attachment_parts: list[dict] | None = None) -> list[dict]:
         content: list[dict] = []
@@ -32,25 +42,115 @@ class ModelAdapter:
         content.extend(attachment_parts or [])
         return content or [{"type": "text", "text": "请基于当前输入完成分析。"}]
 
+    def _log_error(self, error: LLMServiceError, *, operation: str, streaming: bool) -> None:
+        logger.warning(
+            "llm_request_failed code=%s operation=%s streaming=%s model=%s base_url=%s detail=%s",
+            error.code,
+            operation,
+            streaming,
+            self._settings.llm_model,
+            self._settings.llm_base_url,
+            error.debug_message,
+        )
+
+    def _map_exception(self, exc: Exception, *, operation: str, streaming: bool) -> LLMServiceError:
+        if isinstance(exc, LLMServiceError):
+            return exc
+        if isinstance(exc, AuthenticationError):
+            return LLMServiceError(
+                "llm_auth_failed",
+                "智能服务鉴权失败，请检查模型密钥是否有效。",
+                retryable=False,
+                debug_message=f"{type(exc).__name__}: {exc}",
+            )
+        if isinstance(exc, RateLimitError):
+            return LLMServiceError(
+                "llm_rate_limited",
+                "当前请求较多，稍后再试。",
+                retryable=True,
+                debug_message=f"{type(exc).__name__}: {exc}",
+            )
+        if isinstance(exc, APITimeoutError):
+            return LLMServiceError(
+                "llm_timeout",
+                "本轮回复生成失败，请检查网络后重试。",
+                retryable=True,
+                debug_message=f"{type(exc).__name__}: {exc}",
+            )
+        if isinstance(exc, APIConnectionError):
+            return LLMServiceError(
+                "llm_network_error",
+                "本轮回复生成失败，请检查网络后重试。",
+                retryable=True,
+                debug_message=f"{type(exc).__name__}: {exc}",
+            )
+        if isinstance(exc, APIStatusError):
+            if exc.status_code == 401:
+                return LLMServiceError(
+                    "llm_auth_failed",
+                    "智能服务鉴权失败，请检查模型密钥是否有效。",
+                    retryable=False,
+                    debug_message=f"{type(exc).__name__}: status={exc.status_code} body={exc.body}",
+                )
+            if exc.status_code == 429:
+                return LLMServiceError(
+                    "llm_rate_limited",
+                    "当前请求较多，稍后再试。",
+                    retryable=True,
+                    debug_message=f"{type(exc).__name__}: status={exc.status_code} body={exc.body}",
+                )
+            return LLMServiceError(
+                "llm_invalid_response",
+                "智能服务返回异常，本轮未完成。",
+                retryable=True,
+                debug_message=f"{type(exc).__name__}: status={exc.status_code} body={exc.body}",
+            )
+        if isinstance(exc, json.JSONDecodeError):
+            return LLMServiceError(
+                "llm_invalid_response",
+                "智能服务返回异常，本轮未完成。",
+                retryable=True,
+                debug_message=f"{type(exc).__name__}: {exc}",
+            )
+        code = "llm_stream_failed" if streaming else "llm_invalid_response"
+        message = "本轮回复生成失败，请检查网络后重试。" if streaming else "智能服务返回异常，本轮未完成。"
+        return LLMServiceError(
+            code,
+            message,
+            retryable=True,
+            debug_message=f"{type(exc).__name__}: {exc}",
+        )
+
+    def _raise_mapped_error(self, exc: Exception, *, operation: str, streaming: bool) -> None:
+        mapped = self._map_exception(exc, operation=operation, streaming=streaming)
+        self._log_error(mapped, operation=operation, streaming=streaming)
+        raise mapped
+
     def _json_completion(
         self,
         *,
         system_prompt: str,
         user_text: str,
         attachment_parts: list[dict] | None = None,
+        operation: str,
     ) -> dict:
-        self._require_api_key()
-        response = self._client.chat.completions.create(
-            model=self._settings.llm_model,
-            temperature=0.1,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": self._build_message_content(user_text=user_text, attachment_parts=attachment_parts)},
-            ],
-        )
-        content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        self._require_api_key(operation=operation)
+        try:
+            response = self._client.chat.completions.create(
+                model=self._settings.llm_model,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": self._build_message_content(user_text=user_text, attachment_parts=attachment_parts)},
+                ],
+            )
+            content = response.choices[0].message.content or ""
+            if not content.strip():
+                raise ValueError("Empty JSON completion content")
+            return json.loads(content)
+        except Exception as exc:
+            self._raise_mapped_error(exc, operation=operation, streaming=False)
 
     def _text_completion(
         self,
@@ -58,17 +158,24 @@ class ModelAdapter:
         system_prompt: str,
         user_text: str,
         attachment_parts: list[dict] | None = None,
+        operation: str,
     ) -> str:
-        self._require_api_key()
-        response = self._client.chat.completions.create(
-            model=self._settings.llm_model,
-            temperature=0.3,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": self._build_message_content(user_text=user_text, attachment_parts=attachment_parts)},
-            ],
-        )
-        return (response.choices[0].message.content or "").strip()
+        self._require_api_key(operation=operation)
+        try:
+            response = self._client.chat.completions.create(
+                model=self._settings.llm_model,
+                temperature=0.3,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": self._build_message_content(user_text=user_text, attachment_parts=attachment_parts)},
+                ],
+            )
+            content = (response.choices[0].message.content or "").strip()
+            if not content:
+                raise ValueError("Empty text completion content")
+            return content
+        except Exception as exc:
+            self._raise_mapped_error(exc, operation=operation, streaming=False)
 
     def stream_text_completion(
         self,
@@ -76,21 +183,44 @@ class ModelAdapter:
         system_prompt: str,
         user_text: str,
         attachment_parts: list[dict] | None = None,
+        operation: str,
     ) -> Iterable[str]:
-        self._require_api_key()
-        stream = self._client.chat.completions.create(
-            model=self._settings.llm_model,
-            temperature=0.3,
-            stream=True,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": self._build_message_content(user_text=user_text, attachment_parts=attachment_parts)},
-            ],
-        )
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if delta:
-                yield delta
+        self._require_api_key(operation=operation)
+        try:
+            stream = self._client.chat.completions.create(
+                model=self._settings.llm_model,
+                temperature=0.3,
+                stream=True,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": self._build_message_content(user_text=user_text, attachment_parts=attachment_parts)},
+                ],
+            )
+        except Exception as exc:
+            self._raise_mapped_error(exc, operation=operation, streaming=True)
+
+        yielded = False
+        try:
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = choices[0].delta.content or ""
+                if delta:
+                    yielded = True
+                    yield delta
+        except Exception as exc:
+            self._raise_mapped_error(exc, operation=operation, streaming=True)
+
+        if not yielded:
+            error = LLMServiceError(
+                "llm_stream_failed",
+                "本轮回复生成失败，请检查网络后重试。",
+                retryable=True,
+                debug_message=f"Empty streaming response while running {operation}",
+            )
+            self._log_error(error, operation=operation, streaming=True)
+            raise error
 
     @staticmethod
     def _looks_like_precise_schedule(text: str) -> bool:
@@ -107,7 +237,7 @@ class ModelAdapter:
     def _looks_like_quick_note(text: str) -> bool:
         if not text.strip():
             return False
-        explicit_keywords = ["记一下", "帮我记", "记住", "速记", "备忘", "记录一下", "存一个", "灵感", "想法", "待办"]
+        explicit_keywords = ["记一下", "帮我记", "记住", "速记", "备忘", "记录一个", "存一个", "灵感", "想法", "待办"]
         return any(keyword in text for keyword in explicit_keywords)
 
     @staticmethod
@@ -142,21 +272,11 @@ class ModelAdapter:
         return "quick_note_intake"
 
     @staticmethod
-    def _fallback_conversation_intent(payload: dict) -> str:
-        selected_tool = payload.get("selected_tool")
-        attachment_ids = list(payload.get("attachment_ids") or [])
-        text = str(payload.get("text_content") or payload.get("content") or "")
-        if selected_tool == "schedule":
-            return "schedule_intake"
-        if selected_tool == "quick_note":
-            return "quick_note_intake"
-        if attachment_ids:
-            return ModelAdapter._fallback_route_workflow(payload)
-        if ModelAdapter._looks_like_precise_schedule(text):
-            return "schedule_intake"
-        if ModelAdapter._looks_like_quick_note(text):
-            return "quick_note_intake"
-        return "general_chat"
+    def _fallback_conversation_title(first_message: str) -> str:
+        cleaned = re.sub(r"\s+", " ", first_message).strip()
+        if not cleaned:
+            return "新对话"
+        return cleaned[:18]
 
     def route_workflow(self, payload: dict) -> str:
         selected_tool = payload.get("selected_tool")
@@ -164,29 +284,25 @@ class ModelAdapter:
             return "schedule_intake"
         if selected_tool == "quick_note":
             return "quick_note_intake"
-        if not self._settings.llm_api_key:
-            return self._fallback_route_workflow(payload)
-        try:
-            result = self._json_completion(
-                system_prompt=(
-                    "你是 Synora 的工作流路由器，只能输出 JSON。"
-                    "字段 workflow 只能是 schedule_intake 或 quick_note_intake。"
-                ),
-                user_text=json.dumps(
-                    {
-                        "text_content": payload.get("text_content"),
-                        "attachment_ids": payload.get("attachment_ids", []),
-                        "context": payload.get("context", {}),
-                    },
-                    ensure_ascii=False,
-                ),
-            )
-            workflow = str(result.get("workflow") or "").strip()
-            if workflow in {"schedule_intake", "quick_note_intake"}:
-                return workflow
-        except Exception:
-            pass
-        return self._fallback_route_workflow(payload)
+        result = self._json_completion(
+            operation="route_workflow",
+            system_prompt=(
+                "你是 Synora 的工作流路由器，只能输出 JSON。"
+                "字段 workflow 只能是 schedule_intake 或 quick_note_intake。"
+            ),
+            user_text=json.dumps(
+                {
+                    "text_content": payload.get("text_content"),
+                    "attachment_ids": payload.get("attachment_ids", []),
+                    "context": payload.get("context", {}),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        workflow = str(result.get("workflow") or "").strip()
+        if workflow in {"schedule_intake", "quick_note_intake"}:
+            return workflow
+        self._raise_mapped_error(ValueError(f"Unexpected workflow: {workflow}"), operation="route_workflow", streaming=False)
 
     def route_conversation_intent(self, payload: dict, attachment_parts: list[dict] | None = None) -> str:
         selected_tool = payload.get("selected_tool")
@@ -194,30 +310,26 @@ class ModelAdapter:
             return "schedule_intake"
         if selected_tool == "quick_note":
             return "quick_note_intake"
-        if not self._settings.llm_api_key:
-            return self._fallback_conversation_intent(payload)
-        try:
-            result = self._json_completion(
-                system_prompt=(
-                    "你是 Synora 的对话意图路由器，只能输出 JSON。"
-                    "字段 workflow 只能是 schedule_intake、quick_note_intake、general_chat 之一。"
-                ),
-                user_text=json.dumps(
-                    {
-                        "text_content": payload.get("text_content"),
-                        "attachment_ids": payload.get("attachment_ids", []),
-                        "context": payload.get("context", {}),
-                    },
-                    ensure_ascii=False,
-                ),
-                attachment_parts=attachment_parts,
-            )
-            workflow = str(result.get("workflow") or "").strip()
-            if workflow in {"schedule_intake", "quick_note_intake", "general_chat"}:
-                return workflow
-        except Exception:
-            pass
-        return self._fallback_conversation_intent(payload)
+        result = self._json_completion(
+            operation="route_conversation_intent",
+            system_prompt=(
+                "你是 Synora 的对话意图路由器，只能输出 JSON。"
+                "字段 workflow 只能是 schedule_intake、quick_note_intake、general_chat 之一。"
+            ),
+            user_text=json.dumps(
+                {
+                    "text_content": payload.get("text_content"),
+                    "attachment_ids": payload.get("attachment_ids", []),
+                    "context": payload.get("context", {}),
+                },
+                ensure_ascii=False,
+            ),
+            attachment_parts=attachment_parts,
+        )
+        workflow = str(result.get("workflow") or "").strip()
+        if workflow in {"schedule_intake", "quick_note_intake", "general_chat"}:
+            return workflow
+        self._raise_mapped_error(ValueError(f"Unexpected workflow: {workflow}"), operation="route_conversation_intent", streaming=False)
 
     def extract_schedule(
         self,
@@ -228,6 +340,7 @@ class ModelAdapter:
         reference_time: datetime,
     ) -> dict:
         return self._json_completion(
+            operation="extract_schedule",
             system_prompt=(
                 "你是严格的日程抽取助手。"
                 "请从输入内容中抽取一条日程草稿，只输出 JSON。"
@@ -235,8 +348,8 @@ class ModelAdapter:
                 "missing_fields, ambiguity_flags, parse_confidence, evidence_digest。"
                 "规则："
                 "1. start_at 和 end_at 必须是带时区偏移的 ISO 8601 时间。"
-                "2. 如果无法确认具体时间，可返回 null，并在 missing_fields 里写入 start_at 或 end_at。"
-                "3. 如果只给出开始时间，默认持续 60 分钟。"
+                "2. 如果无法确认具体时间，可返回 null，并在 missing_fields 中写入 start_at 或 end_at。"
+                "3. 如果只有开始时间，默认持续 60 分钟。"
                 "4. is_all_day 返回布尔值。"
                 "5. recurrence 返回 RRULE 字符串数组，没有重复就返回空数组。"
                 "6. evidence_digest 返回 1 到 5 条中文依据。"
@@ -261,6 +374,7 @@ class ModelAdapter:
         attachment_parts: list[dict],
     ) -> dict:
         return self._json_completion(
+            operation="suggest_quick_note_tags",
             system_prompt=(
                 "你是速记整理助手，请对输入内容做规范化，只输出 JSON。"
                 "必须返回字段：normalized_content, preview_tags, evidence_digest。"
@@ -286,6 +400,7 @@ class ModelAdapter:
             return fallback
         try:
             response = self._json_completion(
+                operation="generate_conversation_title",
                 system_prompt=(
                     "你是对话标题生成器，只输出 JSON，字段为 title。"
                     "标题要简短、自然、中文，控制在 8 个字以内。"
@@ -293,34 +408,26 @@ class ModelAdapter:
                 user_text=json.dumps({"first_message": first_message}, ensure_ascii=False),
             )
             title = str(response.get("title") or "").strip()
-            if title:
-                return title[:18]
-        except Exception:
-            pass
-        return fallback
+            return title[:18] if title else fallback
+        except LLMServiceError:
+            return fallback
 
     def generate_chat_reply(self, *, user_message: str, recent_messages: list[dict[str, str]], attachment_parts: list[dict] | None = None) -> str:
-        fallback = self._fallback_chat_reply(user_message)
-        if not self._settings.llm_api_key:
-            return fallback
-        try:
-            reply = self._text_completion(
-                system_prompt=(
-                    "你是 Synora 的中文个人助理，语气自然、简洁、友好。"
-                    "如果用户没有明确要求创建日程或速记，就正常对话，不要伪造工具结果。"
-                ),
-                user_text=json.dumps(
-                    {
-                        "recent_messages": recent_messages[-6:],
-                        "user_message": user_message,
-                    },
-                    ensure_ascii=False,
-                ),
-                attachment_parts=attachment_parts,
-            )
-            return reply or fallback
-        except Exception:
-            return fallback
+        return self._text_completion(
+            operation="generate_chat_reply",
+            system_prompt=(
+                "你是 Synora 的中文个人助理，语气自然、简洁、友好。"
+                "如果用户没有明确要求创建日程或速记，就正常对话，不要伪造工具结果。"
+            ),
+            user_text=json.dumps(
+                {
+                    "recent_messages": recent_messages[-6:],
+                    "user_message": user_message,
+                },
+                ensure_ascii=False,
+            ),
+            attachment_parts=attachment_parts,
+        )
 
     def stream_chat_reply_chunks(
         self,
@@ -329,56 +436,21 @@ class ModelAdapter:
         recent_messages: list[dict[str, str]],
         attachment_parts: list[dict] | None = None,
     ) -> Iterable[str]:
-        fallback = self._fallback_chat_reply(user_message)
-        if not self._settings.llm_api_key:
-            yield from self._chunk_text(fallback)
-            return
-        try:
-            yielded = False
-            for chunk in self.stream_text_completion(
-                system_prompt=(
-                    "你是 Synora 的中文个人助理，语气自然、简洁、友好。"
-                    "如果用户没有明确要求创建日程或速记，就正常对话，不要伪造工具结果。"
-                ),
-                user_text=json.dumps(
-                    {
-                        "recent_messages": recent_messages[-6:],
-                        "user_message": user_message,
-                    },
-                    ensure_ascii=False,
-                ),
-                attachment_parts=attachment_parts,
-            ):
-                yielded = True
-                yield chunk
-            if not yielded:
-                yield from self._chunk_text(fallback)
-        except Exception:
-            yield from self._chunk_text(fallback)
-
-    @staticmethod
-    def _chunk_text(text: str, chunk_size: int = 12) -> Iterable[str]:
-        for index in range(0, len(text), chunk_size):
-            yield text[index : index + chunk_size]
-
-    @staticmethod
-    def _fallback_conversation_title(first_message: str) -> str:
-        cleaned = re.sub(r"\s+", " ", first_message).strip()
-        if not cleaned:
-            return "新对话"
-        return cleaned[:18]
-
-    @staticmethod
-    def _fallback_chat_reply(user_message: str) -> str:
-        text = user_message.strip()
-        if not text:
-            return "我在这里，你可以继续告诉我想安排的事情。"
-        lower = text.lower()
-        if any(keyword in lower for keyword in ["你好", "hi", "hello"]):
-            return "你好，我是 Synora。你可以直接告诉我想安排的日程、想保存的速记，或者先和我聊聊。"
-        if "谢谢" in text:
-            return "不客气，我会继续帮你把事情整理清楚。"
-        return "我收到了。你可以继续补充背景，或者直接告诉我需要帮你创建日程、记录速记、查看已有内容。"
+        yield from self.stream_text_completion(
+            operation="stream_chat_reply_chunks",
+            system_prompt=(
+                "你是 Synora 的中文个人助理，语气自然、简洁、友好。"
+                "如果用户没有明确要求创建日程或速记，就正常对话，不要伪造工具结果。"
+            ),
+            user_text=json.dumps(
+                {
+                    "recent_messages": recent_messages[-6:],
+                    "user_message": user_message,
+                },
+                ensure_ascii=False,
+            ),
+            attachment_parts=attachment_parts,
+        )
 
     @staticmethod
     def compute_reminder_offsets(start_at: datetime, *, now: datetime | None = None) -> list[int]:

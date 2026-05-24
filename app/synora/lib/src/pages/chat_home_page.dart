@@ -27,6 +27,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
   ConversationTool? _selectedTool;
   bool _bootstrapped = false;
   int _lastMessageCount = 0;
+  String? _lastShownError;
 
   @override
   void initState() {
@@ -214,9 +215,20 @@ class _ChatHomePageState extends State<ChatHomePage> {
       builder: (context, _) {
         final user = widget.controller.session?.user;
         final messages = widget.controller.messages;
+        final latestError = widget.controller.lastError;
         if (messages.length != _lastMessageCount) {
           _lastMessageCount = messages.length;
           _scrollToBottom();
+        }
+        if (latestError == null || latestError.isEmpty) {
+          _lastShownError = null;
+        } else if (latestError != _lastShownError) {
+          _lastShownError = latestError;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              _showMessage(latestError);
+            }
+          });
         }
         final hasInput = _textController.text.trim().isNotEmpty || _attachments.isNotEmpty;
         final sending = widget.controller.isMessageSending;

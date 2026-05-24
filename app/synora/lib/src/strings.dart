@@ -254,4 +254,24 @@ class AppStrings {
         return saveSuccess;
     }
   }
+
+  static String chatFailureReason(String? code, String? message) {
+    switch (code) {
+      case 'llm_not_configured':
+        return '智能服务尚未配置，请检查服务端环境变量后重启容器。';
+      case 'llm_auth_failed':
+        return '智能服务鉴权失败，请检查模型密钥是否有效。';
+      case 'llm_rate_limited':
+        return '当前请求较多，稍后再试。';
+      case 'llm_timeout':
+      case 'llm_network_error':
+      case 'llm_stream_failed':
+        return '本轮回复生成失败，请检查网络后重试。';
+      case 'llm_invalid_response':
+        return '智能服务返回异常，本轮未完成。';
+      default:
+        final trimmed = message?.trim() ?? '';
+        return trimmed.isEmpty ? '这次处理没有完成，请稍后再试。' : trimmed;
+    }
+  }
 }

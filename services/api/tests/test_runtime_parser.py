@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from app.runtime.errors import LLMServiceError
 from app.runtime.tool_impls import parse_schedule_draft, record_quick_note
 
 
@@ -37,14 +38,14 @@ class RuntimeParserTests(unittest.TestCase):
     def test_parse_schedule_infers_relative_time_when_model_returns_null(self, extract_schedule_mock, _attachment_mock) -> None:
         extract_schedule_mock.return_value = {
             "title": "软件工程教研会",
-            "location": "信息楼 202",
+            "location": "信息楼202",
             "details": "讨论下周课程安排",
             "start_at": None,
             "end_at": None,
             "missing_fields": ["start_at"],
             "ambiguity_flags": ["time_ambiguous"],
             "parse_confidence": 0.9,
-            "evidence_digest": ["明天下午3点", "信息楼 202"],
+            "evidence_digest": ["明天下午3点", "信息楼202"],
             "recurrence": [],
         }
         result = parse_schedule_draft(
@@ -76,6 +77,25 @@ class RuntimeParserTests(unittest.TestCase):
         )
         self.assertEqual(result["preview_tags"], ["科研", "论文", "待办"])
         self.assertEqual(result["normalized_content"], "整理论文实验图表并准备投稿清单")
+
+    @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
+    @patch(
+        "app.runtime.tool_impls.ModelAdapter.extract_schedule",
+        side_effect=LLMServiceError(
+            "llm_invalid_response",
+            "智能服务返回异常，本轮未完成。",
+            retryable=True,
+        ),
+    )
+    def test_parse_schedule_raises_instead_of_silent_fallback(self, _extract_schedule_mock, _attachment_mock) -> None:
+        with self.assertRaises(LLMServiceError):
+            parse_schedule_draft(
+                db=None,
+                user_id=1,
+                text_content="明天下午三点开会",
+                attachment_ids=[],
+                context={"client_timezone": "Asia/Shanghai"},
+            )
 
 
 if __name__ == "__main__":

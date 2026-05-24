@@ -7,6 +7,7 @@ from app.db import get_db
 from app.dependencies import get_current_user
 from app.domains.schedule.service import create_schedule_after_approval, create_schedule_draft, delete_schedule, detect_conflicts
 from app.models import Schedule, User
+from app.runtime.errors import LLMServiceError
 from app.schemas.common import ApiEnvelope
 from app.schemas.schedule import (
     ConflictCheckRequest,
@@ -41,6 +42,8 @@ def create_draft(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LLMServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.message) from exc
     return ScheduleDraftResponse(
         draft=draft,
         draft_hash=draft_hash,
@@ -61,6 +64,8 @@ def check_conflicts(
         return detect_conflicts(db, current_user.id, payload.draft, payload.draft_hash)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LLMServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.message) from exc
 
 
 @router.post("/confirm", response_model=ScheduleConfirmResponse)
@@ -73,6 +78,8 @@ def confirm_schedule(
         schedule, jobs = create_schedule_after_approval(db, current_user.id, payload.approval_token, payload.normalized_draft)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LLMServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.message) from exc
 
     return ScheduleConfirmResponse(
         schedule_id=schedule.id,

@@ -16,6 +16,7 @@ from app.domains.schedule.service import (
     detect_conflicts,
 )
 from app.models import AgentRun, ConversationMessage, ConversationPendingState, ConversationThread
+from app.runtime.errors import LLMServiceError
 from app.runtime.model_adapter import ModelAdapter
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
 from app.schemas.quick_note import QuickNoteDraftRequest
@@ -24,6 +25,22 @@ from app.security import mint_token
 
 
 DEFAULT_THREAD_TITLE = "新对话"
+
+
+def _error_payload(exc: Exception, *, assistant_message_id: int) -> dict[str, object]:
+    if isinstance(exc, LLMServiceError):
+        return {
+            "assistant_message_id": assistant_message_id,
+            "code": exc.code,
+            "message": exc.message,
+            "retryable": exc.retryable,
+        }
+    return {
+        "assistant_message_id": assistant_message_id,
+        "code": "conversation_stream_error",
+        "message": str(exc),
+        "retryable": False,
+    }
 
 
 def list_conversations(db: Session, user_id: int) -> list[ConversationThread]:
@@ -244,13 +261,11 @@ def consume_stream(
     except Exception as exc:
         agent_run.status = "failed"
         agent_run.stream_status = "failed"
-        agent_run.error_message = str(exc)
+        agent_run.error_message = exc.message if isinstance(exc, LLMServiceError) else str(exc)
         agent_run.completed_at = datetime.now(timezone.utc)
         assistant_message.status = "failed"
-        if not assistant_message.text_content:
-            assistant_message.text_content = "这次处理没有完成，请稍后再试。"
         db.commit()
-        yield {"event": "run_failed", "data": {"message": str(exc), "assistant_message_id": assistant_message.id}}
+        yield {"event": "run_failed", "data": _error_payload(exc, assistant_message_id=assistant_message.id)}
 
 
 def apply_action(

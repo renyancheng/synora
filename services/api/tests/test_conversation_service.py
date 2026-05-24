@@ -71,6 +71,25 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(self.db.get(type(thread), thread.id).title, "教学安排")
         self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "好的，我来帮你一起整理。")
 
+    def test_stream_returns_run_failed_when_llm_not_configured(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排。"),
+        )
+
+        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
+
+        self.assertEqual(events[0]["event"], "assistant_started")
+        self.assertEqual(events[-1]["event"], "run_failed")
+        self.assertEqual(events[-1]["data"]["code"], "llm_not_configured")
+        self.assertFalse(events[-1]["data"]["retryable"])
+        refreshed = self.db.get(type(assistant_message), assistant_message.id)
+        self.assertEqual(refreshed.status, "failed")
+        self.assertEqual(refreshed.text_content, "")
+
     @patch("app.domains.conversation.service.detect_conflicts")
     @patch("app.domains.conversation.service.create_schedule_draft")
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")

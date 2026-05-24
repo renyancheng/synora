@@ -5,6 +5,7 @@ from app.db import get_db
 from app.dependencies import get_current_user
 from app.domains.quick_note.service import create_quick_note_draft, delete_note, list_notes, save_note_after_approval
 from app.models import User
+from app.runtime.errors import LLMServiceError
 from app.schemas.common import ApiEnvelope
 from app.schemas.quick_note import (
     QuickNoteConfirmRequest,
@@ -27,6 +28,8 @@ def create_quick_note_draft_endpoint(
         normalized_content, preview_tags, token, evidence_digest, approval = create_quick_note_draft(db, current_user.id, payload)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LLMServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.message) from exc
     return QuickNoteDraftResponse(
         normalized_content=normalized_content,
         preview_tags=preview_tags,
@@ -58,6 +61,8 @@ def confirm_quick_note(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LLMServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.message) from exc
     return QuickNoteSavedResponse(note_id=note.id, topic_tags=list(note.topic_tags_json))
 
 

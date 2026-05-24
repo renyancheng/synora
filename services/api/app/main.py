@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from app.mcp.server import get_mcp_mount_path
 from app.routers import agent_sessions, approvals, attachments, auth, conversations, health, notifications, quick_notes, schedule
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -18,6 +20,12 @@ async def lifespan(_: FastAPI):
     server.streamable_http_app()
     async with server.session_manager.run():
         init_db()
+        logger.info(
+            "synora_api_starting llm_enabled=%s llm_model=%s llm_base_url=%s",
+            bool(settings.llm_api_key),
+            settings.llm_model,
+            settings.llm_base_url,
+        )
         yield
 
 

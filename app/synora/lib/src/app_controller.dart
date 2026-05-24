@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import 'api_client.dart';
 import 'models.dart';
+import 'strings.dart';
 
 
 class AppController extends ChangeNotifier {
@@ -204,7 +205,7 @@ class AppController extends ChangeNotifier {
       }
       await _refreshCollectionsOnly();
     } catch (error) {
-      _lastError = error.toString();
+      _lastError = AppStrings.chatFailureReason(null, error.toString());
       final tempIndex = _messages.indexWhere((item) => item.id == tempUserId);
       if (tempIndex >= 0) {
         _messages[tempIndex] = _messages[tempIndex].copyWith(status: 'failed');
@@ -216,7 +217,7 @@ class AppController extends ChangeNotifier {
             role: 'assistant',
             messageType: 'text',
             status: 'failed',
-            textContent: '这次生成没有完成，请稍后再试。',
+            textContent: _lastError,
           ),
         );
       }
@@ -317,11 +318,19 @@ class AppController extends ChangeNotifier {
         _streamStatusLabel = event.data['label'] as String?;
         break;
       case 'run_failed':
+        final failureText = AppStrings.chatFailureReason(
+          event.data['code'] as String?,
+          event.data['message'] as String?,
+        );
         final index = _messages.indexWhere((item) => item.id == assistantMessageId);
         if (index >= 0) {
-          _messages[index] = _messages[index].copyWith(status: 'failed');
+          final current = _messages[index];
+          _messages[index] = current.copyWith(
+            status: 'failed',
+            textContent: (current.textContent ?? '').trim().isNotEmpty ? current.textContent : failureText,
+          );
         }
-        _lastError = event.data['message'] as String?;
+        _lastError = failureText;
         break;
       case 'run_completed':
         _streamStatusLabel = null;

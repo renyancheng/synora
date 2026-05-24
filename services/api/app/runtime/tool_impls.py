@@ -82,15 +82,12 @@ def parse_schedule_draft(
         attachment_texts=attachment_texts,
     )
     model = ModelAdapter()
-    try:
-        parsed = model.extract_schedule(
-            merged_text=assembled["merged_text"],
-            attachment_parts=attachment_parts,
-            timezone_name=timezone_name,
-            reference_time=reference_time,
-        )
-    except Exception:
-        parsed = _fallback_schedule_parse(assembled["merged_text"], attachment_ids, timezone_name)
+    parsed = model.extract_schedule(
+        merged_text=assembled["merged_text"],
+        attachment_parts=attachment_parts,
+        timezone_name=timezone_name,
+        reference_time=reference_time,
+    )
 
     normalized = OutputNormalizer()
     start_dt = None
@@ -210,14 +207,11 @@ def record_quick_note(
         manual_tags=tags,
     )
     model = ModelAdapter()
-    try:
-        parsed = model.suggest_quick_note_tags(
-            merged_text=str(assembled["merged_text"]),
-            manual_tags=tags,
-            attachment_parts=attachment_parts,
-        )
-    except Exception:
-        parsed = _fallback_quick_note(str(assembled["merged_text"]), tags, attachment_ids)
+    parsed = model.suggest_quick_note_tags(
+        merged_text=str(assembled["merged_text"]),
+        manual_tags=tags,
+        attachment_parts=attachment_parts,
+    )
 
     normalized = OutputNormalizer()
     preview_tags = normalized.coerce_string_list(parsed.get("preview_tags"))

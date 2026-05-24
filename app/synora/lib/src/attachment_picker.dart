@@ -6,7 +6,7 @@ import 'models.dart';
 
 class AttachmentPicker {
   static Future<List<LocalAttachmentData>> pickGalleryImages() async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       allowMultiple: true,
       withData: true,
       type: FileType.custom,
@@ -22,7 +22,7 @@ class AttachmentPicker {
   }
 
   static Future<List<LocalAttachmentData>> pickFiles() async {
-    final result = await FilePicker.platform.pickFiles(
+    final result = await FilePicker.pickFiles(
       allowMultiple: true,
       withData: true,
       type: FileType.custom,
