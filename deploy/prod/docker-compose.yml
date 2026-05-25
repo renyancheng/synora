@@ -1,0 +1,95 @@
+name: synora-prod
+
+x-api-common: &api-common
+  image: synora-api:prod
+  build:
+    context: ../../services/api
+    args:
+      BASE_IMAGE: ${SYNORA_API_BASE_IMAGE:-docker.m.daocloud.io/library/python:3.12-slim-bookworm}
+      PIP_INDEX_URL: ${SYNORA_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+      PIP_TRUSTED_HOST: ${SYNORA_PIP_TRUSTED_HOST:-pypi.tuna.tsinghua.edu.cn}
+      PIP_TIMEOUT: ${SYNORA_PIP_TIMEOUT:-120}
+  pull_policy: build
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    SYNORA_DATABASE_URL: ${SYNORA_DATABASE_URL:-postgresql+psycopg://synora:synora@postgres:5432/synora}
+    SYNORA_CELERY_BROKER_URL: ${SYNORA_CELERY_BROKER_URL:-redis://redis:6379/0}
+    SYNORA_CELERY_RESULT_BACKEND: ${SYNORA_CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+    SYNORA_MINIO_ENDPOINT: ${SYNORA_MINIO_ENDPOINT:-minio:9000}
+    SYNORA_MINIO_ACCESS_KEY: ${SYNORA_MINIO_ACCESS_KEY:-synora}
+    SYNORA_MINIO_SECRET_KEY: ${SYNORA_MINIO_SECRET_KEY:-change-me}
+    SYNORA_SMTP_HOST: ${SYNORA_SMTP_HOST}
+    SYNORA_SMTP_PORT: ${SYNORA_SMTP_PORT:-587}
+    SYNORA_SMTP_USERNAME: ${SYNORA_SMTP_USERNAME:-}
+    SYNORA_SMTP_PASSWORD: ${SYNORA_SMTP_PASSWORD:-}
+    SYNORA_SMTP_USE_TLS: ${SYNORA_SMTP_USE_TLS:-true}
+    SYNORA_NOTIFICATION_FROM_EMAIL: ${SYNORA_NOTIFICATION_FROM_EMAIL}
+    SYNORA_NOTIFICATION_TO_EMAIL: ${SYNORA_NOTIFICATION_TO_EMAIL}
+    SYNORA_MCP_BEARER_TOKEN: ${SYNORA_MCP_BEARER_TOKEN}
+    SYNORA_MCP_MOUNT_PATH: ${SYNORA_MCP_MOUNT_PATH:-/mcp}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: synora
+      POSTGRES_USER: synora
+      POSTGRES_PASSWORD: synora
+    volumes:
+      - synora-prod-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synora -d synora"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: docker.m.daocloud.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SYNORA_MINIO_ACCESS_KEY:-synora}
+      MINIO_ROOT_PASSWORD: ${SYNORA_MINIO_SECRET_KEY:-change-me}
+    volumes:
+      - synora-prod-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    <<: *api-common
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *api-common
+    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info
+
+  beat:
+    <<: *api-common
+    command: celery -A app.tasks.celery_app.celery_app beat --loglevel=info
+
+volumes:
+  synora-prod-postgres:
+  synora-prod-minio:
