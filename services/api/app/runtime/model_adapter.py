@@ -70,6 +70,9 @@ class ModelAdapter:
 
     def _create_chat_model(self, *, temperature: float, streaming: bool = False) -> ChatOpenAI:
         self._require_api_key(operation="create_chat_model")
+        extra_body: dict[str, object] = {}
+        if "qwen" in self._settings.llm_model.lower():
+            extra_body["enable_thinking"] = bool(self._settings.llm_enable_thinking)
         return ChatOpenAI(
             model=self._settings.llm_model,
             api_key=self._settings.llm_api_key,
@@ -79,6 +82,7 @@ class ModelAdapter:
             streaming=streaming,
             max_retries=0,
             use_responses_api=False,
+            extra_body=extra_body or None,
         )
 
     def build_general_chat_agent(self, tools: Sequence[object]):

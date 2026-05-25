@@ -21,10 +21,11 @@ async def lifespan(_: FastAPI):
     async with server.session_manager.run():
         init_db()
         logger.info(
-            "synora_api_starting llm_enabled=%s llm_model=%s llm_base_url=%s",
+            "synora_api_starting llm_enabled=%s llm_model=%s llm_base_url=%s llm_enable_thinking=%s",
             bool(settings.llm_api_key),
             settings.llm_model,
             settings.llm_base_url,
+            settings.llm_enable_thinking,
         )
         yield
 
