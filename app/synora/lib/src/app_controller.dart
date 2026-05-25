@@ -284,7 +284,7 @@ class AppController extends ChangeNotifier {
 
   void _handleStreamEvent(ConversationStreamEvent event, {required int assistantMessageId}) {
     switch (event.event) {
-      case 'assistant_started':
+      case 'run_started':
         _replaceOrAppendMessage(
           ConversationMessageItem.local(
             id: assistantMessageId,
@@ -295,7 +295,7 @@ class AppController extends ChangeNotifier {
           ),
         );
         break;
-      case 'assistant_delta':
+      case 'message_delta':
         final delta = event.data['delta'] as String? ?? '';
         final index = _messages.indexWhere((item) => item.id == assistantMessageId);
         if (index >= 0) {
@@ -306,16 +306,25 @@ class AppController extends ChangeNotifier {
           );
         }
         break;
-      case 'assistant_message':
+      case 'message_completed':
+        final messageJson = event.data['message'] as Map<String, dynamic>? ?? <String, dynamic>{};
+        _replaceOrAppendMessage(ConversationMessageItem.fromJson(messageJson));
+        _streamStatusLabel = null;
+        break;
+      case 'card_snapshot':
         final messageJson = event.data['message'] as Map<String, dynamic>? ?? <String, dynamic>{};
         _replaceOrAppendMessage(ConversationMessageItem.fromJson(messageJson));
         break;
-      case 'card_upsert':
-        final messageJson = event.data['message'] as Map<String, dynamic>? ?? <String, dynamic>{};
-        _replaceOrAppendMessage(ConversationMessageItem.fromJson(messageJson));
+      case 'tool_call_started':
+        _streamStatusLabel = _toolStatusLabel(event.data['tool_name'] as String?);
         break;
-      case 'tool_status':
-        _streamStatusLabel = event.data['label'] as String?;
+      case 'tool_call_completed':
+        _streamStatusLabel = null;
+        break;
+      case 'tool_call_failed':
+        _streamStatusLabel = null;
+        break;
+      case 'approval_required':
         break;
       case 'run_failed':
         final failureText = AppStrings.chatFailureReason(
@@ -341,6 +350,23 @@ class AppController extends ChangeNotifier {
         break;
     }
     notifyListeners();
+  }
+
+  String? _toolStatusLabel(String? toolName) {
+    switch (toolName) {
+      case 'parse_schedule_draft':
+        return '正在整理日程草稿';
+      case 'detect_schedule_conflicts':
+        return '正在检查时间冲突';
+      case 'prepare_quick_note_draft':
+        return '正在整理速记内容';
+      case 'create_schedule_after_approval':
+        return '正在创建日程并安排提醒';
+      case 'create_quick_note_after_approval':
+        return '正在保存速记';
+      default:
+        return '正在处理';
+    }
   }
 
   Future<void> _refreshCollectionsOnly() async {

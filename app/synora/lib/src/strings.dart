@@ -19,7 +19,7 @@ class AppStrings {
   static const notificationHistory = '通知历史';
   static const logout = '退出登录';
   static const logoutConfirmTitle = '退出登录';
-  static const logoutConfirmMessage = '确定退出当前账号吗？';
+  static const logoutConfirmMessage = '确定退出当前账户吗？';
 
   static const composerHint = '把事情说明白';
   static const attach = '添加附件';
@@ -27,7 +27,7 @@ class AppStrings {
   static const send = '发送';
   static const sending = '发送中';
   static const voiceComingSoon = '语音即将支持。';
-  static const loading = '加载中...';
+  static const loading = '处理中...';
   static const loadFailed = '加载失败，请稍后重试。';
   static const emptyConversation = '开始一段新对话吧。';
   static const emptyConversationHistory = '还没有历史对话。';
@@ -96,6 +96,7 @@ class AppStrings {
   static const deliveryTimeField = '送达时间';
   static const failureReasonField = '失败原因';
   static const retryCountField = '重试次数';
+  static const generatingInterrupted = '生成中断';
 
   static String toolLabel(String? tool) {
     switch (tool) {
@@ -123,7 +124,7 @@ class AppStrings {
       case 'expired':
         return '已过期';
       case 'superseded':
-        return '已替代';
+        return '已替换';
       default:
         return '处理中';
     }
@@ -269,6 +270,8 @@ class AppStrings {
         return '本轮回复生成失败，请检查网络后重试。';
       case 'llm_invalid_response':
         return '智能服务返回异常，本轮未完成。';
+      case 'conversation_stream_error':
+        return '本轮消息流已中断，请重试。';
       default:
         final trimmed = message?.trim() ?? '';
         return trimmed.isEmpty ? '这次处理没有完成，请稍后再试。' : trimmed;

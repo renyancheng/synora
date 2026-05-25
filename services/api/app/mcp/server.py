@@ -11,12 +11,13 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import get_settings
 from app.mcp.tools import (
+    create_quick_note_after_approval_tool,
     create_schedule_after_approval_tool,
     detect_schedule_conflicts_tool,
     dispatch_notification_tool,
     get_notification_status_tool,
     parse_schedule_draft_tool,
-    record_quick_note_tool,
+    prepare_quick_note_draft_tool,
 )
 
 
@@ -125,9 +126,15 @@ def get_mcp_server() -> FastMCP:
         structured_output=True,
     )
     server.add_tool(
-        record_quick_note_tool,
-        name="record_quick_note",
-        description="Preview or save a quick note, depending on whether approval_token is provided.",
+        prepare_quick_note_draft_tool,
+        name="prepare_quick_note_draft",
+        description="Prepare a quick note draft and return approval metadata without final write.",
+        structured_output=True,
+    )
+    server.add_tool(
+        create_quick_note_after_approval_tool,
+        name="create_quick_note_after_approval",
+        description="Create the final quick note after approval_token validation.",
         structured_output=True,
     )
     server.add_tool(

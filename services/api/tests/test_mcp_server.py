@@ -117,14 +117,14 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
                         result = await session.list_tools()
 
         tool_names = [tool.name for tool in result.tools]
-        self.assertEqual(len(tool_names), 6)
         self.assertEqual(
             tool_names,
             [
                 "parse_schedule_draft",
                 "detect_schedule_conflicts",
                 "create_schedule_after_approval",
-                "record_quick_note",
+                "prepare_quick_note_draft",
+                "create_quick_note_after_approval",
                 "dispatch_notification",
                 "get_notification_status",
             ],
@@ -157,9 +157,9 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(structured["draft"]["title"], "项目周会")
         self.assertEqual(structured["draft"]["start"]["timeZone"], "Asia/Shanghai")
 
-    async def test_record_quick_note_tool_call_returns_pending_approval(self) -> None:
+    async def test_prepare_quick_note_draft_returns_pending_approval(self) -> None:
         approval = SimpleNamespace(
-            action="record_quick_note",
+            action="create_quick_note",
             expires_at=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
             draft_hash="note-hash",
         )
@@ -174,7 +174,7 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
                         async with ClientSession(read_stream, write_stream) as session:
                             await session.initialize()
                             result = await session.call_tool(
-                                "record_quick_note",
+                                "prepare_quick_note_draft",
                                 {
                                     "content": "记一下：整理论文实验记录",
                                     "tags": [],

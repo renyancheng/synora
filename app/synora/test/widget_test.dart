@@ -90,7 +90,7 @@ void main() {
     expect(find.text(AppStrings.appTitle), findsOneWidget);
     expect(find.text('你好，我在这里。'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('打开导航菜单'));
+    await tester.tap(find.byIcon(Icons.menu));
     await tester.pumpAndSettle();
 
     expect(find.text(AppStrings.mySchedules), findsOneWidget);

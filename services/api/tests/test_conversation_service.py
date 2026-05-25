@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import unittest
 
 from sqlalchemy import create_engine, select
@@ -17,7 +17,15 @@ from app.schemas.conversation import ConversationActionRequest, ConversationSend
 from app.schemas.schedule import ConflictCheckResponse, ScheduleEventDraft
 
 
-class ConversationServiceTests(unittest.TestCase):
+class _FakeGeneralChatAgent:
+    async def astream_events(self, _payload, version="v2"):
+        assert version == "v2"
+        yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="好的，")}}
+        yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="我来帮你一起整理。")}}
+        yield {"event": "on_chain_end", "data": {"output": {"messages": [SimpleNamespace(content="好的，我来帮你一起整理。")]}}}
+
+
+class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.engine = create_engine("sqlite:///:memory:", future=True)
         self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
@@ -52,10 +60,11 @@ class ConversationServiceTests(unittest.TestCase):
             evidence_digest=["明天下午三点", "教学例会"],
         )
 
-    @patch.object(ModelAdapter, "stream_chat_reply_chunks", return_value=iter(["好的，", "我来帮你一起整理。"]))
+    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
+    @patch.object(ModelAdapter, "build_general_chat_agent", return_value=_FakeGeneralChatAgent())
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学安排")
-    @patch.object(ModelAdapter, "route_conversation_intent", return_value="general_chat")
-    def test_send_general_chat_message(self, _intent_mock, _title_mock, _reply_mock) -> None:
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    async def test_send_general_chat_message(self, _intent_mock, _title_mock, _agent_mock, _tools_mock) -> None:
         thread = create_conversation(self.db, self.user.id)
         _, user_message, assistant_message, agent_run = queue_message(
             self.db,
@@ -64,14 +73,15 @@ class ConversationServiceTests(unittest.TestCase):
             ConversationSendMessageRequest(text_content="你好，帮我看看今天安排。"),
         )
 
-        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
         self.assertEqual(user_message.text_content, "你好，帮我看看今天安排。")
+        self.assertEqual(events[0]["event"], "run_started")
         self.assertEqual(events[-1]["event"], "run_completed")
         self.assertEqual(self.db.get(type(thread), thread.id).title, "教学安排")
         self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "好的，我来帮你一起整理。")
 
-    def test_stream_returns_run_failed_when_llm_not_configured(self) -> None:
+    async def test_stream_returns_run_failed_when_llm_not_configured(self) -> None:
         thread = create_conversation(self.db, self.user.id)
         _, _, assistant_message, agent_run = queue_message(
             self.db,
@@ -80,9 +90,9 @@ class ConversationServiceTests(unittest.TestCase):
             ConversationSendMessageRequest(text_content="你好，帮我看看今天安排。"),
         )
 
-        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
-        self.assertEqual(events[0]["event"], "assistant_started")
+        self.assertEqual(events[0]["event"], "run_started")
         self.assertEqual(events[-1]["event"], "run_failed")
         self.assertEqual(events[-1]["data"]["code"], "llm_not_configured")
         self.assertFalse(events[-1]["data"]["retryable"])
@@ -90,24 +100,40 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertEqual(refreshed.status, "failed")
         self.assertEqual(refreshed.text_content, "")
 
-    @patch("app.domains.conversation.service.detect_conflicts")
-    @patch("app.domains.conversation.service.create_schedule_draft")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "route_conversation_intent", return_value="schedule_intake")
-    def test_schedule_message_creates_pending_cards(self, _intent_mock, _title_mock, create_draft_mock, detect_conflicts_mock) -> None:
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_schedule_message_creates_pending_cards(self, _intent_mock, _title_mock, invoke_tool_mock) -> None:
         draft = self._draft()
-        create_draft_mock.return_value = (draft, "draft-hash", [], [], ["明天下午三点"], 0.92)
-        detect_conflicts_mock.return_value = ConflictCheckResponse(
-            conflict_items=[],
-            suggestions=[],
-            risk_level="low",
-            approval={
-                "approval_token": "approval-token",
-                "action": "create_schedule",
-                "expires_at": datetime.now(timezone.utc),
-                "draft_hash": "draft-hash",
-            },
-        )
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["明天下午三点"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash",
+                    },
+                },
+            ),
+        ]
         thread = create_conversation(self.db, self.user.id)
 
         _, _, _, agent_run = queue_message(
@@ -116,40 +142,56 @@ class ConversationServiceTests(unittest.TestCase):
             thread.id,
             ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会。"),
         )
-        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
-        card_events = [item for item in events if item["event"] == "card_upsert"]
+        card_events = [item for item in events if item["event"] == "card_snapshot"]
         self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["schedule_draft_card", "conflict_card"])
+        self.assertTrue(any(item["event"] == "approval_required" for item in events))
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNotNone(pending)
         self.assertEqual(pending.stage, "approval_pending")
 
     @patch("app.domains.conversation.service.create_schedule_after_approval")
-    @patch("app.domains.conversation.service.detect_conflicts")
-    @patch("app.domains.conversation.service.create_schedule_draft")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "route_conversation_intent", return_value="schedule_intake")
-    def test_confirm_schedule_action_returns_result_card(
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_confirm_schedule_action_returns_result_card(
         self,
         _intent_mock,
         _title_mock,
-        create_draft_mock,
-        detect_conflicts_mock,
+        invoke_tool_mock,
         create_after_mock,
     ) -> None:
         draft = self._draft()
-        create_draft_mock.return_value = (draft, "draft-hash", [], [], ["明天下午三点"], 0.92)
-        detect_conflicts_mock.return_value = ConflictCheckResponse(
-            conflict_items=[],
-            suggestions=[],
-            risk_level="low",
-            approval={
-                "approval_token": "approval-token",
-                "action": "create_schedule",
-                "expires_at": datetime.now(timezone.utc),
-                "draft_hash": "draft-hash",
-            },
-        )
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["明天下午三点"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash",
+                    },
+                },
+            ),
+        ]
         create_after_mock.return_value = (
             SimpleNamespace(
                 id=10,
@@ -167,7 +209,7 @@ class ConversationServiceTests(unittest.TestCase):
             thread.id,
             ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会。"),
         )
-        list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
         _, assistant_messages = apply_action(
             self.db,
@@ -181,22 +223,31 @@ class ConversationServiceTests(unittest.TestCase):
         self.assertIsNone(pending)
 
     @patch("app.domains.conversation.service.save_note_after_approval")
-    @patch("app.domains.conversation.service.create_quick_note_draft")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="实验记录")
-    @patch.object(ModelAdapter, "route_conversation_intent", return_value="quick_note_intake")
-    def test_quick_note_message_and_confirm(
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
+    async def test_quick_note_message_and_confirm(
         self,
         _intent_mock,
         _title_mock,
-        create_note_mock,
+        invoke_tool_mock,
         save_note_mock,
     ) -> None:
-        create_note_mock.return_value = (
-            "下周整理论文实验记录",
-            ["科研", "待办"],
-            "quick-note-token",
-            ["论文", "实验记录"],
-            SimpleNamespace(draft_hash="quick-note-hash"),
+        invoke_tool_mock.return_value = (
+            SimpleNamespace(content="note"),
+            {
+                "status": "pending_approval",
+                "normalized_content": "下周整理论文实验记录",
+                "preview_tags": ["科研", "待办"],
+                "attachment_ids": [],
+                "evidence_digest": ["论文", "实验记录"],
+                "approval": {
+                    "approval_token": "quick-note-token",
+                    "action": "create_quick_note",
+                    "expires_at": datetime.now(timezone.utc).isoformat(),
+                    "draft_hash": "quick-note-hash",
+                },
+            },
         )
         save_note_mock.return_value = SimpleNamespace(
             id=7,
@@ -210,8 +261,8 @@ class ConversationServiceTests(unittest.TestCase):
             thread.id,
             ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录。"),
         )
-        events = list(consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token))
-        card_events = [item for item in events if item["event"] == "card_upsert"]
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+        card_events = [item for item in events if item["event"] == "card_snapshot"]
 
         self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["quick_note_preview_card"])
 

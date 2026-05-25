@@ -7,9 +7,9 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import NotificationAudit, ReminderJob, Schedule
-from app.runtime import get_runtime_executor
 from app.runtime.approval_gate import ApprovalGate
 from app.runtime.model_adapter import ModelAdapter
+from app.runtime.tool_impls import parse_schedule_draft
 from app.schemas.schedule import (
     ConflictCheckResponse,
     ConflictItem,
@@ -127,11 +127,12 @@ def _build_reminder_jobs(schedule: Schedule) -> list[ReminderJob]:
 
 
 def create_schedule_draft(db: Session, user_id: int, payload: ScheduleDraftInput) -> tuple[ScheduleEventDraft, str, list[str], list[str], list[str], float]:
-    result = get_runtime_executor().execute_workflow(
-        db,
+    result = parse_schedule_draft(
+        db=db,
         user_id=user_id,
-        workflow="schedule_intake",
-        payload=payload.model_dump(mode="json", by_alias=True),
+        text_content=payload.text_content,
+        attachment_ids=payload.attachment_ids,
+        context=payload.context,
     )
     draft = ScheduleEventDraft.model_validate(result["draft"])
     draft_hash = build_draft_hash(draft)
@@ -266,7 +267,7 @@ def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_t
         scheduled_at=start_at,
         duration_minutes=_event_duration_minutes(schedule_draft),
         reminder_at=primary_reminder_at,
-        source_type="attachment",
+        source_type="mixed",
     )
     db.add(schedule)
     db.commit()

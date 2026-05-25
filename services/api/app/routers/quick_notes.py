@@ -37,7 +37,7 @@ def create_quick_note_draft_endpoint(
         evidence_digest=evidence_digest,
         approval={
             "approval_token": token,
-            "action": "record_quick_note",
+            "action": "create_quick_note",
             "expires_at": approval.expires_at,
             "draft_hash": approval.draft_hash,
         },

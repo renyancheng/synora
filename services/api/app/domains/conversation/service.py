@@ -1,26 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator, Iterable
 from datetime import datetime, timezone
-from typing import Generator, Iterable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domains.attachment.service import build_attachment_prompt_assets
-from app.domains.quick_note.service import create_quick_note_draft, save_note_after_approval
-from app.domains.schedule.service import (
-    build_draft_hash,
-    create_schedule_after_approval,
-    create_schedule_draft,
-    detect_conflicts,
-)
-from app.models import AgentRun, ConversationMessage, ConversationPendingState, ConversationThread
+from app.domains.quick_note.service import save_note_after_approval
+from app.domains.schedule.service import build_draft_hash, create_schedule_after_approval, detect_conflicts
+from app.models import AgentRun, AgentToolCallAudit, ConversationMessage, ConversationPendingState, ConversationThread
 from app.runtime.errors import LLMServiceError
+from app.runtime.mcp_client import get_synora_tools, invoke_synora_tool
 from app.runtime.model_adapter import ModelAdapter
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
 from app.schemas.quick_note import QuickNoteDraftRequest
-from app.schemas.schedule import ScheduleDraftInput, ScheduleEventDraft
+from app.schemas.schedule import ScheduleEventDraft
 from app.security import mint_token
 
 
@@ -130,6 +127,10 @@ def queue_message(
         stream_token=mint_token(),
         stream_status="pending",
         input_json=payload.model_dump(mode="json"),
+        output_json={
+            "agent_backend": "langchain",
+            "tool_source": "mcp",
+        },
     )
     db.add(agent_run)
     db.commit()
@@ -137,12 +138,12 @@ def queue_message(
     return thread, user_message, assistant_message, agent_run
 
 
-def consume_stream(
+async def consume_stream(
     db: Session,
     user_id: int,
     conversation_id: int,
     stream_id: str,
-) -> Generator[dict, None, None]:
+) -> AsyncGenerator[dict, None]:
     thread = get_conversation(db, user_id, conversation_id)
     agent_run = db.scalar(
         select(AgentRun).where(
@@ -161,7 +162,8 @@ def consume_stream(
     if agent_run.stream_status == "active":
         raise ValueError("这条消息正在生成中，请稍后再试。")
     if agent_run.stream_status == "completed":
-        yield from _replay_completed_run(db, agent_run, assistant_message)
+        async for item in _replay_completed_run(db, agent_run, assistant_message):
+            yield item
         return
 
     agent_run.stream_status = "active"
@@ -175,19 +177,27 @@ def consume_stream(
     assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
     attachment_parts = [part for asset in assets for part in asset.parts]
 
-    yield {"event": "assistant_started", "data": {"assistant_message_id": assistant_message.id}}
+    yield {
+        "event": "run_started",
+        "data": {
+            "assistant_message_id": assistant_message.id,
+            "stream_id": stream_id,
+        },
+    }
 
     try:
         pending = _get_pending_state(db, conversation_id)
         if pending:
-            final_text = "当前还有一项待确认内容。你可以先处理卡片，或者先取消当前待办后再继续新的话题。"
-            yield from _emit_text_stream(db, assistant_message, final_text)
+            final_text = "当前还有一项待确认内容。请先处理当前卡片，或先取消后再继续新的话题。"
+            async for item in _emit_text_stream(db, assistant_message, final_text):
+                yield item
             _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
-            yield {"event": "assistant_message", "data": {"message": _message_payload(assistant_message)}}
+            yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
             yield {"event": "run_completed", "data": {"stream_id": stream_id}}
             return
 
-        intent = ModelAdapter().route_conversation_intent(
+        model = ModelAdapter()
+        intent = await model.aroute_conversation_intent(
             {
                 "text_content": text_content,
                 "attachment_ids": attachment_ids,
@@ -197,66 +207,63 @@ def consume_stream(
             attachment_parts=attachment_parts,
         )
         agent_run.workflow = intent
+        agent_run.output_json = {
+            **dict(agent_run.output_json or {}),
+            "workflow": intent,
+            "model_name": model._settings.llm_model,
+            "provider_name": "dashscope",
+        }
         db.commit()
 
         if intent == "general_chat":
-            recent_messages = db.scalars(
-                select(ConversationMessage)
-                .where(ConversationMessage.conversation_id == thread.id)
-                .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
-                .limit(6)
-            ).all()
-            ordered = list(reversed(list(recent_messages)))
-            final_text = ""
-            for chunk in ModelAdapter().stream_chat_reply_chunks(
+            async for item in _stream_general_chat(
+                db,
+                thread,
+                assistant_message,
+                agent_run,
                 user_message=text_content,
-                recent_messages=[
-                    {"role": item.role, "content": item.text_content or ""}
-                    for item in ordered
-                    if item.text_content and item.id != assistant_message.id
-                ],
                 attachment_parts=attachment_parts,
             ):
-                final_text += chunk
-                assistant_message.text_content = final_text
-                db.commit()
-                yield {"event": "assistant_delta", "data": {"assistant_message_id": assistant_message.id, "delta": chunk}}
-            assistant_message.text_content = final_text
-            assistant_message.status = "completed"
-            db.commit()
+                yield item
+            final_text = assistant_message.text_content or ""
             _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
-            yield {"event": "assistant_message", "data": {"message": _message_payload(assistant_message)}}
+            yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
             yield {"event": "run_completed", "data": {"stream_id": stream_id}}
             return
 
         if intent == "schedule_intake":
-            yield {"event": "tool_status", "data": {"label": "正在整理日程草稿"}}
-            final_text, created_ids = _process_schedule_intake(
+            final_text, created_ids, requires_approval, tool_events = await _process_schedule_intake(
                 db,
                 user_id,
                 thread,
+                agent_run,
                 text_content=text_content,
                 attachment_ids=attachment_ids,
                 context=context,
             )
         else:
-            yield {"event": "tool_status", "data": {"label": "正在整理速记"}}
-            final_text, created_ids = _process_quick_note_intake(
+            final_text, created_ids, requires_approval, tool_events = await _process_quick_note_intake(
                 db,
                 user_id,
                 thread,
+                agent_run,
                 text_content=text_content,
                 attachment_ids=attachment_ids,
                 context=context,
             )
 
-        yield from _emit_text_stream(db, assistant_message, final_text)
+        for tool_event in tool_events:
+            yield tool_event
+        async for item in _emit_text_stream(db, assistant_message, final_text):
+            yield item
         _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=created_ids)
-        yield {"event": "assistant_message", "data": {"message": _message_payload(assistant_message)}}
+        yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
         for message_id in created_ids:
             message = db.get(ConversationMessage, message_id)
             if message:
-                yield {"event": "card_upsert", "data": {"message": _message_payload(message)}}
+                yield {"event": "card_snapshot", "data": {"message": _message_payload(message)}}
+        if requires_approval:
+            yield {"event": "approval_required", "data": requires_approval}
         yield {"event": "run_completed", "data": {"stream_id": stream_id}}
     except Exception as exc:
         agent_run.status = "failed"
@@ -316,31 +323,164 @@ def apply_action(
     raise ValueError("不支持的对话动作。")
 
 
-def _process_schedule_intake(
+async def _stream_general_chat(
+    db: Session,
+    thread: ConversationThread,
+    assistant_message: ConversationMessage,
+    agent_run: AgentRun,
+    *,
+    user_message: str,
+    attachment_parts: list[dict],
+) -> AsyncGenerator[dict, None]:
+    recent_messages = db.scalars(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == thread.id)
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(12)
+    ).all()
+    ordered = list(reversed(list(recent_messages)))
+    model = ModelAdapter()
+    tools = await get_synora_tools()
+    agent = model.build_general_chat_agent(tools)
+    messages = model.build_langchain_messages(
+        recent_messages=[
+            {"role": item.role, "content": item.text_content or ""}
+            for item in ordered
+            if item.id != assistant_message.id and item.text_content
+        ],
+        user_message=user_message,
+        attachment_parts=attachment_parts,
+    )
+
+    final_text = assistant_message.text_content or ""
+    tool_audits: dict[str, AgentToolCallAudit] = {}
+    async for event in agent.astream_events({"messages": messages}, version="v2"):
+        event_name = str(event.get("event") or "")
+        if event_name == "on_chat_model_stream":
+            delta = _extract_langchain_delta(event)
+            if not delta:
+                continue
+            final_text += delta
+            assistant_message.text_content = final_text
+            db.commit()
+            yield {"event": "message_delta", "data": {"assistant_message_id": assistant_message.id, "delta": delta}}
+            continue
+
+        if event_name == "on_tool_start":
+            tool_name = str(event.get("name") or "tool")
+            call_id = str(event.get("run_id") or mint_token())
+            tool_audits[call_id] = _start_tool_audit(
+                db,
+                agent_run_id=agent_run.id,
+                tool_name=tool_name,
+                request_json={"input": event.get("data", {}).get("input")},
+            )
+            yield {
+                "event": "tool_call_started",
+                "data": {"tool_name": tool_name, "call_id": call_id},
+            }
+            continue
+
+        if event_name == "on_tool_end":
+            tool_name = str(event.get("name") or "tool")
+            call_id = str(event.get("run_id") or "")
+            audit = tool_audits.get(call_id)
+            _finish_tool_audit(
+                db,
+                audit,
+                status="ok",
+                response_json={"output": _serialize_any(event.get("data", {}).get("output"))},
+            )
+            yield {
+                "event": "tool_call_completed",
+                "data": {"tool_name": tool_name, "call_id": call_id},
+            }
+            continue
+
+        if event_name == "on_tool_error":
+            tool_name = str(event.get("name") or "tool")
+            call_id = str(event.get("run_id") or "")
+            audit = tool_audits.get(call_id)
+            message = str(event.get("data", {}).get("error") or "Tool call failed")
+            _finish_tool_audit(
+                db,
+                audit,
+                status="failed",
+                response_json={},
+                error_message=message,
+            )
+            yield {
+                "event": "tool_call_failed",
+                "data": {"tool_name": tool_name, "call_id": call_id, "message": message},
+            }
+            continue
+
+        if event_name == "on_chain_end":
+            tail = _extract_langchain_final_text(event)
+            if tail and not final_text:
+                final_text = tail
+                assistant_message.text_content = final_text
+                db.commit()
+
+    assistant_message.text_content = final_text
+    db.commit()
+
+
+async def _process_schedule_intake(
     db: Session,
     user_id: int,
     thread: ConversationThread,
+    agent_run: AgentRun,
     *,
     text_content: str,
     attachment_ids: list[int],
     context: dict[str, str],
-) -> tuple[str, list[int]]:
-    draft, draft_hash, missing_fields, ambiguity_flags, evidence_digest, parse_confidence = create_schedule_draft(
+) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
+    tool_events: list[dict[str, Any]] = []
+    parse_audit = _start_tool_audit(
         db,
-        user_id,
-        ScheduleDraftInput(
-            text_content=text_content,
-            attachment_ids=attachment_ids,
-            context=context,
-        ),
+        agent_run_id=agent_run.id,
+        tool_name="parse_schedule_draft",
+        request_json={
+            "text_content": text_content,
+            "attachment_ids": attachment_ids,
+            "context": context,
+        },
     )
+    tool_events.append({"event": "tool_call_started", "data": {"tool_name": "parse_schedule_draft"}})
+    tool_message, parsed = await invoke_synora_tool(
+        "parse_schedule_draft",
+        {
+            "text_content": text_content,
+            "attachment_ids": attachment_ids,
+            "context": context,
+        },
+    )
+    _finish_tool_audit(
+        db,
+        parse_audit,
+        status="ok",
+        response_json={"content": str(tool_message.content), "structured": parsed},
+    )
+    tool_events.append({"event": "tool_call_completed", "data": {"tool_name": "parse_schedule_draft"}})
+
+    if parsed.get("status") == "error":
+        raise ValueError(str(parsed.get("message") or "日程草稿解析失败。"))
+
+    draft = ScheduleEventDraft.model_validate(parsed.get("draft") or {})
+    draft_hash = str(parsed.get("draft_hash") or build_draft_hash(draft))
+    missing_fields = list(parsed.get("missing_fields") or [])
+    ambiguity_flags = list(parsed.get("ambiguity_flags") or [])
+    evidence_digest = list(parsed.get("evidence_digest") or draft.evidence_digest)
+    parse_confidence = float(parsed.get("parse_confidence") or draft.parse_confidence)
 
     action_group_id = mint_token()
     revision = 1
     created_ids: list[int] = []
+    approval_required: dict[str, Any] | None = None
 
     if missing_fields:
-        final_text = "我已经整理出一条日程草稿，不过还有必要信息缺失。请先补充后再确认。"
+        final_text = "我已经整理出一条日程草稿，但还缺少关键信息。请先补充后再确认。"
         _upsert_pending_state(
             db,
             thread.id,
@@ -384,24 +524,52 @@ def _process_schedule_intake(
             ),
         )
         created_ids.append(card.id)
-        return final_text, created_ids
+        return final_text, created_ids, None, tool_events
 
-    conflict_result = detect_conflicts(db, user_id, draft, draft_hash)
-    final_text = "我已经帮你整理好日程草稿，并完成了冲突检查。确认后我就会正式创建日程和提醒。"
+    conflict_audit = _start_tool_audit(
+        db,
+        agent_run_id=agent_run.id,
+        tool_name="detect_schedule_conflicts",
+        request_json={
+            "draft": draft.model_dump(mode="json", by_alias=True),
+            "draft_hash": draft_hash,
+        },
+    )
+    tool_events.append({"event": "tool_call_started", "data": {"tool_name": "detect_schedule_conflicts"}})
+    tool_message, conflict_result = await invoke_synora_tool(
+        "detect_schedule_conflicts",
+        {
+            "draft": draft.model_dump(mode="json", by_alias=True),
+            "draft_hash": draft_hash,
+        },
+    )
+    _finish_tool_audit(
+        db,
+        conflict_audit,
+        status="ok",
+        response_json={"content": str(tool_message.content), "structured": conflict_result},
+    )
+    tool_events.append({"event": "tool_call_completed", "data": {"tool_name": "detect_schedule_conflicts"}})
+
+    if conflict_result.get("status") == "error":
+        raise ValueError(str(conflict_result.get("message") or "日程冲突检测失败。"))
+
+    approval = dict(conflict_result.get("approval") or {})
+    final_text = "我已经整理好日程草稿，并完成冲突检查。确认后我会正式创建日程和提醒。"
     _upsert_pending_state(
         db,
         thread.id,
         user_id,
         pending_type="schedule",
         stage="approval_pending",
-        draft_hash=conflict_result.approval.draft_hash,
-        approval_token=conflict_result.approval.approval_token,
+        draft_hash=str(approval.get("draft_hash") or draft_hash),
+        approval_token=str(approval.get("approval_token") or ""),
         attachment_ids=draft.source_attachment_ids,
         payload_json=draft.model_dump(mode="json", by_alias=True),
         meta_json={
-            "conflict_items": [item.model_dump(mode="json", by_alias=True) for item in conflict_result.conflict_items],
-            "suggestions": [item.model_dump(mode="json", by_alias=True) for item in conflict_result.suggestions],
-            "risk_level": conflict_result.risk_level,
+            "conflict_items": list(conflict_result.get("conflict_items") or []),
+            "suggestions": list(conflict_result.get("suggestions") or []),
+            "risk_level": str(conflict_result.get("risk_level") or "low"),
             "evidence_digest": evidence_digest,
             "ambiguity_flags": ambiguity_flags,
             "parse_confidence": parse_confidence,
@@ -443,9 +611,9 @@ def _process_schedule_intake(
         revision=revision,
         structured_payload={
             "card_type": "conflict_check",
-            "risk_level": conflict_result.risk_level,
-            "conflict_items": [item.model_dump(mode="json", by_alias=True) for item in conflict_result.conflict_items],
-            "suggestions": [item.model_dump(mode="json", by_alias=True) for item in conflict_result.suggestions],
+            "risk_level": str(conflict_result.get("risk_level") or "low"),
+            "conflict_items": list(conflict_result.get("conflict_items") or []),
+            "suggestions": list(conflict_result.get("suggestions") or []),
             "action_group_id": action_group_id,
             "revision": revision,
             "lifecycle_status": "conflict_review",
@@ -453,29 +621,64 @@ def _process_schedule_intake(
         },
     )
     created_ids.extend([draft_card.id, conflict_card.id])
-    return final_text, created_ids
+    approval_required = {
+        "pending_type": "schedule",
+        "stage": "approval_pending",
+        "action_group_id": action_group_id,
+        "approval_token": approval.get("approval_token"),
+    }
+    return final_text, created_ids, approval_required, tool_events
 
 
-def _process_quick_note_intake(
+async def _process_quick_note_intake(
     db: Session,
     user_id: int,
     thread: ConversationThread,
+    agent_run: AgentRun,
     *,
     text_content: str,
     attachment_ids: list[int],
     context: dict[str, str],
-) -> tuple[str, list[int]]:
-    normalized_content, preview_tags, approval_token, evidence_digest, approval = create_quick_note_draft(
+) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
+    tool_events: list[dict[str, Any]] = []
+    tool_audit = _start_tool_audit(
         db,
-        user_id,
-        QuickNoteDraftRequest(
-            content=text_content,
-            tags=[],
-            attachment_ids=attachment_ids,
-            context=context,
-        ),
+        agent_run_id=agent_run.id,
+        tool_name="prepare_quick_note_draft",
+        request_json={
+            "content": text_content,
+            "tags": [],
+            "attachment_ids": attachment_ids,
+            "context": context,
+        },
     )
-    final_text = "我已经帮你整理好这条速记，确认后就会正式保存。"
+    tool_events.append({"event": "tool_call_started", "data": {"tool_name": "prepare_quick_note_draft"}})
+    tool_message, parsed = await invoke_synora_tool(
+        "prepare_quick_note_draft",
+        {
+            "content": text_content,
+            "tags": [],
+            "attachment_ids": attachment_ids,
+            "context": context,
+        },
+    )
+    _finish_tool_audit(
+        db,
+        tool_audit,
+        status="ok",
+        response_json={"content": str(tool_message.content), "structured": parsed},
+    )
+    tool_events.append({"event": "tool_call_completed", "data": {"tool_name": "prepare_quick_note_draft"}})
+
+    if parsed.get("status") == "error":
+        raise ValueError(str(parsed.get("message") or "速记草稿生成失败。"))
+
+    normalized_content = str(parsed.get("normalized_content") or "").strip()
+    preview_tags = list(parsed.get("preview_tags") or [])
+    approval = dict(parsed.get("approval") or {})
+    evidence_digest = list(parsed.get("evidence_digest") or [])
+
+    final_text = "我已经整理好这条速记，确认后就会正式保存。"
     action_group_id = mint_token()
     revision = 1
     _upsert_pending_state(
@@ -484,8 +687,8 @@ def _process_quick_note_intake(
         user_id,
         pending_type="quick_note",
         stage="approval_pending",
-        draft_hash=approval.draft_hash,
-        approval_token=approval_token,
+        draft_hash=str(approval.get("draft_hash") or ""),
+        approval_token=str(approval.get("approval_token") or ""),
         attachment_ids=attachment_ids,
         payload_json={
             "content": normalized_content,
@@ -519,7 +722,17 @@ def _process_quick_note_intake(
             "is_actionable": True,
         },
     )
-    return final_text, [card.id]
+    return (
+        final_text,
+        [card.id],
+        {
+            "pending_type": "quick_note",
+            "stage": "approval_pending",
+            "action_group_id": action_group_id,
+            "approval_token": approval.get("approval_token"),
+        },
+        tool_events,
+    )
 
 
 def _submit_schedule_missing_fields(
@@ -731,27 +944,37 @@ def _confirm_quick_note_pending(
     return [message]
 
 
-def _emit_text_stream(db: Session, assistant_message: ConversationMessage, text: str) -> Iterable[dict]:
+async def _emit_text_stream(db: Session, assistant_message: ConversationMessage, text: str) -> AsyncGenerator[dict, None]:
     aggregated = ""
     for index in range(0, len(text), 12):
         chunk = text[index : index + 12]
         aggregated += chunk
         assistant_message.text_content = aggregated
         db.commit()
-        yield {"event": "assistant_delta", "data": {"assistant_message_id": assistant_message.id, "delta": chunk}}
+        yield {"event": "message_delta", "data": {"assistant_message_id": assistant_message.id, "delta": chunk}}
     assistant_message.status = "completed"
     db.commit()
 
 
-def _replay_completed_run(db: Session, agent_run: AgentRun, assistant_message: ConversationMessage) -> Generator[dict, None, None]:
+async def _replay_completed_run(
+    db: Session,
+    agent_run: AgentRun,
+    assistant_message: ConversationMessage,
+) -> AsyncGenerator[dict, None]:
     assistant_text = str(agent_run.output_json.get("assistant_text") or assistant_message.text_content or "")
-    yield {"event": "assistant_started", "data": {"assistant_message_id": assistant_message.id}}
+    yield {
+        "event": "run_started",
+        "data": {
+            "assistant_message_id": assistant_message.id,
+            "stream_id": agent_run.stream_token,
+        },
+    }
     if assistant_text:
-        yield {"event": "assistant_message", "data": {"message": _message_payload(assistant_message)}}
+        yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
     for message_id in list(agent_run.output_json.get("created_message_ids") or []):
         message = db.get(ConversationMessage, message_id)
         if message:
-            yield {"event": "card_upsert", "data": {"message": _message_payload(message)}}
+            yield {"event": "card_snapshot", "data": {"message": _message_payload(message)}}
     yield {"event": "run_completed", "data": {"stream_id": agent_run.stream_token}}
 
 
@@ -768,6 +991,7 @@ def _finalize_run(
     agent_run.status = "completed"
     agent_run.stream_status = "completed"
     agent_run.output_json = {
+        **dict(agent_run.output_json or {}),
         "assistant_text": assistant_text,
         "created_message_ids": created_message_ids,
     }
@@ -784,9 +1008,7 @@ def _mark_action_group_status(
 ) -> None:
     if not action_group_id:
         return
-    messages = db.scalars(
-        select(ConversationMessage).where(ConversationMessage.action_group_id == action_group_id)
-    ).all()
+    messages = db.scalars(select(ConversationMessage).where(ConversationMessage.action_group_id == action_group_id)).all()
     for message in messages:
         payload = dict(message.structured_payload_json or {})
         payload["lifecycle_status"] = lifecycle_status
@@ -853,7 +1075,7 @@ def _upsert_pending_state(
             stage=stage,
             draft_hash=draft_hash,
             approval_token=approval_token,
-            source_type="attachment",
+            source_type="mixed",
             attachment_ids_json=attachment_ids,
             payload_json=payload_json,
             meta_json=meta_json,
@@ -864,7 +1086,7 @@ def _upsert_pending_state(
         pending.stage = stage
         pending.draft_hash = draft_hash
         pending.approval_token = approval_token
-        pending.source_type = "attachment"
+        pending.source_type = "mixed"
         pending.attachment_ids_json = attachment_ids
         pending.payload_json = payload_json
         pending.meta_json = meta_json
@@ -920,3 +1142,70 @@ def _message_payload(message: ConversationMessage) -> dict:
         "revision": message.revision,
         "created_at": message.created_at.isoformat(),
     }
+
+
+def _start_tool_audit(
+    db: Session,
+    *,
+    agent_run_id: int,
+    tool_name: str,
+    request_json: dict[str, Any],
+) -> AgentToolCallAudit:
+    audit = AgentToolCallAudit(
+        agent_run_id=agent_run_id,
+        tool_name=tool_name,
+        request_json=request_json,
+        response_json={},
+        status="running",
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(audit)
+    return audit
+
+
+def _finish_tool_audit(
+    db: Session,
+    audit: AgentToolCallAudit | None,
+    *,
+    status: str,
+    response_json: dict[str, Any],
+    error_message: str | None = None,
+) -> None:
+    if audit is None:
+        return
+    audit.status = status
+    audit.response_json = response_json
+    audit.error_message = error_message
+    db.commit()
+
+
+def _serialize_any(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _serialize_any(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_serialize_any(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    return str(value)
+
+
+def _extract_langchain_delta(event: dict[str, Any]) -> str:
+    chunk = event.get("data", {}).get("chunk")
+    if chunk is None:
+        return ""
+    return ModelAdapter._extract_message_text(chunk)
+
+
+def _extract_langchain_final_text(event: dict[str, Any]) -> str:
+    output = event.get("data", {}).get("output")
+    if isinstance(output, dict):
+        messages = output.get("messages")
+        if isinstance(messages, list) and messages:
+            return ModelAdapter._extract_message_text(messages[-1])
+    if isinstance(output, list) and output:
+        return ModelAdapter._extract_message_text(output[-1])
+    return ModelAdapter._extract_message_text(output)

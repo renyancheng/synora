@@ -32,13 +32,13 @@ class OutputNormalizer:
         now = reference_time.astimezone(tz) if reference_time else datetime.now(tz)
         normalized = re.sub(r"\s+", " ", text.strip())
 
-        day = None
+        day_value = None
         if "今天" in normalized:
-            day = now.date()
+            day_value = now.date()
         elif "明天" in normalized:
-            day = (now + timedelta(days=1)).date()
+            day_value = (now + timedelta(days=1)).date()
         elif "后天" in normalized:
-            day = (now + timedelta(days=2)).date()
+            day_value = (now + timedelta(days=2)).date()
         else:
             weekday_match = re.search(r"(本周|这周|下周)(一|二|三|四|五|六|日|天)", normalized)
             if weekday_match:
@@ -50,7 +50,7 @@ class OutputNormalizer:
                     delta += 7 if delta <= 0 else 7
                 elif delta < 0:
                     delta += 7
-                day = (now + timedelta(days=delta)).date()
+                day_value = (now + timedelta(days=delta)).date()
             else:
                 date_match = re.search(r"(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日", normalized)
                 if date_match:
@@ -61,19 +61,19 @@ class OutputNormalizer:
                     candidate = datetime(year, month, day_number, tzinfo=tz)
                     if not year_text and candidate.date() < now.date():
                         candidate = datetime(year + 1, month, day_number, tzinfo=tz)
-                    day = candidate.date()
+                    day_value = candidate.date()
 
-        if day is None:
+        if day_value is None:
             return None, False
 
         hour = None
         minute = 0
         precise = False
 
-        time_match = re.search(r"(\d{1,2}):(\d{1,2})", normalized)
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = int(time_match.group(2))
+        clock_match = re.search(r"(\d{1,2}):(\d{1,2})", normalized)
+        if clock_match:
+            hour = int(clock_match.group(1))
+            minute = int(clock_match.group(2))
             precise = True
         else:
             half_match = re.search(r"(\d{1,2})点半", normalized)
@@ -89,7 +89,7 @@ class OutputNormalizer:
                     precise = True
 
         if hour is None:
-            return datetime(day.year, day.month, day.day, 9, 0, tzinfo=tz), False
+            return datetime(day_value.year, day_value.month, day_value.day, 9, 0, tzinfo=tz), False
 
         if any(token in normalized for token in ("下午", "晚上", "傍晚")) and hour < 12:
             hour += 12
@@ -98,7 +98,7 @@ class OutputNormalizer:
         elif "凌晨" in normalized and hour == 12:
             hour = 0
 
-        return datetime(day.year, day.month, day.day, hour, minute, tzinfo=tz), precise
+        return datetime(day_value.year, day_value.month, day_value.day, hour, minute, tzinfo=tz), precise
 
     @staticmethod
     def coerce_string_list(items: object) -> list[str]:

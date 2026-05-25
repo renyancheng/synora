@@ -1061,12 +1061,11 @@ class _ResultCard extends StatelessWidget {
           if (payload['start'] is Map<String, dynamic> && payload['end'] is Map<String, dynamic>) ...<Widget>[
             const SizedBox(height: 8),
             Text(
-              '${AppStrings.startField}：'
-              '${formatEventRange(
+              '${AppStrings.startField}：${formatEventRange(
                 start: EventDateTimeValue.fromJson(payload['start'] as Map<String, dynamic>),
                 end: EventDateTimeValue.fromJson(payload['end'] as Map<String, dynamic>),
                 isAllDay: false,
-              )}',
+              )}'.replaceAll('Ŗē', '：'),
             ),
           ],
           if (payload['content'] is String) ...<Widget>[
@@ -1187,7 +1186,7 @@ class _SectionList extends StatelessWidget {
           const SizedBox(height: 8),
           ...values.map((item) => Padding(
                 padding: const EdgeInsets.only(bottom: 4),
-                child: Text('• $item'),
+                child: Text('- ${item.replaceAll('Ŗē', '：')}'),
               )),
         ],
       ),

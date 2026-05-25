@@ -111,7 +111,7 @@ def send_conversation_message(
 
 
 @router.get("/{conversation_id}/streams/{stream_id}")
-def stream_conversation_message(
+async def stream_conversation_message(
     conversation_id: int,
     stream_id: str,
     db: Session = Depends(get_db),
@@ -122,9 +122,9 @@ def stream_conversation_message(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    def event_source():
+    async def event_source():
         try:
-            for item in consume_stream(db, current_user.id, conversation_id, stream_id):
+            async for item in consume_stream(db, current_user.id, conversation_id, stream_id):
                 event = item["event"]
                 data = json.dumps(item["data"], ensure_ascii=False)
                 yield f"event: {event}\ndata: {data}\n\n"

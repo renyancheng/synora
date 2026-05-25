@@ -5,12 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.schemas.common import ApprovalInfo
-from app.schemas.schedule import (
-    ConflictItem,
-    ConflictSuggestion,
-    ReminderJobInfo,
-    ScheduleEventDraft,
-)
+from app.schemas.schedule import ConflictItem, ConflictSuggestion, ReminderJobInfo, ScheduleEventDraft
 
 
 class McpResultBase(BaseModel):
@@ -40,14 +35,19 @@ class McpCreateScheduleAfterApprovalResult(McpResultBase):
     reminder_jobs: list[ReminderJobInfo] = Field(default_factory=list)
 
 
-class McpRecordQuickNoteResult(McpResultBase):
+class McpPrepareQuickNoteDraftResult(McpResultBase):
     normalized_content: str | None = None
     preview_tags: list[str] = Field(default_factory=list)
     attachment_ids: list[int] = Field(default_factory=list)
     evidence_digest: list[str] = Field(default_factory=list)
     approval: ApprovalInfo | None = None
+
+
+class McpCreateQuickNoteAfterApprovalResult(McpResultBase):
     note_id: int | None = None
     topic_tags: list[str] = Field(default_factory=list)
+    normalized_content: str | None = None
+    attachment_ids: list[int] = Field(default_factory=list)
 
 
 class McpDispatchNotificationResult(McpResultBase):
