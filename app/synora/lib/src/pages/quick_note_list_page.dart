@@ -5,7 +5,6 @@ import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
 
-
 class QuickNoteListPage extends StatelessWidget {
   const QuickNoteListPage({super.key, required this.controller});
 
@@ -97,8 +96,7 @@ class QuickNoteListPage extends StatelessWidget {
                   child: ListTile(
                     title: Text(item.content, maxLines: 2, overflow: TextOverflow.ellipsis),
                     subtitle: Text(
-                      '${item.tags.isEmpty ? AppStrings.noContent : item.tags.join(' / ')}\n'
-                      '${formatDateTime(item.createdAt)}',
+                      '${item.tags.isEmpty ? AppStrings.noContent : item.tags.join(' / ')}\n${formatDateTime(item.createdAt)}',
                     ),
                     isThreeLine: true,
                     onTap: () => _showDetails(context, item),
@@ -112,7 +110,6 @@ class QuickNoteListPage extends StatelessWidget {
     );
   }
 }
-
 
 class _EmptyPanel extends StatelessWidget {
   const _EmptyPanel(this.text);

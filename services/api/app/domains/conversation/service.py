@@ -12,7 +12,7 @@ from app.domains.attachment.service import build_attachment_prompt_assets
 from app.domains.memory.service import MemoryService
 from app.domains.quick_note.service import save_note_after_approval
 from app.domains.schedule.service import build_draft_hash, create_schedule_after_approval, detect_conflicts
-from app.models import AgentRun, AgentToolCallAudit, ConversationMessage, ConversationPendingState, ConversationThread
+from app.models import AgentRun, AgentToolCallAudit, Attachment, ConversationMessage, ConversationPendingState, ConversationThread
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.errors import LLMServiceError
 from app.runtime.mcp_client import get_synora_tools, invoke_synora_tool
@@ -60,7 +60,7 @@ def list_conversations(db: Session, user_id: int) -> list[ConversationThread]:
     return db.scalars(
         select(ConversationThread)
         .where(ConversationThread.user_id == user_id)
-        .order_by(ConversationThread.last_message_at.desc(), ConversationThread.id.desc())
+        .order_by(ConversationThread.created_at.desc(), ConversationThread.id.desc())
     ).all()
 
 
@@ -117,7 +117,12 @@ def queue_message(
         message_type="text",
         status="sent",
         text_content=text_content,
-        structured_payload={},
+        structured_payload=_build_user_message_payload(
+            db,
+            user_id=user_id,
+            attachment_ids=payload.attachment_ids,
+            selected_tool=payload.selected_tool,
+        ),
     )
     if has_user_message is None and text_content:
         thread.title = ModelAdapter().generate_conversation_title(text_content)
@@ -914,6 +919,7 @@ def _confirm_schedule_pending(
     schedule, jobs = create_schedule_after_approval(db, user_id, pending.approval_token or "", draft)
     _mark_action_group_status(db, pending.meta_json.get("action_group_id"), lifecycle_status="completed", is_actionable=False)
     _clear_pending_state(db, pending)
+    schedule_source_text = getattr(schedule, "source_text", draft.source_text)
     message = _append_message(
         db,
         thread,
@@ -926,6 +932,7 @@ def _confirm_schedule_pending(
             "result_kind": "schedule_saved",
             "summary": "日程已创建并安排提醒。",
             "title": schedule.title,
+            "source_text": schedule_source_text,
             "start": {"dateTime": schedule.start_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
             "end": {"dateTime": schedule.end_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
             "channels": [job.channel for job in jobs],
@@ -939,6 +946,45 @@ def _confirm_schedule_pending(
         summary="已确认日程",
     )
     return [message]
+
+
+def _build_user_message_payload(
+    db: Session,
+    *,
+    user_id: int,
+    attachment_ids: list[int],
+    selected_tool,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if selected_tool:
+        payload["selected_tool"] = selected_tool
+
+    normalized_ids = [int(item) for item in attachment_ids if isinstance(item, int)]
+    if not normalized_ids:
+        return payload
+
+    rows = db.scalars(
+        select(Attachment)
+        .where(Attachment.user_id == user_id, Attachment.id.in_(normalized_ids))
+        .order_by(Attachment.id.asc())
+    ).all()
+    by_id = {row.id: row for row in rows}
+    refs: list[dict[str, Any]] = []
+    for attachment_id in normalized_ids:
+        row = by_id.get(attachment_id)
+        if row is None:
+            continue
+        refs.append(
+            {
+                "attachment_id": row.id,
+                "file_name": row.file_name,
+                "content_type": row.content_type,
+                "size_bytes": row.size_bytes,
+            }
+        )
+    if refs:
+        payload["attachment_refs"] = refs
+    return payload
 
 
 def _confirm_quick_note_pending(

@@ -102,6 +102,7 @@ def list_schedules(
             title=row.title,
             location=row.location,
             details=row.details,
+            source_text=row.source_text,
             isAllDay=row.is_all_day,
             start=_event_value(row.start_at, row.time_zone),
             end=_event_value(row.end_at, row.time_zone),

@@ -1,11 +1,10 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
-
 
 class ApiException implements Exception {
   ApiException(this.message);
@@ -15,7 +14,6 @@ class ApiException implements Exception {
   @override
   String toString() => message;
 }
-
 
 class ApiClient {
   ApiClient({String? baseUrl}) : _baseUrl = baseUrl ?? _defaultBaseUrl();
@@ -101,10 +99,9 @@ class ApiClient {
 
   Future<List<ConversationThreadItem>> fetchConversations() async {
     final json = await _sendJson('GET', '/agent/conversations');
-    final items = ((json as Map<String, dynamic>)['items'] as List<dynamic>? ?? <dynamic>[])
+    return ((json as Map<String, dynamic>)['items'] as List<dynamic>? ?? <dynamic>[])
         .map((item) => ConversationThreadItem.fromJson(item as Map<String, dynamic>))
         .toList();
-    return items;
   }
 
   Future<ConversationThreadItem> createConversation({String? title}) async {

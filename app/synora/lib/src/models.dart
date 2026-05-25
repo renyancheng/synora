@@ -1,4 +1,4 @@
-import 'dart:typed_data';
+﻿import 'dart:typed_data';
 
 enum ConversationTool { schedule, quickNote }
 
@@ -55,6 +55,54 @@ class UploadedAttachment {
       sizeBytes: json['size_bytes'] as int,
     );
   }
+}
+
+class AttachmentRef {
+  AttachmentRef({
+    required this.attachmentId,
+    required this.fileName,
+    required this.contentType,
+    this.sizeBytes,
+  });
+
+  final int attachmentId;
+  final String fileName;
+  final String contentType;
+  final int? sizeBytes;
+
+  factory AttachmentRef.fromJson(Map<String, dynamic> json) {
+    return AttachmentRef(
+      attachmentId: json['attachment_id'] as int,
+      fileName: json['file_name'] as String? ?? '',
+      contentType: json['content_type'] as String? ?? '',
+      sizeBytes: json['size_bytes'] as int?,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'attachment_id': attachmentId,
+      'file_name': fileName,
+      'content_type': contentType,
+      'size_bytes': sizeBytes,
+    };
+  }
+}
+
+class ComposerAttachment {
+  ComposerAttachment.local(this.local)
+      : remote = null,
+        isLocal = true;
+
+  ComposerAttachment.remote(this.remote)
+      : local = null,
+        isLocal = false;
+
+  final LocalAttachmentData? local;
+  final AttachmentRef? remote;
+  final bool isLocal;
+
+  String get fileName => local?.fileName ?? remote?.fileName ?? '';
 }
 
 class UserProfile {
@@ -212,34 +260,6 @@ class ScheduleDraft {
       'evidence_digest': evidenceDigest,
     };
   }
-
-  ScheduleDraft copyWith({
-    String? title,
-    String? location,
-    String? details,
-    String? sourceText,
-    bool? isAllDay,
-    EventDateTimeValue? start,
-    EventDateTimeValue? end,
-    List<String>? recurrence,
-    List<int>? sourceAttachmentIds,
-    double? parseConfidence,
-    List<String>? evidenceDigest,
-  }) {
-    return ScheduleDraft(
-      title: title ?? this.title,
-      location: location ?? this.location,
-      details: details ?? this.details,
-      sourceText: sourceText ?? this.sourceText,
-      isAllDay: isAllDay ?? this.isAllDay,
-      start: start ?? this.start,
-      end: end ?? this.end,
-      recurrence: recurrence ?? this.recurrence,
-      sourceAttachmentIds: sourceAttachmentIds ?? this.sourceAttachmentIds,
-      parseConfidence: parseConfidence ?? this.parseConfidence,
-      evidenceDigest: evidenceDigest ?? this.evidenceDigest,
-    );
-  }
 }
 
 class ScheduleDraftResult {
@@ -391,6 +411,7 @@ class ScheduleItem {
     required this.id,
     required this.title,
     required this.details,
+    required this.sourceText,
     required this.isAllDay,
     required this.start,
     required this.end,
@@ -406,6 +427,7 @@ class ScheduleItem {
   final String title;
   final String? location;
   final String details;
+  final String sourceText;
   final bool isAllDay;
   final EventDateTimeValue start;
   final EventDateTimeValue end;
@@ -421,6 +443,7 @@ class ScheduleItem {
       title: json['title'] as String,
       location: json['location'] as String?,
       details: json['details'] as String,
+      sourceText: json['source_text'] as String? ?? '',
       isAllDay: json['isAllDay'] as bool? ?? false,
       start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
       end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
@@ -634,6 +657,7 @@ class ConversationMessageItem {
     this.textContent,
     this.actionGroupId,
     this.revision = 1,
+    this.localAttachments = const <LocalAttachmentData>[],
   });
 
   final int id;
@@ -645,9 +669,20 @@ class ConversationMessageItem {
   final String? actionGroupId;
   final int revision;
   final DateTime createdAt;
+  final List<LocalAttachmentData> localAttachments;
 
   bool get isUser => role == 'user';
   bool get isAssistant => role == 'assistant';
+
+  ConversationTool? get selectedTool => ConversationToolX.fromApiValue(structuredPayload['selected_tool'] as String?);
+
+  List<AttachmentRef> get attachmentRefs {
+    final raw = structuredPayload['attachment_refs'] as List<dynamic>? ?? <dynamic>[];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(AttachmentRef.fromJson)
+        .toList();
+  }
 
   factory ConversationMessageItem.fromJson(Map<String, dynamic> json) {
     return ConversationMessageItem(
@@ -670,6 +705,7 @@ class ConversationMessageItem {
     required String status,
     String? textContent,
     Map<String, dynamic> structuredPayload = const <String, dynamic>{},
+    List<LocalAttachmentData> localAttachments = const <LocalAttachmentData>[],
   }) {
     return ConversationMessageItem(
       id: id,
@@ -679,6 +715,7 @@ class ConversationMessageItem {
       textContent: textContent,
       structuredPayload: structuredPayload,
       createdAt: DateTime.now(),
+      localAttachments: localAttachments,
     );
   }
 
@@ -692,6 +729,7 @@ class ConversationMessageItem {
     String? actionGroupId,
     int? revision,
     DateTime? createdAt,
+    List<LocalAttachmentData>? localAttachments,
   }) {
     return ConversationMessageItem(
       id: id ?? this.id,
@@ -703,6 +741,7 @@ class ConversationMessageItem {
       actionGroupId: actionGroupId ?? this.actionGroupId,
       revision: revision ?? this.revision,
       createdAt: createdAt ?? this.createdAt,
+      localAttachments: localAttachments ?? this.localAttachments,
     );
   }
 }

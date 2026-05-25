@@ -91,6 +91,7 @@ class ScheduleItem(BaseModel):
     title: str
     location: str | None = None
     details: str
+    source_text: str
     is_all_day: bool = Field(alias="isAllDay")
     start: EventDateTimeValue
     end: EventDateTimeValue

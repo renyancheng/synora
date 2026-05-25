@@ -5,7 +5,6 @@ import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
 
-
 class NotificationsPage extends StatelessWidget {
   const NotificationsPage({super.key, required this.controller});
 
@@ -35,7 +34,6 @@ class NotificationsPage extends StatelessWidget {
     );
   }
 }
-
 
 class _NotificationTile extends StatelessWidget {
   const _NotificationTile(this.item);
@@ -79,7 +77,6 @@ class _NotificationTile extends StatelessWidget {
     );
   }
 }
-
 
 class _NotificationsEmpty extends StatelessWidget {
   const _NotificationsEmpty();

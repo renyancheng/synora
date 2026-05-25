@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app_controller.dart';
 import '../attachment_picker.dart';
@@ -9,7 +10,6 @@ import 'quick_note_list_page.dart';
 import 'schedule_list_page.dart';
 import 'settings_page.dart';
 
-
 class ChatHomePage extends StatefulWidget {
   const ChatHomePage({super.key, required this.controller});
 
@@ -19,15 +19,13 @@ class ChatHomePage extends StatefulWidget {
   State<ChatHomePage> createState() => _ChatHomePageState();
 }
 
-
 class _ChatHomePageState extends State<ChatHomePage> {
   late final TextEditingController _textController;
   late final ScrollController _scrollController;
-  final List<LocalAttachmentData> _attachments = <LocalAttachmentData>[];
-  ConversationTool? _selectedTool;
-  bool _bootstrapped = false;
+  int? _boundConversationId;
   int _lastMessageCount = 0;
   String? _lastShownError;
+  bool _isSyncingComposer = false;
 
   @override
   void initState() {
@@ -46,27 +44,45 @@ class _ChatHomePageState extends State<ChatHomePage> {
     super.dispose();
   }
 
-  void _handleComposerChanged() {
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
   Future<void> _bootstrap() async {
-    if (_bootstrapped || !widget.controller.isAuthenticated) {
+    if (!widget.controller.isAuthenticated) {
       return;
     }
-    _bootstrapped = true;
     try {
       await widget.controller.ensureConversationReady();
-      _scrollToBottom();
+      _syncComposerFromController(force: true);
     } catch (error) {
       _showMessage(error.toString());
     }
   }
 
+  void _handleComposerChanged() {
+    if (_isSyncingComposer) {
+      return;
+    }
+    final value = _textController.text;
+    if (value != widget.controller.draftText) {
+      widget.controller.updateDraftText(value);
+    }
+  }
+
+  void _syncComposerFromController({bool force = false}) {
+    final activeConversationId = widget.controller.activeConversationId;
+    if (force || _boundConversationId != activeConversationId || _textController.text != widget.controller.draftText) {
+      _boundConversationId = activeConversationId;
+      _isSyncingComposer = true;
+      _textController.value = TextEditingValue(
+        text: widget.controller.draftText,
+        selection: TextSelection.collapsed(offset: widget.controller.draftText.length),
+      );
+      _isSyncingComposer = false;
+    }
+  }
+
   Future<void> _openSettings() async {
-    Navigator.of(context).pop();
+    if (Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => SettingsPage(controller: widget.controller),
@@ -93,19 +109,20 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 
   Future<void> _createNewConversation() async {
-    Navigator.of(context).pop();
-    try {
-      await widget.controller.createConversationAndSelect();
-      _scrollToBottom();
-    } catch (error) {
-      _showMessage(error.toString());
+    if (widget.controller.isDraftConversation) {
+      return;
     }
+    Navigator.of(context).pop();
+    widget.controller.beginDraftConversation();
+    _syncComposerFromController(force: true);
+    _scrollToBottom();
   }
 
   Future<void> _selectConversation(int conversationId) async {
     Navigator.of(context).pop();
     try {
       await widget.controller.selectConversation(conversationId);
+      _syncComposerFromController(force: true);
       _scrollToBottom();
     } catch (error) {
       _showMessage(error.toString());
@@ -116,13 +133,13 @@ class _ChatHomePageState extends State<ChatHomePage> {
     final result = await showModalBottomSheet<_ComposerMenuResult>(
       context: context,
       showDragHandle: true,
-      builder: (context) => _ComposerMenu(selectedTool: _selectedTool),
+      builder: (context) => _ComposerMenu(selectedTool: widget.controller.draftTool),
     );
     if (result == null || !mounted) {
       return;
     }
     if (result.type == _ComposerMenuResultType.selectTool) {
-      setState(() => _selectedTool = result.tool);
+      widget.controller.setDraftTool(result.tool);
       return;
     }
     try {
@@ -130,19 +147,19 @@ class _ChatHomePageState extends State<ChatHomePage> {
         case _ComposerMenuResultType.gallery:
           final files = await AttachmentPicker.pickGalleryImages();
           if (files.isNotEmpty && mounted) {
-            setState(() => _attachments.addAll(files));
+            widget.controller.addDraftAttachments(files.map(ComposerAttachment.local).toList());
           }
           break;
         case _ComposerMenuResultType.camera:
           final file = await AttachmentPicker.pickPhoto();
           if (file != null && mounted) {
-            setState(() => _attachments.add(file));
+            widget.controller.addDraftAttachments(<ComposerAttachment>[ComposerAttachment.local(file)]);
           }
           break;
         case _ComposerMenuResultType.file:
           final files = await AttachmentPicker.pickFiles();
           if (files.isNotEmpty && mounted) {
-            setState(() => _attachments.addAll(files));
+            widget.controller.addDraftAttachments(files.map(ComposerAttachment.local).toList());
           }
           break;
         case _ComposerMenuResultType.selectTool:
@@ -154,24 +171,9 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 
   Future<void> _sendMessage() async {
-    final text = _textController.text.trim();
-    if (text.isEmpty && _attachments.isEmpty) {
-      _showMessage(AppStrings.sendEmptyMessage);
-      return;
-    }
-    final currentAttachments = List<LocalAttachmentData>.from(_attachments);
-    final currentTool = _selectedTool;
-    setState(() {
-      _textController.clear();
-      _attachments.clear();
-      _selectedTool = null;
-    });
     try {
-      await widget.controller.sendChatMessage(
-        textContent: text,
-        attachments: currentAttachments,
-        selectedTool: currentTool,
-      );
+      await widget.controller.sendChatMessage();
+      _syncComposerFromController(force: true);
       _scrollToBottom();
     } catch (error) {
       _showMessage(error.toString());
@@ -185,6 +187,24 @@ class _ChatHomePageState extends State<ChatHomePage> {
     } catch (error) {
       _showMessage(error.toString());
     }
+  }
+
+  Future<void> _copyMessage(ConversationMessageItem message) async {
+    final text = (message.textContent ?? '').trim();
+    if (text.isEmpty) {
+      _showMessage(AppStrings.nothingToCopy);
+      return;
+    }
+    await Clipboard.setData(ClipboardData(text: text));
+    if (mounted) {
+      _showMessage(AppStrings.copied);
+    }
+  }
+
+  void _editResendMessage(ConversationMessageItem message) {
+    widget.controller.refillComposerFromMessage(message);
+    _syncComposerFromController(force: true);
+    _showMessage(AppStrings.copiedToComposer);
   }
 
   void _showVoiceComingSoon() {
@@ -213,6 +233,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
     return AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) {
+        _syncComposerFromController();
         final user = widget.controller.session?.user;
         final messages = widget.controller.messages;
         final latestError = widget.controller.lastError;
@@ -230,11 +251,21 @@ class _ChatHomePageState extends State<ChatHomePage> {
             }
           });
         }
-        final hasInput = _textController.text.trim().isNotEmpty || _attachments.isNotEmpty;
+
+        final attachments = widget.controller.draftAttachments;
+        final selectedTool = widget.controller.draftTool;
+        final hasInput = _textController.text.trim().isNotEmpty || attachments.isNotEmpty;
         final sending = widget.controller.isMessageSending;
 
         return Scaffold(
           appBar: AppBar(
+            leading: Builder(
+              builder: (context) => IconButton(
+                onPressed: () => Scaffold.of(context).openDrawer(),
+                icon: const Icon(Icons.menu),
+                tooltip: '打开侧边栏',
+              ),
+            ),
             title: const Text(AppStrings.appTitle),
           ),
           drawer: Drawer(
@@ -271,15 +302,13 @@ class _ChatHomePageState extends State<ChatHomePage> {
                   ),
                   const Divider(height: 1),
                   ListTile(
-                    leading: const Icon(Icons.event_note_outlined),
+                    leading: const Icon(Icons.calendar_month_outlined),
                     title: const Text(AppStrings.mySchedules),
-                    trailing: Text(widget.controller.schedules.length.toString()),
                     onTap: _openSchedules,
                   ),
                   ListTile(
                     leading: const Icon(Icons.sticky_note_2_outlined),
                     title: const Text(AppStrings.myQuickNotes),
-                    trailing: Text(widget.controller.quickNotes.length.toString()),
                     onTap: _openQuickNotes,
                   ),
                   const Divider(height: 1),
@@ -294,7 +323,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
                           ),
                         ),
                         FilledButton.tonalIcon(
-                          onPressed: _createNewConversation,
+                          onPressed: widget.controller.isDraftConversation ? null : _createNewConversation,
                           icon: const Icon(Icons.add),
                           label: const Text(AppStrings.newConversation),
                         ),
@@ -317,7 +346,6 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                                subtitle: Text(formatDateTime(item.lastMessageAt)),
                                 onTap: () => _selectConversation(item.id),
                               );
                             },
@@ -343,6 +371,8 @@ class _ChatHomePageState extends State<ChatHomePage> {
                               return _ConversationMessageView(
                                 message: message,
                                 onAction: _performAction,
+                                onCopy: message.isUser ? () => _copyMessage(message) : null,
+                                onEditResend: message.isUser ? () => _editResendMessage(message) : null,
                               );
                             },
                           ),
@@ -370,29 +400,23 @@ class _ChatHomePageState extends State<ChatHomePage> {
                           ),
                         ),
                       ],
-                      if (_selectedTool != null) ...<Widget>[
+                      if (selectedTool != null) ...<Widget>[
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: InputChip(
-                            label: Text('${AppStrings.selectedToolPrefix}：${AppStrings.toolLabel(_selectedTool?.apiValue)}'),
-                            onDeleted: sending ? null : () => setState(() => _selectedTool = null),
+                            label: Text('${AppStrings.selectedToolPrefix}：${AppStrings.toolLabel(selectedTool.apiValue)}'),
+                            onDeleted: sending ? null : () => widget.controller.setDraftTool(null),
                           ),
                         ),
                       ],
-                      if (_attachments.isNotEmpty) ...<Widget>[
+                      if (attachments.isNotEmpty) ...<Widget>[
                         Wrap(
                           spacing: 8,
                           runSpacing: 8,
-                          children: _attachments.asMap().entries.map((entry) {
+                          children: attachments.asMap().entries.map((entry) {
                             return InputChip(
                               label: Text(entry.value.fileName),
-                              onDeleted: sending
-                                  ? null
-                                  : () {
-                                      setState(() {
-                                        _attachments.removeAt(entry.key);
-                                      });
-                                    },
+                              onDeleted: sending ? null : () => widget.controller.removeDraftAttachmentAt(entry.key),
                             );
                           }).toList(),
                         ),
@@ -465,9 +489,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 }
 
-
 enum _ComposerMenuResultType { gallery, camera, file, selectTool }
-
 
 class _ComposerMenuResult {
   const _ComposerMenuResult({
@@ -478,7 +500,6 @@ class _ComposerMenuResult {
   final _ComposerMenuResultType type;
   final ConversationTool? tool;
 }
-
 
 class _ComposerMenu extends StatelessWidget {
   const _ComposerMenu({required this.selectedTool});
@@ -527,31 +548,26 @@ class _ComposerMenu extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 18),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.event_note_outlined),
-              title: const Text(AppStrings.scheduleTool),
-              subtitle: const Text(AppStrings.scheduleToolDescription),
-              trailing: selectedTool == ConversationTool.schedule ? const Icon(Icons.check_circle) : null,
+            const SizedBox(height: 20),
+            Text(AppStrings.toolsSectionTitle, style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            _ToolListTile(
+              icon: Icons.calendar_month_outlined,
+              title: AppStrings.scheduleTool,
+              subtitle: AppStrings.scheduleToolDescription,
+              selected: selectedTool == ConversationTool.schedule,
               onTap: () => Navigator.of(context).pop(
-                const _ComposerMenuResult(
-                  type: _ComposerMenuResultType.selectTool,
-                  tool: ConversationTool.schedule,
-                ),
+                const _ComposerMenuResult(type: _ComposerMenuResultType.selectTool, tool: ConversationTool.schedule),
               ),
             ),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.sticky_note_2_outlined),
-              title: const Text(AppStrings.quickNoteTool),
-              subtitle: const Text(AppStrings.quickNoteToolDescription),
-              trailing: selectedTool == ConversationTool.quickNote ? const Icon(Icons.check_circle) : null,
+            const SizedBox(height: 8),
+            _ToolListTile(
+              icon: Icons.sticky_note_2_outlined,
+              title: AppStrings.quickNoteTool,
+              subtitle: AppStrings.quickNoteToolDescription,
+              selected: selectedTool == ConversationTool.quickNote,
               onTap: () => Navigator.of(context).pop(
-                const _ComposerMenuResult(
-                  type: _ComposerMenuResultType.selectTool,
-                  tool: ConversationTool.quickNote,
-                ),
+                const _ComposerMenuResult(type: _ComposerMenuResultType.selectTool, tool: ConversationTool.quickNote),
               ),
             ),
           ],
@@ -560,7 +576,6 @@ class _ComposerMenu extends StatelessWidget {
     );
   }
 }
-
 
 class _AttachmentActionButton extends StatelessWidget {
   const _AttachmentActionButton({
@@ -575,77 +590,161 @@ class _AttachmentActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
+    return Material(
+      color: const Color(0xFFF4F8F7),
       borderRadius: BorderRadius.circular(20),
-      onTap: onTap,
-      child: Ink(
-        padding: const EdgeInsets.symmetric(vertical: 18),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF3F8F6),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Icon(icon, size: 28),
-            const SizedBox(height: 8),
-            Text(label),
-          ],
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(icon, size: 28, color: const Color(0xFF176B5A)),
+              const SizedBox(height: 10),
+              Text(label),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
+class _ToolListTile extends StatelessWidget {
+  const _ToolListTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? const Color(0xFFEAF5F1) : const Color(0xFFF8FBFA),
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: <Widget>[
+              Icon(icon, color: const Color(0xFF176B5A)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(title, style: Theme.of(context).textTheme.titleSmall),
+                    const SizedBox(height: 4),
+                    Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+                  ],
+                ),
+              ),
+              if (selected) const Icon(Icons.check_circle, color: Color(0xFF176B5A)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _ConversationMessageView extends StatelessWidget {
   const _ConversationMessageView({
     required this.message,
     required this.onAction,
+    this.onCopy,
+    this.onEditResend,
   });
 
   final ConversationMessageItem message;
   final Future<void> Function(String action, {Map<String, dynamic> payload}) onAction;
+  final VoidCallback? onCopy;
+  final VoidCallback? onEditResend;
 
   @override
   Widget build(BuildContext context) {
+    final isUser = message.isUser;
     if (message.messageType == 'text') {
-      final isUser = message.isUser;
       return Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 580),
-          margin: const EdgeInsets.only(bottom: 12),
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: isUser ? const Color(0xFF176B5A) : Colors.white,
-            borderRadius: BorderRadius.circular(18),
-            boxShadow: const <BoxShadow>[
-              BoxShadow(
-                color: Color(0x14000000),
-                blurRadius: 12,
-                offset: Offset(0, 4),
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                message.textContent ?? '',
-                style: TextStyle(color: isUser ? Colors.white : const Color(0xFF173C35), height: 1.55),
-              ),
-              if (message.status == 'sending' || message.status == 'failed' || message.status == 'streaming') ...<Widget>[
-                const SizedBox(height: 8),
-                Text(
-                  _statusLabel(message.status),
-                  style: TextStyle(
-                    color: isUser ? Colors.white70 : const Color(0xFF617B74),
-                    fontSize: 12,
-                  ),
+        child: GestureDetector(
+          onLongPress: isUser ? () => _showMessageMenu(context) : null,
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 580),
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: isUser ? const Color(0xFF176B5A) : Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              boxShadow: const <BoxShadow>[
+                BoxShadow(
+                  color: Color(0x14000000),
+                  blurRadius: 12,
+                  offset: Offset(0, 4),
                 ),
               ],
-            ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if ((message.textContent ?? '').trim().isNotEmpty)
+                  Text(
+                    message.textContent ?? '',
+                    style: TextStyle(color: isUser ? Colors.white : const Color(0xFF173C35), height: 1.55),
+                  ),
+                if (message.isUser && (message.attachmentRefs.isNotEmpty || message.localAttachments.isNotEmpty || message.selectedTool != null)) ...<Widget>[
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: <Widget>[
+                      ...message.attachmentRefs.map(
+                        (item) => _MetaChip(
+                          label: item.fileName,
+                          icon: Icons.attach_file,
+                          dark: isUser,
+                        ),
+                      ),
+                      ...message.localAttachments.map(
+                        (item) => _MetaChip(
+                          label: item.fileName,
+                          icon: Icons.attach_file,
+                          dark: isUser,
+                        ),
+                      ),
+                      if (message.selectedTool != null)
+                        _MetaChip(
+                          label: AppStrings.toolLabel(message.selectedTool!.apiValue),
+                          icon: message.selectedTool == ConversationTool.schedule ? Icons.calendar_month_outlined : Icons.sticky_note_2_outlined,
+                          dark: isUser,
+                        ),
+                    ],
+                  ),
+                ],
+                if (_statusLabel(message.status) != null) ...<Widget>[
+                  const SizedBox(height: 8),
+                  Text(
+                    _statusLabel(message.status)!,
+                    style: TextStyle(
+                      color: isUser ? Colors.white70 : const Color(0xFF617B74),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       );
@@ -664,20 +763,83 @@ class _ConversationMessageView extends StatelessWidget {
     );
   }
 
-  String _statusLabel(String status) {
+  Future<void> _showMessageMenu(BuildContext context) async {
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            ListTile(
+              leading: const Icon(Icons.content_copy_outlined),
+              title: const Text(AppStrings.copy),
+              onTap: () => Navigator.of(context).pop('copy'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text(AppStrings.editResend),
+              onTap: () => Navigator.of(context).pop('edit'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == 'copy') {
+      onCopy?.call();
+    } else if (result == 'edit') {
+      onEditResend?.call();
+    }
+  }
+
+  String? _statusLabel(String status) {
     switch (status) {
       case 'sending':
         return AppStrings.sending;
       case 'streaming':
-        return '生成中...';
+        return AppStrings.streaming;
       case 'failed':
-        return '发送失败';
+        return AppStrings.sendFailed;
       default:
-        return '';
+        return null;
     }
   }
 }
 
+class _MetaChip extends StatelessWidget {
+  const _MetaChip({
+    required this.label,
+    required this.icon,
+    required this.dark,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool dark;
+
+  @override
+  Widget build(BuildContext context) {
+    final backgroundColor = dark ? const Color(0x1FFFFFFF) : const Color(0xFFF0F5F3);
+    final foregroundColor = dark ? Colors.white : const Color(0xFF275C52);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: backgroundColor,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 14, color: foregroundColor),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(color: foregroundColor, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class _StructuredMessageCard extends StatelessWidget {
   const _StructuredMessageCard({
@@ -705,7 +867,6 @@ class _StructuredMessageCard extends StatelessWidget {
   }
 }
 
-
 class _ScheduleDraftCard extends StatefulWidget {
   const _ScheduleDraftCard({
     required this.message,
@@ -718,7 +879,6 @@ class _ScheduleDraftCard extends StatefulWidget {
   @override
   State<_ScheduleDraftCard> createState() => _ScheduleDraftCardState();
 }
-
 
 class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
   late final TextEditingController _titleController;
@@ -811,7 +971,7 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
 
   void _showTimeError() {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('时间格式无法识别，请输入如 2026-05-23 14:30 的格式。')),
+      const SnackBar(content: Text(AppStrings.timeFormatHint)),
     );
   }
 
@@ -884,9 +1044,7 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
                 Expanded(
                   child: FilledButton(
                     onPressed: _busy ? null : (isEditing ? _submitMissingFields : _confirm),
-                    child: Text(
-                      _busy ? AppStrings.loading : (isEditing ? AppStrings.submitMissingFields : AppStrings.confirmSave),
-                    ),
+                    child: Text(_busy ? AppStrings.loading : (isEditing ? AppStrings.submitMissingFields : AppStrings.confirmSave)),
                   ),
                 ),
               ],
@@ -897,7 +1055,6 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
     );
   }
 }
-
 
 class _ConflictCard extends StatelessWidget {
   const _ConflictCard({required this.message});
@@ -950,7 +1107,6 @@ class _ConflictCard extends StatelessWidget {
   }
 }
 
-
 class _QuickNotePreviewCard extends StatefulWidget {
   const _QuickNotePreviewCard({
     required this.message,
@@ -963,7 +1119,6 @@ class _QuickNotePreviewCard extends StatefulWidget {
   @override
   State<_QuickNotePreviewCard> createState() => _QuickNotePreviewCardState();
 }
-
 
 class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
   bool _busy = false;
@@ -1034,7 +1189,6 @@ class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
   }
 }
 
-
 class _ResultCard extends StatelessWidget {
   const _ResultCard({required this.message});
 
@@ -1065,8 +1219,12 @@ class _ResultCard extends StatelessWidget {
                 start: EventDateTimeValue.fromJson(payload['start'] as Map<String, dynamic>),
                 end: EventDateTimeValue.fromJson(payload['end'] as Map<String, dynamic>),
                 isAllDay: false,
-              )}'.replaceAll('Ŗē', '：'),
+              )}',
             ),
+          ],
+          if (payload['source_text'] is String && (payload['source_text'] as String).trim().isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            Text('${AppStrings.sourceTextField}：${payload['source_text']}'),
           ],
           if (payload['content'] is String) ...<Widget>[
             const SizedBox(height: 8),
@@ -1091,7 +1249,6 @@ class _ResultCard extends StatelessWidget {
     );
   }
 }
-
 
 class _CardShell extends StatelessWidget {
   const _CardShell({
@@ -1129,7 +1286,6 @@ class _CardShell extends StatelessWidget {
   }
 }
 
-
 class _SectionChips extends StatelessWidget {
   const _SectionChips({
     required this.title,
@@ -1162,7 +1318,6 @@ class _SectionChips extends StatelessWidget {
   }
 }
 
-
 class _SectionList extends StatelessWidget {
   const _SectionList({
     required this.title,
@@ -1186,7 +1341,7 @@ class _SectionList extends StatelessWidget {
           const SizedBox(height: 8),
           ...values.map((item) => Padding(
                 padding: const EdgeInsets.only(bottom: 4),
-                child: Text('- ${item.replaceAll('Ŗē', '：')}'),
+                child: Text('• $item'),
               )),
         ],
       ),

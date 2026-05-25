@@ -6,7 +6,6 @@ import 'package:synora/src/app_controller.dart';
 import 'package:synora/src/models.dart';
 import 'package:synora/src/strings.dart';
 
-
 class FakeApiClient extends ApiClient {
   FakeApiClient() : super(baseUrl: 'http://localhost:8000');
 
@@ -88,7 +87,6 @@ class FakeApiClient extends ApiClient {
   }
 }
 
-
 void main() {
   testWidgets('默认显示中文登录页', (tester) async {
     await tester.pumpWidget(const SynoraApp());
@@ -98,7 +96,7 @@ void main() {
     expect(find.text(AppStrings.emailLabel), findsOneWidget);
   });
 
-  testWidgets('登录后进入聊天主页并可打开侧边栏和语音占位', (tester) async {
+  testWidgets('登录后进入本地新对话草稿并可打开侧边栏', (tester) async {
     final controller = AppController(apiClient: FakeApiClient());
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
 
@@ -106,23 +104,32 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text(AppStrings.appTitle), findsOneWidget);
-    expect(find.text('你好，我在这里。'), findsOneWidget);
+    expect(find.text(AppStrings.emptyConversation), findsOneWidget);
 
-    await tester.tap(find.byIcon(Icons.menu));
+    await tester.tap(find.byTooltip('打开侧边栏'));
     await tester.pumpAndSettle();
 
     expect(find.text(AppStrings.mySchedules), findsOneWidget);
     expect(find.text(AppStrings.myQuickNotes), findsOneWidget);
     expect(find.text(AppStrings.conversationHistory), findsOneWidget);
     expect(find.text(AppStrings.newConversation), findsOneWidget);
+  });
 
-    Navigator.of(tester.element(find.text(AppStrings.mySchedules))).pop();
+  testWidgets('空输入显示语音按钮，输入后切换为发送按钮', (tester) async {
+    final controller = AppController(apiClient: FakeApiClient());
+    await controller.login('han.teacher@example.com', 'SynoraMVP123!');
+
+    await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byIcon(Icons.mic_none));
-    await tester.pump();
+    expect(find.byIcon(Icons.mic_none), findsOneWidget);
+    expect(find.byIcon(Icons.send_rounded), findsNothing);
 
-    expect(find.text(AppStrings.voiceComingSoon), findsOneWidget);
+    await tester.enterText(find.byType(TextField), '明天下午三点开会');
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(Icons.send_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.mic_none), findsNothing);
   });
 
   testWidgets('设置页可进入记忆管理页面', (tester) async {
@@ -132,7 +139,7 @@ void main() {
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byIcon(Icons.menu));
+    await tester.tap(find.byTooltip('打开侧边栏'));
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(Icons.settings_outlined));
     await tester.pumpAndSettle();

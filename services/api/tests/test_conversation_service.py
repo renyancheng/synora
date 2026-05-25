@@ -10,7 +10,7 @@ from app.db import Base
 from app.domains.conversation.service import apply_action, consume_stream, create_conversation, queue_message
 from app.domains.quick_note.service import delete_note
 from app.domains.schedule.service import delete_schedule
-from app.models import ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
+from app.models import Attachment, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
 from app.runtime.model_adapter import ModelAdapter
 from app.schemas.common import EventDateTimeValue
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
@@ -217,6 +217,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                 id=10,
                 title="教学例会",
                 details="讨论课程安排",
+                source_text="?????????????????",
                 start_at=datetime.fromisoformat("2026-05-24T07:00:00+00:00"),
                 end_at=datetime.fromisoformat("2026-05-24T08:00:00+00:00"),
                 time_zone="Asia/Shanghai",
@@ -351,6 +352,40 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.db.get(Schedule, schedule.id))
         self.assertIsNone(self.db.get(ReminderJob, reminder.id))
         self.assertIsNone(self.db.get(NotificationAudit, audit.id))
+
+
+    def test_queue_message_stores_user_message_metadata(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        attachment = Attachment(
+            user_id=self.user.id,
+            file_name="agenda.pdf",
+            content_type="application/pdf",
+            source_type="attachment",
+            object_key="attachments/agenda.pdf",
+            storage_bucket="synora",
+            size_bytes=2048,
+            status="uploaded",
+        )
+        self.db.add(attachment)
+        self.db.commit()
+        self.db.refresh(attachment)
+
+        _, user_message, _, _ = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(
+                text_content="????????",
+                attachment_ids=[attachment.id],
+                selected_tool="schedule",
+            ),
+        )
+
+        payload = dict(user_message.structured_payload_json or {})
+        self.assertEqual(payload["selected_tool"], "schedule")
+        self.assertEqual(len(payload["attachment_refs"]), 1)
+        self.assertEqual(payload["attachment_refs"][0]["attachment_id"], attachment.id)
+        self.assertEqual(payload["attachment_refs"][0]["file_name"], "agenda.pdf")
 
     def test_delete_quick_note_removes_note(self) -> None:
         note = QuickNote(

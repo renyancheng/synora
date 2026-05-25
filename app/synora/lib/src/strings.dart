@@ -1,4 +1,4 @@
-class AppStrings {
+﻿class AppStrings {
   static const appTitle = 'Synora';
   static const loginSubtitle = '登录后，直接把事情交给 Synora。';
   static const loginButton = '登录';
@@ -7,8 +7,6 @@ class AppStrings {
   static const emailRequired = '请输入邮箱';
   static const passwordRequired = '请输入密码';
   static const loggingIn = '登录中…';
-  static const loginRequired = '请先登录';
-  static const loginExpired = '登录已失效，请重新登录。';
 
   static const settings = '设置';
   static const userInfo = '用户信息';
@@ -35,6 +33,8 @@ class AppStrings {
   static const voice = '语音';
   static const send = '发送';
   static const sending = '发送中';
+  static const streaming = '生成中…';
+  static const sendFailed = '发送失败';
   static const voiceComingSoon = '语音即将支持。';
   static const loading = '处理中…';
   static const loadFailed = '加载失败，请稍后重试。';
@@ -45,13 +45,28 @@ class AppStrings {
   static const emptyNotifications = '还没有提醒记录。';
   static const noContent = '暂无内容';
   static const sendEmptyMessage = '请输入内容或先添加附件。';
+  static const copy = '复制';
+  static const editResend = '编辑重发';
+  static const copied = '已复制。';
+  static const copiedToComposer = '已回填到输入框，可继续编辑后发送。';
+  static const nothingToCopy = '这条消息没有可复制的文字。';
+  static const sourceTextField = '原始描述';
+  static const todayLabel = '今天';
+  static const monthViewTitle = '月历';
+  static const dayScheduleTitle = '当日日程';
+  static const previousMonth = '上个月';
+  static const nextMonth = '下个月';
+  static const emptyDaySchedules = '这一天还没有日程。';
+  static const retry = '重试';
 
   static const attachmentGallery = '相册';
   static const attachmentCamera = '相机';
   static const attachmentFile = '文件';
-  static const selectedAttachments = '已选附件';
+  static const selectedAttachments = '附件';
   static const removeAttachment = '移除附件';
   static const unsupportedMailFile = '可直接粘贴邮件正文，不支持导入邮件文件。';
+  static const toolsSectionTitle = '工具';
+  static const attachmentsSectionTitle = '附件';
 
   static const scheduleTool = '日程';
   static const scheduleToolDescription = '提取时间地点，生成可提醒的安排';
@@ -85,7 +100,7 @@ class AppStrings {
   static const confirmSave = '确认保存';
   static const confirmAction = '知道了';
   static const submitMissingFields = '提交补充信息';
-  static const cancelPendingAction = '取消本次操作';
+  static const cancelPendingAction = '取消';
   static const saveSuccess = '保存成功。';
 
   static const scheduleListTitle = '我的日程';
@@ -106,6 +121,7 @@ class AppStrings {
   static const failureReasonField = '失败原因';
   static const retryCountField = '重试次数';
   static const generatingInterrupted = '生成中断';
+  static const timeFormatHint = '请输入如 2026-05-23 14:30 的时间';
 
   static String toolLabel(String? tool) {
     switch (tool) {
@@ -248,7 +264,7 @@ class AppStrings {
       final match = RegExp(r'(\d{4,6})').firstMatch(message);
       if (message.contains('错误码') || message.contains('errcode')) {
         final code = match?.group(1);
-        return code == null ? '企业微信机器人拒绝了本次消息。' : '企业微信机器人拒绝了本次消息（错误码 $code）。';
+        return code == null ? '企业微信群机器人拒绝了本次消息。' : '企业微信群机器人拒绝了本次消息（错误码 $code）。';
       }
       return '企业微信推送失败，请稍后重试。';
     }
@@ -304,4 +320,3 @@ class AppStrings {
     }
   }
 }
-
