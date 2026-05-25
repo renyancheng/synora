@@ -30,6 +30,15 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    memory_records: Mapped[list["MemoryRecord"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    memory_profile: Mapped["MemoryProfile"] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class SessionState(Base):
@@ -208,6 +217,36 @@ class AgentToolCallAudit(Base):
     status: Mapped[str] = mapped_column(String(40), default="ok", index=True)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class MemoryRecord(Base):
+    __tablename__ = "memory_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    memory_type: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    content: Mapped[str] = mapped_column(Text)
+    source_kind: Mapped[str] = mapped_column(String(40), index=True)
+    source_ref_id: Mapped[str] = mapped_column(String(120), nullable=True, index=True)
+    vector_node_id: Mapped[str] = mapped_column(String(120), nullable=True, unique=True, index=True)
+    normalized_hash: Mapped[str] = mapped_column(String(64), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    user: Mapped["User"] = relationship(back_populates="memory_records")
+
+
+class MemoryProfile(Base):
+    __tablename__ = "memory_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+    summary_text: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    user: Mapped["User"] = relationship(back_populates="memory_profile")
 
 
 class ConversationThread(Base):

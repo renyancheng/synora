@@ -40,7 +40,7 @@ x-api-common: &api-common
 
 services:
   postgres:
-    image: docker.1ms.run/library/postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: synora
       POSTGRES_USER: synora

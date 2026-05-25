@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
 import '../strings.dart';
+import 'memory_page.dart';
 import 'notifications_page.dart';
 
 class SettingsPage extends StatelessWidget {
@@ -13,6 +14,14 @@ class SettingsPage extends StatelessWidget {
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => NotificationsPage(controller: controller),
+      ),
+    );
+  }
+
+  Future<void> _openMemory(BuildContext context) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => MemoryPage(controller: controller),
       ),
     );
   }
@@ -75,6 +84,13 @@ class SettingsPage extends StatelessWidget {
                   title: const Text(AppStrings.notificationHistory),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => _openNotifications(context),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.psychology_alt_outlined),
+                  title: const Text(AppStrings.memoryManagement),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => _openMemory(context),
                 ),
                 const Divider(height: 1),
                 ListTile(

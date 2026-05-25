@@ -21,6 +21,12 @@ def _ensure_column(table_name: str, column_name: str, ddl: str) -> None:
 
 def _reconcile_legacy_schema() -> None:
     Base.metadata.create_all(bind=engine)
+    if not str(engine.url).startswith("sqlite"):
+        try:
+            with engine.begin() as connection:
+                connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        except Exception as exc:
+            print(f"Synora startup warning: pgvector unavailable, memory retrieval will be degraded. ({exc})")
 
     _ensure_column("schedules", "start_at", "TIMESTAMP NULL")
     _ensure_column("schedules", "end_at", "TIMESTAMP NULL")

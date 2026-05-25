@@ -33,6 +33,24 @@ class FakeApiClient extends ApiClient {
   Future<List<NotificationItem>> fetchNotifications() async => <NotificationItem>[];
 
   @override
+  Future<MemoryListResult> fetchMemory() async {
+    return MemoryListResult(
+      summary: '韩老师通常希望提前一天提醒，晚上十点后不要再安排会议。',
+      items: <MemoryItem>[
+        MemoryItem(
+          id: 1,
+          memoryType: 'preference',
+          title: '提醒偏好',
+          content: '通常提前一天提醒',
+          sourceKind: 'conversation_message',
+          isActive: true,
+          updatedAt: DateTime.parse('2026-05-23T10:00:00Z'),
+        ),
+      ],
+    );
+  }
+
+  @override
   Future<List<ConversationThreadItem>> fetchConversations() async {
     return <ConversationThreadItem>[
       ConversationThreadItem(
@@ -105,5 +123,25 @@ void main() {
     await tester.pump();
 
     expect(find.text(AppStrings.voiceComingSoon), findsOneWidget);
+  });
+
+  testWidgets('设置页可进入记忆管理页面', (tester) async {
+    final controller = AppController(apiClient: FakeApiClient());
+    await controller.login('han.teacher@example.com', 'SynoraMVP123!');
+
+    await tester.pumpWidget(SynoraApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byIcon(Icons.menu));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.settings_outlined));
+    await tester.pumpAndSettle();
+
+    expect(find.text(AppStrings.memoryManagement), findsOneWidget);
+    await tester.tap(find.text(AppStrings.memoryManagement));
+    await tester.pumpAndSettle();
+
+    expect(find.text(AppStrings.memorySummary), findsOneWidget);
+    expect(find.text('提醒偏好'), findsOneWidget);
   });
 }

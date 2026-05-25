@@ -543,6 +543,60 @@ class NotificationItem {
   }
 }
 
+class MemoryItem {
+  MemoryItem({
+    required this.id,
+    required this.memoryType,
+    required this.title,
+    required this.content,
+    required this.sourceKind,
+    required this.isActive,
+    required this.updatedAt,
+    this.sourceRefId,
+  });
+
+  final int id;
+  final String memoryType;
+  final String title;
+  final String content;
+  final String sourceKind;
+  final String? sourceRefId;
+  final bool isActive;
+  final DateTime updatedAt;
+
+  factory MemoryItem.fromJson(Map<String, dynamic> json) {
+    return MemoryItem(
+      id: json['id'] as int,
+      memoryType: json['memory_type'] as String,
+      title: json['title'] as String,
+      content: json['content'] as String,
+      sourceKind: json['source_kind'] as String,
+      sourceRefId: json['source_ref_id'] as String?,
+      isActive: json['is_active'] as bool? ?? true,
+      updatedAt: DateTime.parse(json['updated_at'] as String),
+    );
+  }
+}
+
+class MemoryListResult {
+  MemoryListResult({
+    required this.summary,
+    required this.items,
+  });
+
+  final String summary;
+  final List<MemoryItem> items;
+
+  factory MemoryListResult.fromJson(Map<String, dynamic> json) {
+    return MemoryListResult(
+      summary: json['summary'] as String? ?? '',
+      items: (json['items'] as List<dynamic>? ?? <dynamic>[])
+          .map((item) => MemoryItem.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
 class ConversationThreadItem {
   ConversationThreadItem({
     required this.id,

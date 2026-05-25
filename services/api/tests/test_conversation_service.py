@@ -14,7 +14,7 @@ from app.models import ConversationPendingState, NotificationAudit, QuickNote, R
 from app.runtime.model_adapter import ModelAdapter
 from app.schemas.common import EventDateTimeValue
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
-from app.schemas.schedule import ConflictCheckResponse, ScheduleEventDraft
+from app.schemas.schedule import ScheduleEventDraft
 
 
 class _FakeGeneralChatAgent:
@@ -22,7 +22,10 @@ class _FakeGeneralChatAgent:
         assert version == "v2"
         yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="好的，")}}
         yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="我来帮你一起整理。")}}
-        yield {"event": "on_chain_end", "data": {"output": {"messages": [SimpleNamespace(content="好的，我来帮你一起整理。")]}}}
+        yield {
+            "event": "on_chain_end",
+            "data": {"output": {"messages": [SimpleNamespace(content="好的，我来帮你一起整理。")]}},
+        }
 
 
 class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -60,26 +63,41 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             evidence_digest=["明天下午三点", "教学例会"],
         )
 
+    @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
     @patch.object(ModelAdapter, "build_general_chat_agent", return_value=_FakeGeneralChatAgent())
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学安排")
     @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
-    async def test_send_general_chat_message(self, _intent_mock, _title_mock, _agent_mock, _tools_mock) -> None:
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    async def test_send_general_chat_message(
+        self,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _agent_mock,
+        _tools_mock,
+        write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(
+            summary="韩老师通常希望提前一天提醒。",
+            items=[{"title": "提醒偏好", "content": "通常提前一天提醒"}],
+        )
         thread = create_conversation(self.db, self.user.id)
         _, user_message, assistant_message, agent_run = queue_message(
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排。"),
+            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排"),
         )
 
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
-        self.assertEqual(user_message.text_content, "你好，帮我看看今天安排。")
+        self.assertEqual(user_message.text_content, "你好，帮我看看今天安排")
         self.assertEqual(events[0]["event"], "run_started")
         self.assertEqual(events[-1]["event"], "run_completed")
         self.assertEqual(self.db.get(type(thread), thread.id).title, "教学安排")
         self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "好的，我来帮你一起整理。")
+        self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
     async def test_stream_returns_run_failed_when_llm_not_configured(self) -> None:
         thread = create_conversation(self.db, self.user.id)
@@ -87,7 +105,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排。"),
+            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排"),
         )
 
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
@@ -140,7 +158,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会。"),
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
         )
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
@@ -151,6 +169,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(pending)
         self.assertEqual(pending.stage, "approval_pending")
 
+    @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.create_schedule_after_approval")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
@@ -161,6 +180,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         _title_mock,
         invoke_tool_mock,
         create_after_mock,
+        write_memory_mock,
     ) -> None:
         draft = self._draft()
         invoke_tool_mock.side_effect = [
@@ -196,6 +216,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(
                 id=10,
                 title="教学例会",
+                details="讨论课程安排",
                 start_at=datetime.fromisoformat("2026-05-24T07:00:00+00:00"),
                 end_at=datetime.fromisoformat("2026-05-24T08:00:00+00:00"),
                 time_zone="Asia/Shanghai",
@@ -207,7 +228,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会。"),
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
         )
         _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
@@ -221,7 +242,9 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant_messages[0].message_type, "result_card")
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNone(pending)
+        self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
+    @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.save_note_after_approval")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="实验记录")
@@ -232,6 +255,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         _title_mock,
         invoke_tool_mock,
         save_note_mock,
+        write_memory_mock,
     ) -> None:
         invoke_tool_mock.return_value = (
             SimpleNamespace(content="note"),
@@ -259,7 +283,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录。"),
+            ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录"),
         )
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
         card_events = [item for item in events if item["event"] == "card_snapshot"]
@@ -273,6 +297,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             ConversationActionRequest(action="confirm_quick_note"),
         )
         self.assertEqual(confirm_messages[0].message_type, "result_card")
+        self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
     def test_delete_schedule_cascades_reminders_and_audits(self) -> None:
         schedule = Schedule(
@@ -348,3 +373,4 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

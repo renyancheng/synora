@@ -86,6 +86,19 @@ class ApiClient {
     return _asList(json).map(NotificationItem.fromJson).toList();
   }
 
+  Future<MemoryListResult> fetchMemory() async {
+    final json = await _sendJson('GET', '/memory');
+    return MemoryListResult.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<void> deleteMemory(int memoryId) async {
+    await _sendJson('DELETE', '/memory/$memoryId');
+  }
+
+  Future<void> clearMemory() async {
+    await _sendJson('POST', '/memory/clear');
+  }
+
   Future<List<ConversationThreadItem>> fetchConversations() async {
     final json = await _sendJson('GET', '/agent/conversations');
     final items = ((json as Map<String, dynamic>)['items'] as List<dynamic>? ?? <dynamic>[])

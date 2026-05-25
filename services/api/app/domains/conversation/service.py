@@ -9,9 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domains.attachment.service import build_attachment_prompt_assets
+from app.domains.memory.service import MemoryService
 from app.domains.quick_note.service import save_note_after_approval
 from app.domains.schedule.service import build_draft_hash, create_schedule_after_approval, detect_conflicts
 from app.models import AgentRun, AgentToolCallAudit, ConversationMessage, ConversationPendingState, ConversationThread
+from app.runtime.context_assembler import ContextAssembler
 from app.runtime.errors import LLMServiceError
 from app.runtime.mcp_client import get_synora_tools, invoke_synora_tool
 from app.runtime.model_adapter import ModelAdapter
@@ -19,6 +21,20 @@ from app.schemas.conversation import ConversationActionRequest, ConversationSend
 from app.schemas.quick_note import QuickNoteDraftRequest
 from app.schemas.schedule import ScheduleEventDraft
 from app.security import mint_token
+from app.tasks.memory import write_user_memory
+
+
+def _enqueue_memory_writeback(*, user_id: int, source_kind: str, source_ref_id: str | None, text: str, summary: str = '') -> None:
+    try:
+        write_user_memory.delay(
+            user_id=user_id,
+            source_kind=source_kind,
+            source_ref_id=source_ref_id,
+            text=text,
+            summary=summary,
+        )
+    except Exception:
+        return
 
 
 DEFAULT_THREAD_TITLE = "新对话"
@@ -342,13 +358,22 @@ async def _stream_general_chat(
     model = ModelAdapter()
     tools = await get_synora_tools()
     agent = model.build_general_chat_agent(tools)
+    memory_context = MemoryService().retrieve_context(
+        db,
+        user_id=thread.user_id,
+        query_text=user_message,
+    )
+    memory_text = ContextAssembler.build_memory_context(
+        memory_summary=memory_context.summary,
+        memory_items=memory_context.items,
+    )
     messages = model.build_langchain_messages(
         recent_messages=[
             {"role": item.role, "content": item.text_content or ""}
             for item in ordered
             if item.id != assistant_message.id and item.text_content
         ],
-        user_message=user_message,
+        user_message=f"{memory_text}\n\n当前输入：\n{user_message}".strip() if memory_text else user_message,
         attachment_parts=attachment_parts,
     )
 
@@ -906,6 +931,13 @@ def _confirm_schedule_pending(
             "channels": [job.channel for job in jobs],
         },
     )
+    write_user_memory.delay(
+        user_id=user_id,
+        source_kind="confirmed_schedule",
+        source_ref_id=str(schedule.id),
+        text=f"{schedule.title}，{schedule.details}".strip("，"),
+        summary="已确认日程",
+    )
     return [message]
 
 
@@ -940,6 +972,13 @@ def _confirm_quick_note_pending(
             "content": note.content,
             "tags": list(note.topic_tags_json),
         },
+    )
+    write_user_memory.delay(
+        user_id=user_id,
+        source_kind="confirmed_quick_note",
+        source_ref_id=str(note.id),
+        text=note.content,
+        summary="已确认速记",
     )
     return [message]
 
@@ -997,6 +1036,15 @@ def _finalize_run(
     }
     agent_run.completed_at = datetime.now(timezone.utc)
     db.commit()
+    user_message = db.get(ConversationMessage, agent_run.user_message_id) if agent_run.user_message_id else None
+    if user_message and (user_message.text_content or "").strip():
+        _enqueue_memory_writeback(
+            user_id=agent_run.user_id,
+            source_kind="conversation_message",
+            source_ref_id=str(user_message.id),
+            text=(user_message.text_content or "").strip(),
+            summary=assistant_text[:200],
+        )
 
 
 def _mark_action_group_status(

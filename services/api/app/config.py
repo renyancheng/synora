@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 90
     llm_max_pdf_pages: int = 6
     llm_max_image_side: int = 1568
+    memory_enabled: bool = True
+    memory_embedding_model: str = "text-embedding-v4"
+    memory_top_k: int = 6
+    memory_writeback_queue: str = "memory"
+    memory_vector_schema: str = "public"
+    memory_vector_table: str = "synora_memory_vectors"
+    memory_embedding_dimensions: int = 1536
 
     mcp_bearer_token: str = ""
     mcp_mount_path: str = "/mcp"

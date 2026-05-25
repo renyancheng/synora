@@ -20,3 +20,4 @@ celery_app.conf.timezone = settings.default_timezone
 
 # Ensure task modules are imported so Celery workers register them.
 from app.tasks import notifications as _notifications  # noqa: E402,F401
+from app.tasks import memory as _memory  # noqa: E402,F401

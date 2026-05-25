@@ -6,7 +6,7 @@ class AppStrings {
   static const passwordLabel = '密码';
   static const emailRequired = '请输入邮箱';
   static const passwordRequired = '请输入密码';
-  static const loggingIn = '登录中...';
+  static const loggingIn = '登录中…';
   static const loginRequired = '请先登录';
   static const loginExpired = '登录已失效，请重新登录。';
 
@@ -17,6 +17,15 @@ class AppStrings {
   static const conversationHistory = '对话历史';
   static const newConversation = '新对话';
   static const notificationHistory = '通知历史';
+  static const memoryManagement = '记忆管理';
+  static const memorySummary = '用户画像摘要';
+  static const memoryList = '长期记忆';
+  static const clearMemory = '清空长期记忆';
+  static const clearMemoryTitle = '清空长期记忆';
+  static const clearMemoryMessage = '清空后不会删除现有对话、日程和速记，但后续不会再召回这些长期记忆。确定继续吗？';
+  static const deleteMemoryTitle = '删除记忆';
+  static const deleteMemoryMessage = '删除后，这条长期记忆将不再被召回。确定继续吗？';
+  static const emptyMemory = '还没有形成长期记忆。';
   static const logout = '退出登录';
   static const logoutConfirmTitle = '退出登录';
   static const logoutConfirmMessage = '确定退出当前账户吗？';
@@ -27,7 +36,7 @@ class AppStrings {
   static const send = '发送';
   static const sending = '发送中';
   static const voiceComingSoon = '语音即将支持。';
-  static const loading = '处理中...';
+  static const loading = '处理中…';
   static const loadFailed = '加载失败，请稍后重试。';
   static const emptyConversation = '开始一段新对话吧。';
   static const emptyConversationHistory = '还没有历史对话。';
@@ -199,6 +208,23 @@ class AppStrings {
     }
   }
 
+  static String memoryTypeLabel(String memoryType) {
+    switch (memoryType) {
+      case 'preference':
+        return '偏好';
+      case 'constraint':
+        return '约束';
+      case 'profile_fact':
+        return '稳定事实';
+      case 'confirmed_schedule':
+        return '已确认日程';
+      case 'confirmed_quick_note':
+        return '已确认速记';
+      default:
+        return '长期记忆';
+    }
+  }
+
   static String? notificationFailureReason(String channel, String? errorMessage) {
     if (errorMessage == null || errorMessage.trim().isEmpty) {
       return null;
@@ -278,3 +304,4 @@ class AppStrings {
     }
   }
 }
+

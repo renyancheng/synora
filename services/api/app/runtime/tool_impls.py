@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.domains.attachment.service import build_attachment_prompt_assets
+from app.domains.memory.service import MemoryService
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.model_adapter import ModelAdapter
 from app.runtime.output_normalizer import OutputNormalizer
@@ -44,13 +45,20 @@ def parse_schedule_draft(
     assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
     attachment_parts = _flatten_attachment_parts(assets)
     attachment_texts = _extract_attachment_texts(assets)
+    memory_context = MemoryService().retrieve_context(
+        db,
+        user_id=user_id,
+        query_text=(text_content or "").strip() or "\n".join(attachment_texts),
+    )
     assembled = ContextAssembler().build_schedule_context(
         text_content=text_content or "",
         attachment_texts=attachment_texts,
+        memory_summary=memory_context.summary,
+        memory_items=memory_context.items,
     )
 
     parsed = ModelAdapter().extract_schedule(
-        merged_text=assembled["merged_text"],
+        merged_text=assembled["prompt_text"],
         attachment_parts=attachment_parts,
         timezone_name=timezone_name,
         reference_time=reference_time,
@@ -134,13 +142,20 @@ def prepare_quick_note_draft(
     assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
     attachment_parts = _flatten_attachment_parts(assets)
     attachment_texts = _extract_attachment_texts(assets)
+    memory_context = MemoryService().retrieve_context(
+        db,
+        user_id=user_id,
+        query_text=(content or text_content or "").strip() or "\n".join(attachment_texts),
+    )
     assembled = ContextAssembler().build_quick_note_context(
         text_content=content or text_content or "",
         attachment_texts=attachment_texts,
         manual_tags=tags,
+        memory_summary=memory_context.summary,
+        memory_items=memory_context.items,
     )
     parsed = ModelAdapter().suggest_quick_note_tags(
-        merged_text=str(assembled["merged_text"]),
+        merged_text=str(assembled["prompt_text"]),
         manual_tags=tags,
         attachment_parts=attachment_parts,
     )

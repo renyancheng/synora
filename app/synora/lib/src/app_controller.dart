@@ -20,6 +20,8 @@ class AppController extends ChangeNotifier {
   List<ScheduleItem> _schedules = <ScheduleItem>[];
   List<QuickNoteItem> _quickNotes = <QuickNoteItem>[];
   List<NotificationItem> _notifications = <NotificationItem>[];
+  String _memorySummary = '';
+  List<MemoryItem> _memoryItems = <MemoryItem>[];
   List<ConversationThreadItem> _conversations = <ConversationThreadItem>[];
   List<ConversationMessageItem> _messages = <ConversationMessageItem>[];
   int? _activeConversationId;
@@ -34,6 +36,8 @@ class AppController extends ChangeNotifier {
   List<ScheduleItem> get schedules => List<ScheduleItem>.unmodifiable(_schedules);
   List<QuickNoteItem> get quickNotes => List<QuickNoteItem>.unmodifiable(_quickNotes);
   List<NotificationItem> get notifications => List<NotificationItem>.unmodifiable(_notifications);
+  String get memorySummary => _memorySummary;
+  List<MemoryItem> get memoryItems => List<MemoryItem>.unmodifiable(_memoryItems);
   List<ConversationThreadItem> get conversations => List<ConversationThreadItem>.unmodifiable(_conversations);
   List<ConversationMessageItem> get messages => List<ConversationMessageItem>.unmodifiable(_messages);
   int? get activeConversationId => _activeConversationId;
@@ -267,12 +271,31 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> refreshMemory() async {
+    final result = await _apiClient.fetchMemory();
+    _memorySummary = result.summary;
+    _memoryItems = result.items;
+    notifyListeners();
+  }
+
+  Future<void> deleteMemoryItem(int memoryId) async {
+    await _apiClient.deleteMemory(memoryId);
+    await refreshMemory();
+  }
+
+  Future<void> clearAllMemory() async {
+    await _apiClient.clearMemory();
+    await refreshMemory();
+  }
+
   void logout() {
     _session = null;
     _apiClient.setAccessToken(null);
     _schedules = <ScheduleItem>[];
     _quickNotes = <QuickNoteItem>[];
     _notifications = <NotificationItem>[];
+    _memorySummary = '';
+    _memoryItems = <MemoryItem>[];
     _conversations = <ConversationThreadItem>[];
     _messages = <ConversationMessageItem>[];
     _activeConversationId = null;
