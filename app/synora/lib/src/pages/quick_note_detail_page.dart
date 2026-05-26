@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../app_controller.dart';
 import '../date_utils.dart';
@@ -66,9 +67,9 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text(AppStrings.deleteDone)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text(AppStrings.deleteDone)));
     Navigator.of(context).pop(true);
   }
 
@@ -110,19 +111,25 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_editing ? AppStrings.editQuickNote : AppStrings.quickNoteListTitle),
+        title: Text(
+          _editing ? AppStrings.editQuickNote : AppStrings.quickNoteListTitle,
+        ),
         actions: <Widget>[
           if (_editing)
             TextButton(
               onPressed: _saving ? null : _save,
-              child: Text(_saving ? AppStrings.loading : AppStrings.saveChanges),
+              child: Text(
+                _saving ? AppStrings.loading : AppStrings.saveChanges,
+              ),
             )
           else
             IconButton(
@@ -157,24 +164,49 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
               controller: _contentController,
               minLines: 4,
               maxLines: 10,
-              decoration: const InputDecoration(labelText: AppStrings.detailsField),
+              decoration: const InputDecoration(
+                labelText: AppStrings.detailsField,
+              ),
             ),
             const SizedBox(height: 16),
             TextField(
               controller: _tagsController,
-              decoration: const InputDecoration(labelText: AppStrings.tagsField),
+              decoration: const InputDecoration(
+                labelText: AppStrings.tagsField,
+              ),
             ),
             const SizedBox(height: 16),
           ] else ...<Widget>[
-            Text(_item.content, style: Theme.of(context).textTheme.bodyLarge),
+            MarkdownBody(
+              data: _item.content,
+              selectable: true,
+              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
+            ),
             const SizedBox(height: 20),
-            _DetailLine(label: AppStrings.tagsField, value: _item.tags.isEmpty ? AppStrings.noContent : _item.tags.join(' / ')),
-            _DetailLine(label: AppStrings.selectedAttachments, value: '${_item.sourceAttachmentIds.length}'),
-            _DetailLine(label: AppStrings.createTimeField, value: formatDateTime(_item.createdAt)),
+            _DetailLine(
+              label: AppStrings.tagsField,
+              value: _item.tags.isEmpty
+                  ? AppStrings.noContent
+                  : _item.tags.join(' / '),
+            ),
+            _DetailLine(
+              label: AppStrings.selectedAttachments,
+              value: '${_item.sourceAttachmentIds.length}',
+            ),
+            _DetailLine(
+              label: AppStrings.createTimeField,
+              value: formatDateTime(_item.createdAt),
+            ),
           ],
           if (_editing) ...<Widget>[
-            _DetailLine(label: AppStrings.selectedAttachments, value: '${_item.sourceAttachmentIds.length}'),
-            _DetailLine(label: AppStrings.createTimeField, value: formatDateTime(_item.createdAt)),
+            _DetailLine(
+              label: AppStrings.selectedAttachments,
+              value: '${_item.sourceAttachmentIds.length}',
+            ),
+            _DetailLine(
+              label: AppStrings.createTimeField,
+              value: formatDateTime(_item.createdAt),
+            ),
           ],
         ],
       ),
@@ -183,10 +215,7 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
 }
 
 class _DetailLine extends StatelessWidget {
-  const _DetailLine({
-    required this.label,
-    required this.value,
-  });
+  const _DetailLine({required this.label, required this.value});
 
   final String label;
   final String value;

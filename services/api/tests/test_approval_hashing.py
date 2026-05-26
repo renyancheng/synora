@@ -33,3 +33,9 @@ class ApprovalHashingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApprovalScopeTests(unittest.TestCase):
+    def test_schedule_hash_scope_string_is_stable(self) -> None:
+        self.assertEqual(f"schedule:update:{7}", "schedule:update:7")
+

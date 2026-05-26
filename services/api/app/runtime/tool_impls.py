@@ -41,6 +41,8 @@ def parse_schedule_draft(
     context = context or {}
     timezone_name = str(context.get("client_timezone") or get_settings().default_timezone)
     reference_time = datetime.now(ZoneInfo(timezone_name))
+    source_history = [item for item in list(context.get("source_history") or []) if isinstance(item, str)]
+    previous_draft_summary = str(context.get("previous_draft_summary") or "").strip()
 
     assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
     attachment_parts = _flatten_attachment_parts(assets)
@@ -55,6 +57,8 @@ def parse_schedule_draft(
         attachment_texts=attachment_texts,
         memory_summary=memory_context.summary,
         memory_items=memory_context.items,
+        source_history=source_history,
+        previous_draft_summary=previous_draft_summary,
     )
 
     parsed = ModelAdapter().extract_schedule(
@@ -108,8 +112,8 @@ def parse_schedule_draft(
         "draft": {
             "title": str(parsed.get("title") or "待确认事项").strip()[:30],
             "location": parsed.get("location") or None,
-            "details": str(parsed.get("details") or assembled["merged_text"] or "待补充详情").strip(),
-            "source_text": assembled["merged_text"],
+            "details": str(parsed.get("details") or "待补充详情").strip(),
+            "source_text": assembled["source_text"],
             "isAllDay": bool(parsed.get("isAllDay") or parsed.get("is_all_day") or False),
             "start": start,
             "end": end,

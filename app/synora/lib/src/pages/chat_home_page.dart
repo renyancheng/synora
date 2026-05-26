@@ -1,6 +1,7 @@
-﻿import 'dart:async';
+import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 
 import '../app_controller.dart';
@@ -48,7 +49,9 @@ class _ChatHomePageState extends State<ChatHomePage> {
         return null;
       case VoiceInputState.downloading:
         if (_voiceDownloadProgress != null) {
-          final percent = (_voiceDownloadProgress! * 100).clamp(0, 100).toStringAsFixed(0);
+          final percent = (_voiceDownloadProgress! * 100)
+              .clamp(0, 100)
+              .toStringAsFixed(0);
           return '${AppStrings.voiceDownloading} $percent%';
         }
         return AppStrings.voiceDownloading;
@@ -67,7 +70,8 @@ class _ChatHomePageState extends State<ChatHomePage> {
   @override
   void initState() {
     super.initState();
-    _textController = TextEditingController()..addListener(_handleComposerChanged);
+    _textController = TextEditingController()
+      ..addListener(_handleComposerChanged);
     _scrollController = ScrollController();
     WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
   }
@@ -106,12 +110,16 @@ class _ChatHomePageState extends State<ChatHomePage> {
 
   void _syncComposerFromController({bool force = false}) {
     final activeConversationId = widget.controller.activeConversationId;
-    if (force || _boundConversationId != activeConversationId || _textController.text != widget.controller.draftText) {
+    if (force ||
+        _boundConversationId != activeConversationId ||
+        _textController.text != widget.controller.draftText) {
       _boundConversationId = activeConversationId;
       _isSyncingComposer = true;
       _textController.value = TextEditingValue(
         text: widget.controller.draftText,
-        selection: TextSelection.collapsed(offset: widget.controller.draftText.length),
+        selection: TextSelection.collapsed(
+          offset: widget.controller.draftText.length,
+        ),
       );
       _isSyncingComposer = false;
     }
@@ -167,15 +175,22 @@ class _ChatHomePageState extends State<ChatHomePage> {
     }
   }
 
-  Future<void> _showConversationMenu(BuildContext itemContext, ConversationThreadItem item) async {
-    final overlay = Overlay.of(itemContext).context.findRenderObject() as RenderBox;
+  Future<void> _showConversationMenu(
+    BuildContext itemContext,
+    ConversationThreadItem item,
+  ) async {
+    final overlay =
+        Overlay.of(itemContext).context.findRenderObject() as RenderBox;
     final button = itemContext.findRenderObject() as RenderBox;
     final result = await showMenu<String>(
       context: context,
       position: RelativeRect.fromRect(
         Rect.fromPoints(
           button.localToGlobal(Offset.zero, ancestor: overlay),
-          button.localToGlobal(button.size.bottomRight(Offset.zero), ancestor: overlay),
+          button.localToGlobal(
+            button.size.bottomRight(Offset.zero),
+            ancestor: overlay,
+          ),
         ),
         Offset.zero & overlay.size,
       ),
@@ -225,7 +240,9 @@ class _ChatHomePageState extends State<ChatHomePage> {
             TextField(
               controller: controller,
               autofocus: true,
-              decoration: const InputDecoration(hintText: AppStrings.renameConversationHint),
+              decoration: const InputDecoration(
+                hintText: AppStrings.renameConversationHint,
+              ),
             ),
           ],
         ),
@@ -245,7 +262,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
       return;
     }
     try {
-      await widget.controller.renameConversation(conversationId: item.id, title: result);
+      await widget.controller.renameConversation(
+        conversationId: item.id,
+        title: result,
+      );
     } catch (error) {
       _showMessage(error.toString());
     }
@@ -284,7 +304,8 @@ class _ChatHomePageState extends State<ChatHomePage> {
     final result = await showModalBottomSheet<_ComposerMenuResult>(
       context: context,
       showDragHandle: true,
-      builder: (context) => _ComposerMenu(selectedTool: widget.controller.draftTool),
+      builder: (context) =>
+          _ComposerMenu(selectedTool: widget.controller.draftTool),
     );
     if (result == null || !mounted) {
       return;
@@ -298,19 +319,25 @@ class _ChatHomePageState extends State<ChatHomePage> {
         case _ComposerMenuResultType.gallery:
           final files = await AttachmentPicker.pickGalleryImages();
           if (files.isNotEmpty && mounted) {
-            widget.controller.addDraftAttachments(files.map(ComposerAttachment.local).toList());
+            widget.controller.addDraftAttachments(
+              files.map(ComposerAttachment.local).toList(),
+            );
           }
           break;
         case _ComposerMenuResultType.camera:
           final file = await AttachmentPicker.pickPhoto();
           if (file != null && mounted) {
-            widget.controller.addDraftAttachments(<ComposerAttachment>[ComposerAttachment.local(file)]);
+            widget.controller.addDraftAttachments(<ComposerAttachment>[
+              ComposerAttachment.local(file),
+            ]);
           }
           break;
         case _ComposerMenuResultType.file:
           final files = await AttachmentPicker.pickFiles();
           if (files.isNotEmpty && mounted) {
-            widget.controller.addDraftAttachments(files.map(ComposerAttachment.local).toList());
+            widget.controller.addDraftAttachments(
+              files.map(ComposerAttachment.local).toList(),
+            );
           }
           break;
         case _ComposerMenuResultType.selectTool:
@@ -331,9 +358,15 @@ class _ChatHomePageState extends State<ChatHomePage> {
     }
   }
 
-  Future<void> _performAction(String action, {Map<String, dynamic> payload = const <String, dynamic>{}}) async {
+  Future<void> _performAction(
+    String action, {
+    Map<String, dynamic> payload = const <String, dynamic>{},
+  }) async {
     try {
-      await widget.controller.performConversationAction(action: action, payload: payload);
+      await widget.controller.performConversationAction(
+        action: action,
+        payload: payload,
+      );
       _scrollToBottom();
     } catch (error) {
       _showMessage(error.toString());
@@ -347,25 +380,24 @@ class _ChatHomePageState extends State<ChatHomePage> {
       return;
     }
     await Clipboard.setData(ClipboardData(text: text));
-    if (mounted) {
-      _showMessage(AppStrings.copied);
-    }
   }
 
   void _editResendMessage(ConversationMessageItem message) {
-    widget.controller.editResendMessage(message).then((_) {
-      if (!mounted) {
-        return;
-      }
-      _syncComposerFromController(force: true);
-      _showMessage(AppStrings.copiedToComposer);
-      _scrollToBottom();
-    }).catchError((error) {
-      if (!mounted) {
-        return;
-      }
-      _showMessage(error.toString());
-    });
+    widget.controller
+        .editResendMessage(message)
+        .then((_) {
+          if (!mounted) {
+            return;
+          }
+          _syncComposerFromController(force: true);
+          _scrollToBottom();
+        })
+        .catchError((error) {
+          if (!mounted) {
+            return;
+          }
+          _showMessage(error.toString());
+        });
   }
 
   Future<void> _toggleVoiceInput() async {
@@ -419,7 +451,8 @@ class _ChatHomePageState extends State<ChatHomePage> {
         unawaited(_showDownloadProgressDialog());
       }
       await _voiceInputService.ensureReady(
-        onDownloadProgress: (value) => _setVoiceState(VoiceInputState.downloading, progress: value),
+        onDownloadProgress: (value) =>
+            _setVoiceState(VoiceInputState.downloading, progress: value),
       );
       if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
         Navigator.of(context, rootNavigator: true).pop();
@@ -455,7 +488,11 @@ class _ChatHomePageState extends State<ChatHomePage> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  Text(progress == null ? AppStrings.voiceDownloading : '${AppStrings.voiceDownloading} ${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%'),
+                  Text(
+                    progress == null
+                        ? AppStrings.voiceDownloading
+                        : '${AppStrings.voiceDownloading} ${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
+                  ),
                   const SizedBox(height: 16),
                   LinearProgressIndicator(value: progress),
                 ],
@@ -482,7 +519,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
     try {
       _setVoiceState(VoiceInputState.processing, clearProgress: true);
       final result = await _voiceInputService.stopListening();
-      final mergedText = _mergeVoiceText(widget.controller.draftText, result.text);
+      final mergedText = _mergeVoiceText(
+        widget.controller.draftText,
+        result.text,
+      );
       widget.controller.updateDraftText(mergedText);
       _syncComposerFromController(force: true);
       _setVoiceState(VoiceInputState.idle, clearProgress: true);
@@ -522,12 +562,16 @@ class _ChatHomePageState extends State<ChatHomePage> {
     }
     setState(() {
       _voiceState = state;
-      _voiceDownloadProgress = clearProgress ? null : (progress ?? _voiceDownloadProgress);
+      _voiceDownloadProgress = clearProgress
+          ? null
+          : (progress ?? _voiceDownloadProgress);
     });
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _scrollToBottom() {
@@ -569,12 +613,14 @@ class _ChatHomePageState extends State<ChatHomePage> {
 
         final attachments = widget.controller.draftAttachments;
         final selectedTool = widget.controller.draftTool;
-        final hasInput = _textController.text.trim().isNotEmpty || attachments.isNotEmpty;
+        final hasInput =
+            _textController.text.trim().isNotEmpty || attachments.isNotEmpty;
         final sending = widget.controller.isMessageSending;
         final voiceBusy = _isVoiceBusy;
         final voiceListening = _isVoiceListening;
         final composerLocked = sending || voiceBusy;
-        final statusLabel = _voiceStatusLabel ?? widget.controller.streamStatusLabel;
+        final statusLabel =
+            _voiceStatusLabel ?? widget.controller.streamStatusLabel;
 
         return Scaffold(
           appBar: AppBar(
@@ -642,7 +688,9 @@ class _ChatHomePageState extends State<ChatHomePage> {
                           ),
                         ),
                         FilledButton.tonalIcon(
-                          onPressed: widget.controller.isDraftConversation ? null : _createNewConversation,
+                          onPressed: widget.controller.isDraftConversation
+                              ? null
+                              : _createNewConversation,
                           icon: const Icon(Icons.add),
                           label: const Text(AppStrings.newConversation),
                         ),
@@ -651,12 +699,17 @@ class _ChatHomePageState extends State<ChatHomePage> {
                   ),
                   Expanded(
                     child: widget.controller.conversations.isEmpty
-                        ? const Center(child: Text(AppStrings.emptyConversationHistory))
+                        ? const Center(
+                            child: Text(AppStrings.emptyConversationHistory),
+                          )
                         : ListView.builder(
                             itemCount: widget.controller.conversations.length,
                             itemBuilder: (context, index) {
-                              final item = widget.controller.conversations[index];
-                              final selected = item.id == widget.controller.activeConversationId;
+                              final item =
+                                  widget.controller.conversations[index];
+                              final selected =
+                                  item.id ==
+                                  widget.controller.activeConversationId;
                               return ListTile(
                                 selected: selected,
                                 leading: const Icon(Icons.chat_bubble_outline),
@@ -669,7 +722,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                   builder: (itemContext) => IconButton(
                                     icon: const Icon(Icons.more_horiz),
                                     tooltip: AppStrings.conversationMenu,
-                                    onPressed: () => _showConversationMenu(itemContext, item),
+                                    onPressed: () => _showConversationMenu(
+                                      itemContext,
+                                      item,
+                                    ),
                                   ),
                                 ),
                                 onTap: () => _selectConversation(item.id),
@@ -684,24 +740,30 @@ class _ChatHomePageState extends State<ChatHomePage> {
           body: Column(
             children: <Widget>[
               Expanded(
-                child: widget.controller.isConversationLoading && messages.isEmpty
+                child:
+                    widget.controller.isConversationLoading && messages.isEmpty
                     ? const Center(child: CircularProgressIndicator())
                     : messages.isEmpty
-                        ? const Center(child: Text(AppStrings.emptyConversation))
-                        : ListView.builder(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                            itemCount: messages.length,
-                            itemBuilder: (context, index) {
-                              final message = messages[index];
-                              return _ConversationMessageView(
-                                message: message,
-                                onAction: _performAction,
-                                onCopy: message.isUser ? () => _copyMessage(message) : null,
-                                onEditResend: widget.controller.canEditMessage(message) ? () => _editResendMessage(message) : null,
-                              );
-                            },
-                          ),
+                    ? const Center(child: Text(AppStrings.emptyConversation))
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                        itemCount: messages.length,
+                        itemBuilder: (context, index) {
+                          final message = messages[index];
+                          return _ConversationMessageView(
+                            message: message,
+                            onAction: _performAction,
+                            onCopy: message.isUser
+                                ? () => _copyMessage(message)
+                                : null,
+                            onEditResend:
+                                widget.controller.canEditMessage(message)
+                                ? () => _editResendMessage(message)
+                                : null,
+                          );
+                        },
+                      ),
               ),
               SafeArea(
                 top: false,
@@ -720,9 +782,8 @@ class _ChatHomePageState extends State<ChatHomePage> {
                           padding: const EdgeInsets.only(bottom: 8),
                           child: Text(
                             statusLabel,
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  color: const Color(0xFF4A6C63),
-                                ),
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: const Color(0xFF4A6C63)),
                           ),
                         ),
                       ],
@@ -730,8 +791,12 @@ class _ChatHomePageState extends State<ChatHomePage> {
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: InputChip(
-                            label: Text('${AppStrings.selectedToolPrefix}：${AppStrings.toolLabel(selectedTool.apiValue)}'),
-                            onDeleted: composerLocked ? null : () => widget.controller.setDraftTool(null),
+                            label: Text(
+                              '${AppStrings.selectedToolPrefix}：${AppStrings.toolLabel(selectedTool.apiValue)}',
+                            ),
+                            onDeleted: composerLocked
+                                ? null
+                                : () => widget.controller.setDraftTool(null),
                           ),
                         ),
                       ],
@@ -742,7 +807,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
                           children: attachments.asMap().entries.map((entry) {
                             return InputChip(
                               label: Text(entry.value.fileName),
-                              onDeleted: composerLocked ? null : () => widget.controller.removeDraftAttachmentAt(entry.key),
+                              onDeleted: composerLocked
+                                  ? null
+                                  : () => widget.controller
+                                        .removeDraftAttachmentAt(entry.key),
                             );
                           }).toList(),
                         ),
@@ -755,7 +823,9 @@ class _ChatHomePageState extends State<ChatHomePage> {
                             width: 48,
                             height: 48,
                             child: IconButton(
-                              onPressed: composerLocked ? null : _openComposerMenu,
+                              onPressed: composerLocked
+                                  ? null
+                                  : _openComposerMenu,
                               tooltip: AppStrings.attach,
                               icon: const Icon(Icons.add_circle_outline),
                             ),
@@ -776,7 +846,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                   decoration: const InputDecoration(
                                     hintText: AppStrings.composerHint,
                                     isDense: false,
-                                    contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+                                    contentPadding: EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 18,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -789,7 +862,11 @@ class _ChatHomePageState extends State<ChatHomePage> {
                             child: Center(
                               child: AnimatedSwitcher(
                                 duration: const Duration(milliseconds: 220),
-                                transitionBuilder: (child, animation) => ScaleTransition(scale: animation, child: child),
+                                transitionBuilder: (child, animation) =>
+                                    ScaleTransition(
+                                      scale: animation,
+                                      child: child,
+                                    ),
                                 child: sending
                                     ? const SizedBox(
                                         key: ValueKey('loading'),
@@ -799,23 +876,38 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                           child: SizedBox(
                                             width: 20,
                                             height: 20,
-                                            child: CircularProgressIndicator(strokeWidth: 2.2),
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2.2,
+                                            ),
                                           ),
                                         ),
                                       )
                                     : hasInput
-                                        ? IconButton.filled(
-                                            key: const ValueKey('send'),
-                                            onPressed: _sendMessage,
-                                            icon: const Icon(Icons.send_rounded, size: 20),
-                                            tooltip: AppStrings.send,
-                                          )
-                                        : IconButton(
-                                            key: ValueKey(voiceListening ? 'voice-stop' : 'voice-start'),
-                                            onPressed: _toggleVoiceInput,
-                                            icon: Icon(voiceListening ? Icons.stop_rounded : Icons.mic_none),
-                                            tooltip: voiceListening ? AppStrings.voiceStop : AppStrings.voiceStart,
-                                          ),
+                                    ? IconButton.filled(
+                                        key: const ValueKey('send'),
+                                        onPressed: _sendMessage,
+                                        icon: const Icon(
+                                          Icons.send_rounded,
+                                          size: 20,
+                                        ),
+                                        tooltip: AppStrings.send,
+                                      )
+                                    : IconButton(
+                                        key: ValueKey(
+                                          voiceListening
+                                              ? 'voice-stop'
+                                              : 'voice-start',
+                                        ),
+                                        onPressed: _toggleVoiceInput,
+                                        icon: Icon(
+                                          voiceListening
+                                              ? Icons.stop_rounded
+                                              : Icons.mic_none,
+                                        ),
+                                        tooltip: voiceListening
+                                            ? AppStrings.voiceStop
+                                            : AppStrings.voiceStart,
+                                      ),
                               ),
                             ),
                           ),
@@ -836,10 +928,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
 enum _ComposerMenuResultType { gallery, camera, file, selectTool }
 
 class _ComposerMenuResult {
-  const _ComposerMenuResult({
-    required this.type,
-    this.tool,
-  });
+  const _ComposerMenuResult({required this.type, this.tool});
 
   final _ComposerMenuResultType type;
   final ConversationTool? tool;
@@ -866,7 +955,9 @@ class _ComposerMenu extends StatelessWidget {
                     icon: Icons.photo_library_outlined,
                     label: AppStrings.attachmentGallery,
                     onTap: () => Navigator.of(context).pop(
-                      const _ComposerMenuResult(type: _ComposerMenuResultType.gallery),
+                      const _ComposerMenuResult(
+                        type: _ComposerMenuResultType.gallery,
+                      ),
                     ),
                   ),
                 ),
@@ -876,7 +967,9 @@ class _ComposerMenu extends StatelessWidget {
                     icon: Icons.photo_camera_outlined,
                     label: AppStrings.attachmentCamera,
                     onTap: () => Navigator.of(context).pop(
-                      const _ComposerMenuResult(type: _ComposerMenuResultType.camera),
+                      const _ComposerMenuResult(
+                        type: _ComposerMenuResultType.camera,
+                      ),
                     ),
                   ),
                 ),
@@ -886,14 +979,19 @@ class _ComposerMenu extends StatelessWidget {
                     icon: Icons.folder_open_outlined,
                     label: AppStrings.attachmentFile,
                     onTap: () => Navigator.of(context).pop(
-                      const _ComposerMenuResult(type: _ComposerMenuResultType.file),
+                      const _ComposerMenuResult(
+                        type: _ComposerMenuResultType.file,
+                      ),
                     ),
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 20),
-            Text(AppStrings.toolsSectionTitle, style: Theme.of(context).textTheme.titleSmall),
+            Text(
+              AppStrings.toolsSectionTitle,
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
             const SizedBox(height: 8),
             _ToolListTile(
               icon: Icons.calendar_month_outlined,
@@ -901,7 +999,10 @@ class _ComposerMenu extends StatelessWidget {
               subtitle: AppStrings.scheduleToolDescription,
               selected: selectedTool == ConversationTool.schedule,
               onTap: () => Navigator.of(context).pop(
-                const _ComposerMenuResult(type: _ComposerMenuResultType.selectTool, tool: ConversationTool.schedule),
+                const _ComposerMenuResult(
+                  type: _ComposerMenuResultType.selectTool,
+                  tool: ConversationTool.schedule,
+                ),
               ),
             ),
             const SizedBox(height: 8),
@@ -911,7 +1012,10 @@ class _ComposerMenu extends StatelessWidget {
               subtitle: AppStrings.quickNoteToolDescription,
               selected: selectedTool == ConversationTool.quickNote,
               onTap: () => Navigator.of(context).pop(
-                const _ComposerMenuResult(type: _ComposerMenuResultType.selectTool, tool: ConversationTool.quickNote),
+                const _ComposerMenuResult(
+                  type: _ComposerMenuResultType.selectTool,
+                  tool: ConversationTool.quickNote,
+                ),
               ),
             ),
           ],
@@ -991,11 +1095,15 @@ class _ToolListTile extends StatelessWidget {
                   children: <Widget>[
                     Text(title, style: Theme.of(context).textTheme.titleSmall),
                     const SizedBox(height: 4),
-                    Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+                    Text(
+                      subtitle,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ],
                 ),
               ),
-              if (selected) const Icon(Icons.check_circle, color: Color(0xFF176B5A)),
+              if (selected)
+                const Icon(Icons.check_circle, color: Color(0xFF176B5A)),
             ],
           ),
         ),
@@ -1013,7 +1121,8 @@ class _ConversationMessageView extends StatelessWidget {
   });
 
   final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload}) onAction;
+  final Future<void> Function(String action, {Map<String, dynamic> payload})
+  onAction;
   final VoidCallback? onCopy;
   final VoidCallback? onEditResend;
 
@@ -1024,7 +1133,9 @@ class _ConversationMessageView extends StatelessWidget {
       return Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
         child: Column(
-          crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          crossAxisAlignment: isUser
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
           children: <Widget>[
             Container(
               constraints: const BoxConstraints(maxWidth: 580),
@@ -1045,22 +1156,72 @@ class _ConversationMessageView extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   if ((message.textContent ?? '').trim().isNotEmpty)
-                    Text(
-                      message.textContent ?? '',
-                      style: TextStyle(color: isUser ? Colors.white : const Color(0xFF173C35), height: 1.55),
-                    ),
-                  if (message.isUser && (message.attachmentRefs.isNotEmpty || message.localAttachments.isNotEmpty || message.selectedTool != null)) ...<Widget>[
+                    if (isUser)
+                      SelectableText(
+                        message.textContent ?? '',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          height: 1.55,
+                        ),
+                      )
+                    else
+                      MarkdownBody(
+                        data: message.textContent ?? '',
+                        selectable: true,
+                        styleSheet:
+                            MarkdownStyleSheet.fromTheme(
+                              Theme.of(context),
+                            ).copyWith(
+                              p: const TextStyle(
+                                color: Color(0xFF173C35),
+                                height: 1.55,
+                              ),
+                              listBullet: const TextStyle(
+                                color: Color(0xFF173C35),
+                              ),
+                              code: const TextStyle(
+                                color: Color(0xFF173C35),
+                                fontFamily: 'monospace',
+                              ),
+                              codeblockDecoration: BoxDecoration(
+                                color: const Color(0xFFF3F6F5),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                      ),
+                  if (message.isUser &&
+                      (message.attachmentRefs.isNotEmpty ||
+                          message.localAttachments.isNotEmpty ||
+                          message.selectedTool != null)) ...<Widget>[
                     const SizedBox(height: 10),
                     Wrap(
                       spacing: 8,
                       runSpacing: 8,
                       children: <Widget>[
-                        ...message.attachmentRefs.map((item) => _MetaChip(label: item.fileName, icon: Icons.attach_file, dark: isUser)),
-                        ...message.localAttachments.map((item) => _MetaChip(label: item.fileName, icon: Icons.attach_file, dark: isUser)),
+                        ...message.attachmentRefs.map(
+                          (item) => _MetaChip(
+                            label: item.fileName,
+                            icon: Icons.attach_file,
+                            dark: isUser,
+                          ),
+                        ),
+                        ...message.localAttachments.map(
+                          (item) => _MetaChip(
+                            label: item.fileName,
+                            icon: Icons.attach_file,
+                            dark: isUser,
+                          ),
+                        ),
                         if (message.selectedTool != null)
                           _MetaChip(
-                            label: AppStrings.toolLabel(message.selectedTool!.apiValue),
-                            icon: message.selectedTool == ConversationTool.schedule ? Icons.calendar_month_outlined : Icons.sticky_note_2_outlined,
+                            label: AppStrings.toolLabel(
+                              message.selectedTool!.apiValue,
+                            ),
+                            icon:
+                                message.selectedTool ==
+                                    ConversationTool.schedule
+                                ? Icons.calendar_month_outlined
+                                : Icons.sticky_note_2_outlined,
                             dark: isUser,
                           ),
                       ],
@@ -1071,7 +1232,9 @@ class _ConversationMessageView extends StatelessWidget {
                     Text(
                       _statusLabel(message.status)!,
                       style: TextStyle(
-                        color: isUser ? Colors.white70 : const Color(0xFF617B74),
+                        color: isUser
+                            ? Colors.white70
+                            : const Color(0xFF617B74),
                         fontSize: 12,
                       ),
                     ),
@@ -1114,10 +1277,7 @@ class _ConversationMessageView extends StatelessWidget {
       child: Container(
         constraints: const BoxConstraints(maxWidth: 640),
         margin: const EdgeInsets.only(bottom: 12),
-        child: _StructuredMessageCard(
-          message: message,
-          onAction: onAction,
-        ),
+        child: _StructuredMessageCard(message: message, onAction: onAction),
       ),
     );
   }
@@ -1149,7 +1309,9 @@ class _MetaChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final backgroundColor = dark ? const Color(0x1FFFFFFF) : const Color(0xFFF0F5F3);
+    final backgroundColor = dark
+        ? const Color(0x1FFFFFFF)
+        : const Color(0xFFF0F5F3);
     final foregroundColor = dark ? Colors.white : const Color(0xFF275C52);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1162,10 +1324,7 @@ class _MetaChip extends StatelessWidget {
         children: <Widget>[
           Icon(icon, size: 14, color: foregroundColor),
           const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(color: foregroundColor, fontSize: 12),
-          ),
+          Text(label, style: TextStyle(color: foregroundColor, fontSize: 12)),
         ],
       ),
     );
@@ -1173,13 +1332,11 @@ class _MetaChip extends StatelessWidget {
 }
 
 class _StructuredMessageCard extends StatelessWidget {
-  const _StructuredMessageCard({
-    required this.message,
-    required this.onAction,
-  });
+  const _StructuredMessageCard({required this.message, required this.onAction});
 
   final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload}) onAction;
+  final Future<void> Function(String action, {Map<String, dynamic> payload})
+  onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -1199,13 +1356,11 @@ class _StructuredMessageCard extends StatelessWidget {
 }
 
 class _ScheduleDraftCard extends StatefulWidget {
-  const _ScheduleDraftCard({
-    required this.message,
-    required this.onAction,
-  });
+  const _ScheduleDraftCard({required this.message, required this.onAction});
 
   final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload}) onAction;
+  final Future<void> Function(String action, {Map<String, dynamic> payload})
+  onAction;
 
   @override
   State<_ScheduleDraftCard> createState() => _ScheduleDraftCardState();
@@ -1220,18 +1375,29 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
   bool _busy = false;
 
   Map<String, dynamic> get _payload => widget.message.structuredPayload;
-  Map<String, dynamic> get _draft => (_payload['draft'] as Map<String, dynamic>? ?? <String, dynamic>{});
+  Map<String, dynamic> get _draft =>
+      (_payload['draft'] as Map<String, dynamic>? ?? <String, dynamic>{});
 
   @override
   void initState() {
     super.initState();
-    _titleController = TextEditingController(text: _draft['title'] as String? ?? '');
-    _locationController = TextEditingController(text: _draft['location'] as String? ?? '');
-    _detailsController = TextEditingController(text: _draft['details'] as String? ?? '');
+    _titleController = TextEditingController(
+      text: _draft['title'] as String? ?? '',
+    );
+    _locationController = TextEditingController(
+      text: _draft['location'] as String? ?? '',
+    );
+    _detailsController = TextEditingController(
+      text: _draft['details'] as String? ?? '',
+    );
     final start = _draft['start'] as Map<String, dynamic>?;
     final end = _draft['end'] as Map<String, dynamic>?;
-    _startValue = start == null ? null : DateTime.tryParse(start['dateTime'] as String? ?? '')?.toLocal();
-    _endValue = end == null ? null : DateTime.tryParse(end['dateTime'] as String? ?? '')?.toLocal();
+    _startValue = start == null
+        ? null
+        : DateTime.tryParse(start['dateTime'] as String? ?? '')?.toLocal();
+    _endValue = end == null
+        ? null
+        : DateTime.tryParse(end['dateTime'] as String? ?? '')?.toLocal();
   }
 
   @override
@@ -1288,14 +1454,22 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
 
   @override
   Widget build(BuildContext context) {
-    final missingFields = (_payload['missing_fields'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
-    final ambiguityFlags = (_payload['ambiguity_flags'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
-    final evidenceDigest = (_payload['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
-    final parseConfidence = (_payload['parse_confidence'] as num?)?.toDouble() ?? 0;
+    final missingFields =
+        (_payload['missing_fields'] as List<dynamic>? ?? <dynamic>[])
+            .cast<String>();
+    final ambiguityFlags =
+        (_payload['ambiguity_flags'] as List<dynamic>? ?? <dynamic>[])
+            .cast<String>();
+    final evidenceDigest =
+        (_payload['evidence_digest'] as List<dynamic>? ?? <dynamic>[])
+            .cast<String>();
+    final parseConfidence =
+        (_payload['parse_confidence'] as num?)?.toDouble() ?? 0;
     final stage = _payload['stage'] as String? ?? 'approval_pending';
     final isActionable = _payload['is_actionable'] as bool? ?? false;
     final lifecycle = _payload['lifecycle_status'] as String? ?? stage;
-    final recurrence = (_draft['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
+    final recurrence = (_draft['recurrence'] as List<dynamic>? ?? <dynamic>[])
+        .cast<String>();
     final isEditing = stage == 'needs_input' && isActionable;
 
     return _CardShell(
@@ -1338,7 +1512,9 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
                 return;
               }
               setState(() {
-                _endValue = value.isAfter(_startValue ?? value) ? value : (_startValue ?? value).add(const Duration(hours: 1));
+                _endValue = value.isAfter(_startValue ?? value)
+                    ? value
+                    : (_startValue ?? value).add(const Duration(hours: 1));
               });
             },
           ),
@@ -1346,7 +1522,9 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
           TextField(
             controller: _locationController,
             enabled: isEditing && !_busy,
-            decoration: const InputDecoration(labelText: AppStrings.locationField),
+            decoration: const InputDecoration(
+              labelText: AppStrings.locationField,
+            ),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -1354,14 +1532,27 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
             enabled: isEditing && !_busy,
             minLines: 2,
             maxLines: 4,
-            decoration: const InputDecoration(labelText: AppStrings.detailsField),
+            decoration: const InputDecoration(
+              labelText: AppStrings.detailsField,
+            ),
           ),
           const SizedBox(height: 12),
-          _SectionChips(title: AppStrings.missingFieldsField, values: missingFields.map(AppStrings.missingFieldLabel).toList()),
-          _SectionChips(title: AppStrings.ambiguityField, values: ambiguityFlags.map(AppStrings.ambiguityLabel).toList()),
+          _SectionChips(
+            title: AppStrings.missingFieldsField,
+            values: missingFields.map(AppStrings.missingFieldLabel).toList(),
+          ),
+          _SectionChips(
+            title: AppStrings.ambiguityField,
+            values: ambiguityFlags.map(AppStrings.ambiguityLabel).toList(),
+          ),
           _SectionList(title: AppStrings.evidenceField, values: evidenceDigest),
-          _SectionList(title: AppStrings.recurrenceField, values: <String>[formatRecurrence(recurrence)]),
-          Text('${AppStrings.parseConfidenceField}：${(parseConfidence * 100).toStringAsFixed(0)}%'),
+          _SectionList(
+            title: AppStrings.recurrenceField,
+            values: <String>[formatRecurrence(recurrence)],
+          ),
+          Text(
+            '${AppStrings.parseConfidenceField}：${(parseConfidence * 100).toStringAsFixed(0)}%',
+          ),
           if (isActionable) ...<Widget>[
             const SizedBox(height: 16),
             Row(
@@ -1375,8 +1566,16 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton(
-                    onPressed: _busy ? null : (isEditing ? _submitMissingFields : _confirm),
-                    child: Text(_busy ? AppStrings.loading : (isEditing ? AppStrings.submitMissingFields : AppStrings.confirmSave)),
+                    onPressed: _busy
+                        ? null
+                        : (isEditing ? _submitMissingFields : _confirm),
+                    child: Text(
+                      _busy
+                          ? AppStrings.loading
+                          : (isEditing
+                                ? AppStrings.submitMissingFields
+                                : AppStrings.confirmSave),
+                    ),
                   ),
                 ),
               ],
@@ -1396,14 +1595,17 @@ class _ConflictCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final payload = message.structuredPayload;
-    final conflicts = (payload['conflict_items'] as List<dynamic>? ?? <dynamic>[])
-        .map((item) => Map<String, dynamic>.from(item as Map))
-        .toList();
-    final suggestions = (payload['suggestions'] as List<dynamic>? ?? <dynamic>[])
-        .map((item) => Map<String, dynamic>.from(item as Map))
-        .toList();
+    final conflicts =
+        (payload['conflict_items'] as List<dynamic>? ?? <dynamic>[])
+            .map((item) => Map<String, dynamic>.from(item as Map))
+            .toList();
+    final suggestions =
+        (payload['suggestions'] as List<dynamic>? ?? <dynamic>[])
+            .map((item) => Map<String, dynamic>.from(item as Map))
+            .toList();
     final riskLevel = payload['risk_level'] as String? ?? 'low';
-    final lifecycle = payload['lifecycle_status'] as String? ?? 'conflict_review';
+    final lifecycle =
+        payload['lifecycle_status'] as String? ?? 'conflict_review';
 
     return _CardShell(
       title: AppStrings.conflictCheck,
@@ -1411,15 +1613,21 @@ class _ConflictCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text('${AppStrings.riskLevelField}：${AppStrings.riskLevelLabel(riskLevel)}'),
+          Text(
+            '${AppStrings.riskLevelField}：${AppStrings.riskLevelLabel(riskLevel)}',
+          ),
           const SizedBox(height: 12),
           _SectionList(
             title: AppStrings.conflictItemsField,
             values: conflicts.isEmpty
                 ? const <String>['未发现冲突']
                 : conflicts.map((item) {
-                    final start = EventDateTimeValue.fromJson(item['start'] as Map<String, dynamic>);
-                    final end = EventDateTimeValue.fromJson(item['end'] as Map<String, dynamic>);
+                    final start = EventDateTimeValue.fromJson(
+                      item['start'] as Map<String, dynamic>,
+                    );
+                    final end = EventDateTimeValue.fromJson(
+                      item['end'] as Map<String, dynamic>,
+                    );
                     return '${item['title']}：${formatEventRange(start: start, end: end, isAllDay: false)}';
                   }).toList(),
           ),
@@ -1428,8 +1636,12 @@ class _ConflictCard extends StatelessWidget {
             values: suggestions.isEmpty
                 ? const <String>['暂无建议时段']
                 : suggestions.map((item) {
-                    final start = EventDateTimeValue.fromJson(item['start'] as Map<String, dynamic>);
-                    final end = EventDateTimeValue.fromJson(item['end'] as Map<String, dynamic>);
+                    final start = EventDateTimeValue.fromJson(
+                      item['start'] as Map<String, dynamic>,
+                    );
+                    final end = EventDateTimeValue.fromJson(
+                      item['end'] as Map<String, dynamic>,
+                    );
                     return '${item['label']}：${formatEventRange(start: start, end: end, isAllDay: false)}';
                   }).toList(),
           ),
@@ -1440,13 +1652,11 @@ class _ConflictCard extends StatelessWidget {
 }
 
 class _QuickNotePreviewCard extends StatefulWidget {
-  const _QuickNotePreviewCard({
-    required this.message,
-    required this.onAction,
-  });
+  const _QuickNotePreviewCard({required this.message, required this.onAction});
 
   final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload}) onAction;
+  final Future<void> Function(String action, {Map<String, dynamic> payload})
+  onAction;
 
   @override
   State<_QuickNotePreviewCard> createState() => _QuickNotePreviewCardState();
@@ -1480,9 +1690,13 @@ class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
   @override
   Widget build(BuildContext context) {
     final payload = widget.message.structuredPayload;
-    final tags = (payload['preview_tags'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
-    final evidenceDigest = (payload['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
-    final lifecycle = payload['lifecycle_status'] as String? ?? 'approval_pending';
+    final tags = (payload['preview_tags'] as List<dynamic>? ?? <dynamic>[])
+        .cast<String>();
+    final evidenceDigest =
+        (payload['evidence_digest'] as List<dynamic>? ?? <dynamic>[])
+            .cast<String>();
+    final lifecycle =
+        payload['lifecycle_status'] as String? ?? 'approval_pending';
     final isActionable = payload['is_actionable'] as bool? ?? false;
 
     return _CardShell(
@@ -1509,7 +1723,9 @@ class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
                 Expanded(
                   child: FilledButton(
                     onPressed: _busy ? null : _confirm,
-                    child: Text(_busy ? AppStrings.loading : AppStrings.confirmSave),
+                    child: Text(
+                      _busy ? AppStrings.loading : AppStrings.confirmSave,
+                    ),
                   ),
                 ),
               ],
@@ -1530,8 +1746,14 @@ class _ResultCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final payload = message.structuredPayload;
     final resultKind = payload['result_kind'] as String? ?? '';
-    final summary = payload['summary'] as String? ?? AppStrings.chatActionSummary(resultKind);
-    final channels = (payload['channels'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
+    final summary =
+        payload['summary'] as String? ??
+        AppStrings.chatActionSummary(resultKind);
+    final channels = (payload['channels'] as List<dynamic>? ?? <dynamic>[])
+        .cast<String>();
+    final details = payload['details'] as String?;
+    final content = payload['content'] as String?;
+    final sourceText = payload['source_text'] as String?;
 
     return _CardShell(
       title: AppStrings.resultCard,
@@ -1539,30 +1761,59 @@ class _ResultCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(summary),
+          MarkdownBody(
+            data: summary,
+            selectable: true,
+            styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
+          ),
           if (payload['title'] is String) ...<Widget>[
             const SizedBox(height: 8),
             Text('${AppStrings.titleField}：${payload['title']}'),
           ],
-          if (payload['start'] is Map<String, dynamic> && payload['end'] is Map<String, dynamic>) ...<Widget>[
+          if (payload['start'] is Map<String, dynamic> &&
+              payload['end'] is Map<String, dynamic>) ...<Widget>[
             const SizedBox(height: 8),
             Text(
-              '${AppStrings.startField}：${formatEventRange(
-                start: EventDateTimeValue.fromJson(payload['start'] as Map<String, dynamic>),
-                end: EventDateTimeValue.fromJson(payload['end'] as Map<String, dynamic>),
-                isAllDay: false,
-              )}',
+              '${AppStrings.startField}：${formatEventRange(start: EventDateTimeValue.fromJson(payload['start'] as Map<String, dynamic>), end: EventDateTimeValue.fromJson(payload['end'] as Map<String, dynamic>), isAllDay: false)}',
             ),
           ],
-          if (payload['source_text'] is String && (payload['source_text'] as String).trim().isNotEmpty) ...<Widget>[
+          if (sourceText != null && sourceText.trim().isNotEmpty) ...<Widget>[
             const SizedBox(height: 8),
-            Text('${AppStrings.sourceTextField}：${payload['source_text']}'),
+            Text(
+              AppStrings.sourceTextField,
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
+            SelectableText(sourceText),
           ],
-          if (payload['content'] is String) ...<Widget>[
+          if (details != null && details.trim().isNotEmpty) ...<Widget>[
             const SizedBox(height: 8),
-            Text('${AppStrings.detailsField}：${payload['content']}'),
+            Text(
+              AppStrings.detailsField,
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
+            MarkdownBody(
+              data: details,
+              selectable: true,
+              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
+            ),
           ],
-          if ((payload['tags'] as List<dynamic>? ?? <dynamic>[]).isNotEmpty) ...<Widget>[
+          if (content != null && content.trim().isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              AppStrings.detailsField,
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 6),
+            MarkdownBody(
+              data: content,
+              selectable: true,
+              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
+            ),
+          ],
+          if ((payload['tags'] as List<dynamic>? ?? <dynamic>[])
+              .isNotEmpty) ...<Widget>[
             const SizedBox(height: 8),
             _SectionChips(
               title: AppStrings.tagsField,
@@ -1604,7 +1855,10 @@ class _CardShell extends StatelessWidget {
             Row(
               children: <Widget>[
                 Expanded(
-                  child: Text(title, style: Theme.of(context).textTheme.titleMedium),
+                  child: Text(
+                    title,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                 ),
                 Chip(label: Text(AppStrings.lifecycleLabel(lifecycle))),
               ],
@@ -1619,10 +1873,7 @@ class _CardShell extends StatelessWidget {
 }
 
 class _SectionChips extends StatelessWidget {
-  const _SectionChips({
-    required this.title,
-    required this.values,
-  });
+  const _SectionChips({required this.title, required this.values});
 
   final String title;
   final List<String> values;
@@ -1651,10 +1902,7 @@ class _SectionChips extends StatelessWidget {
 }
 
 class _SectionList extends StatelessWidget {
-  const _SectionList({
-    required this.title,
-    required this.values,
-  });
+  const _SectionList({required this.title, required this.values});
 
   final String title;
   final List<String> values;
@@ -1671,10 +1919,12 @@ class _SectionList extends StatelessWidget {
         children: <Widget>[
           Text(title, style: Theme.of(context).textTheme.labelLarge),
           const SizedBox(height: 8),
-          ...values.map((item) => Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text('• $item'),
-              )),
+          ...values.map(
+            (item) => Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text('• $item'),
+            ),
+          ),
         ],
       ),
     );

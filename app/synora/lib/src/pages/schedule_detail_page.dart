@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../app_controller.dart';
 import '../date_utils.dart';
@@ -58,7 +59,9 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
     _startAt = _item.start.dateTime.toLocal();
     _endAt = _item.end.dateTime.toLocal();
     final duration = _endAt.difference(_startAt);
-    _defaultDuration = duration.isNegative || duration.inMinutes < 1 ? const Duration(hours: 1) : duration;
+    _defaultDuration = duration.isNegative || duration.inMinutes < 1
+        ? const Duration(hours: 1)
+        : duration;
   }
 
   void _toggleEdit() {
@@ -103,25 +106,35 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text(AppStrings.deleteDone)),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text(AppStrings.deleteDone)));
     Navigator.of(context).pop(true);
   }
 
   ScheduleDraft _buildDraft() {
-    final normalizedStart = _isAllDay ? DateTime(_startAt.year, _startAt.month, _startAt.day) : _startAt;
+    final normalizedStart = _isAllDay
+        ? DateTime(_startAt.year, _startAt.month, _startAt.day)
+        : _startAt;
     final normalizedEnd = _isAllDay
         ? DateTime(_endAt.year, _endAt.month, _endAt.day)
         : _endAt;
     return ScheduleDraft(
       title: _titleController.text.trim(),
-      location: _locationController.text.trim().isEmpty ? null : _locationController.text.trim(),
+      location: _locationController.text.trim().isEmpty
+          ? null
+          : _locationController.text.trim(),
       details: _detailsController.text.trim(),
       sourceText: _item.sourceText,
       isAllDay: _isAllDay,
-      start: EventDateTimeValue(dateTime: normalizedStart, timeZone: _item.start.timeZone),
-      end: EventDateTimeValue(dateTime: normalizedEnd, timeZone: _item.end.timeZone),
+      start: EventDateTimeValue(
+        dateTime: normalizedStart,
+        timeZone: _item.start.timeZone,
+      ),
+      end: EventDateTimeValue(
+        dateTime: normalizedEnd,
+        timeZone: _item.end.timeZone,
+      ),
       recurrence: List<String>.from(_item.recurrence),
       sourceAttachmentIds: List<int>.from(_item.sourceAttachmentIds),
       parseConfidence: _item.parseConfidence,
@@ -163,10 +176,14 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
                   '${AppStrings.startField}：${formatEventRange(start: preview.draft.start, end: preview.draft.end, isAllDay: preview.draft.isAllDay)}',
                 ),
                 const SizedBox(height: 8),
-                Text('${AppStrings.riskLevelField}：${AppStrings.riskLevelLabel(preview.riskLevel)}'),
+                Text(
+                  '${AppStrings.riskLevelField}：${AppStrings.riskLevelLabel(preview.riskLevel)}',
+                ),
                 if (preview.conflictItems.isNotEmpty) ...<Widget>[
                   const SizedBox(height: 8),
-                  Text('${AppStrings.conflictItemsField}：${preview.conflictItems.map((item) => item.title).join(' / ')}'),
+                  Text(
+                    '${AppStrings.conflictItemsField}：${preview.conflictItems.map((item) => item.title).join(' / ')}',
+                  ),
                 ],
               ],
             ),
@@ -210,7 +227,9 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   void _updateStart(DateTime? value) {
@@ -243,14 +262,51 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
       children: <Widget>[
         Text(_item.title, style: Theme.of(context).textTheme.headlineSmall),
         const SizedBox(height: 20),
-        _DetailLine(label: AppStrings.startField, value: formatEventRange(start: _item.start, end: _item.end, isAllDay: _item.isAllDay)),
-        _DetailLine(label: AppStrings.locationField, value: (_item.location?.trim().isNotEmpty ?? false) ? _item.location! : AppStrings.noContent),
-        _DetailLine(label: AppStrings.reminderField, value: formatReminderOffsets(_item.reminderOffsetsMinutes)),
-        _DetailLine(label: AppStrings.recurrenceField, value: formatRecurrence(_item.recurrence)),
-        _DetailLine(label: AppStrings.timeZoneField, value: _item.start.timeZone),
-        _DetailLine(label: AppStrings.parseConfidenceField, value: '${(_item.parseConfidence * 100).toStringAsFixed(0)}%'),
-        _DetailLine(label: AppStrings.sourceTextField, value: _item.sourceText.trim().isEmpty ? AppStrings.noContent : _item.sourceText),
-        _DetailLine(label: AppStrings.detailsField, value: _item.details.trim().isEmpty ? AppStrings.noContent : _item.details),
+        _DetailLine(
+          label: AppStrings.startField,
+          value: formatEventRange(
+            start: _item.start,
+            end: _item.end,
+            isAllDay: _item.isAllDay,
+          ),
+        ),
+        _DetailLine(
+          label: AppStrings.locationField,
+          value: (_item.location?.trim().isNotEmpty ?? false)
+              ? _item.location!
+              : AppStrings.noContent,
+        ),
+        _DetailLine(
+          label: AppStrings.reminderField,
+          value: formatReminderOffsets(_item.reminderOffsetsMinutes),
+        ),
+        _DetailLine(
+          label: AppStrings.recurrenceField,
+          value: formatRecurrence(_item.recurrence),
+        ),
+        _DetailLine(
+          label: AppStrings.timeZoneField,
+          value: _item.start.timeZone,
+        ),
+        _DetailLine(
+          label: AppStrings.parseConfidenceField,
+          value: '${(_item.parseConfidence * 100).toStringAsFixed(0)}%',
+        ),
+        _DetailLine(
+          label: AppStrings.sourceTextField,
+          value: _item.sourceText.trim().isEmpty
+              ? AppStrings.noContent
+              : _item.sourceText,
+          markdown: false,
+          selectable: true,
+        ),
+        _DetailLine(
+          label: AppStrings.detailsField,
+          value: _item.details.trim().isEmpty
+              ? AppStrings.noContent
+              : _item.details,
+          markdown: true,
+        ),
       ],
     );
   }
@@ -293,7 +349,9 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
         const SizedBox(height: 16),
         TextField(
           controller: _locationController,
-          decoration: const InputDecoration(labelText: AppStrings.locationField),
+          decoration: const InputDecoration(
+            labelText: AppStrings.locationField,
+          ),
         ),
         const SizedBox(height: 16),
         TextField(
@@ -303,11 +361,30 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
           decoration: const InputDecoration(labelText: AppStrings.detailsField),
         ),
         const SizedBox(height: 16),
-        _DetailLine(label: AppStrings.sourceTextField, value: _item.sourceText.trim().isEmpty ? AppStrings.noContent : _item.sourceText),
-        _DetailLine(label: AppStrings.reminderField, value: formatReminderOffsets(_item.reminderOffsetsMinutes)),
-        _DetailLine(label: AppStrings.recurrenceField, value: formatRecurrence(_item.recurrence)),
-        _DetailLine(label: AppStrings.timeZoneField, value: _item.start.timeZone),
-        _DetailLine(label: AppStrings.parseConfidenceField, value: '${(_item.parseConfidence * 100).toStringAsFixed(0)}%'),
+        _DetailLine(
+          label: AppStrings.sourceTextField,
+          value: _item.sourceText.trim().isEmpty
+              ? AppStrings.noContent
+              : _item.sourceText,
+          markdown: false,
+          selectable: true,
+        ),
+        _DetailLine(
+          label: AppStrings.reminderField,
+          value: formatReminderOffsets(_item.reminderOffsetsMinutes),
+        ),
+        _DetailLine(
+          label: AppStrings.recurrenceField,
+          value: formatRecurrence(_item.recurrence),
+        ),
+        _DetailLine(
+          label: AppStrings.timeZoneField,
+          value: _item.start.timeZone,
+        ),
+        _DetailLine(
+          label: AppStrings.parseConfidenceField,
+          value: '${(_item.parseConfidence * 100).toStringAsFixed(0)}%',
+        ),
       ],
     );
   }
@@ -321,7 +398,9 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
           if (_editing)
             TextButton(
               onPressed: _saving ? null : _save,
-              child: Text(_saving ? AppStrings.loading : AppStrings.saveChanges),
+              child: Text(
+                _saving ? AppStrings.loading : AppStrings.saveChanges,
+              ),
             )
           else
             IconButton(
@@ -357,13 +436,29 @@ class _DetailLine extends StatelessWidget {
   const _DetailLine({
     required this.label,
     required this.value,
+    this.markdown = false,
+    this.selectable = false,
   });
 
   final String label;
   final String value;
+  final bool markdown;
+  final bool selectable;
 
   @override
   Widget build(BuildContext context) {
+    Widget body;
+    if (markdown) {
+      body = MarkdownBody(
+        data: value,
+        selectable: true,
+        styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
+      );
+    } else if (selectable) {
+      body = SelectableText(value);
+    } else {
+      body = Text(value);
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Column(
@@ -371,7 +466,7 @@ class _DetailLine extends StatelessWidget {
         children: <Widget>[
           Text(label, style: Theme.of(context).textTheme.labelMedium),
           const SizedBox(height: 6),
-          Text(value),
+          body,
         ],
       ),
     );

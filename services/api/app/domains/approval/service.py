@@ -20,7 +20,22 @@ def create_approval_request(
     draft_hash: str,
     normalized_payload: dict,
     evidence_digest: list[str],
+    approval_scope: str | None = None,
 ) -> tuple[ApprovalRequest, str]:
+    if approval_scope:
+        stale_items = db.scalars(
+            select(ApprovalRequest).where(
+                ApprovalRequest.user_id == user_id,
+                ApprovalRequest.action == action,
+                ApprovalRequest.approval_scope == approval_scope,
+                ApprovalRequest.status == "pending",
+            )
+        ).all()
+        for item in stale_items:
+            item.status = "superseded"
+        if stale_items:
+            db.commit()
+
     token = mint_token()
     approval = ApprovalRequest(
         user_id=user_id,
@@ -29,6 +44,7 @@ def create_approval_request(
         payload_json=json.dumps(payload, ensure_ascii=False, sort_keys=True),
         normalized_payload_json=json.dumps(normalized_payload, ensure_ascii=False, sort_keys=True),
         evidence_digest_json=json.dumps(evidence_digest, ensure_ascii=False),
+        approval_scope=approval_scope,
         token_hash=sha256_text(token),
         expires_at=future_utc(get_settings().approval_ttl_hours),
     )
@@ -44,12 +60,18 @@ def consume_approval_request(db: Session, *, user_id: int, action: str, approval
             ApprovalRequest.user_id == user_id,
             ApprovalRequest.action == action,
             ApprovalRequest.token_hash == sha256_text(approval_token),
-            ApprovalRequest.status == "pending",
         )
     )
     if not approval:
         raise ValueError("审批令牌无效。")
-    if approval.expires_at <= datetime.now(timezone.utc):
+    if approval.status == "superseded":
+        raise ValueError("该确认已失效，请使用最新卡片或最新预检结果重新确认。")
+    if approval.status != "pending":
+        raise ValueError("审批令牌无效。")
+    expires_at = approval.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
         approval.status = "expired"
         db.commit()
         raise ValueError("审批令牌已过期，请重新生成。")

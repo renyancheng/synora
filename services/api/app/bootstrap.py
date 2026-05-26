@@ -44,6 +44,7 @@ def _reconcile_legacy_schema() -> None:
 
     _ensure_column("approval_requests", "normalized_payload_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column("approval_requests", "evidence_digest_json", "TEXT NOT NULL DEFAULT '[]'")
+    _ensure_column("approval_requests", "approval_scope", "VARCHAR(120)")
 
     _ensure_column("notification_audits", "provider", "VARCHAR(80) NOT NULL DEFAULT ''")
     _ensure_column("notification_audits", "retry_count", "INTEGER NOT NULL DEFAULT 0")

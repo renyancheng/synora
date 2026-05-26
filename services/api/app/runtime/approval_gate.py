@@ -16,6 +16,7 @@ class ApprovalGate:
         payload: dict,
         normalized_payload: dict,
         evidence_digest: list[str],
+        approval_scope: str | None = None,
     ):
         return create_approval_request(
             db,
@@ -25,6 +26,7 @@ class ApprovalGate:
             draft_hash=draft_hash,
             normalized_payload=normalized_payload,
             evidence_digest=evidence_digest,
+            approval_scope=approval_scope,
         )
 
     def consume(self, db: Session, *, user_id: int, action: str, approval_token: str, draft_hash: str):

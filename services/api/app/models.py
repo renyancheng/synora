@@ -127,6 +127,7 @@ class ApprovalRequest(Base):
     payload_json: Mapped[str] = mapped_column(Text)
     normalized_payload_json: Mapped[str] = mapped_column(Text, default="{}")
     evidence_digest_json: Mapped[str] = mapped_column(Text, default="[]")
+    approval_scope: Mapped[str] = mapped_column(String(120), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(40), default="pending", index=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -254,7 +255,7 @@ class ConversationThread(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
-    title: Mapped[str] = mapped_column(String(120), default="???")
+    title: Mapped[str] = mapped_column(String(120), default="新对话")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
     last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)

@@ -262,7 +262,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                 id=10,
                 title="教学例会",
                 details="讨论课程安排",
-                source_text="?????????????????",
+                source_text="明天下午三点在学院会议室开教学例会",
                 start_at=datetime.fromisoformat("2026-05-24T07:00:00+00:00"),
                 end_at=datetime.fromisoformat("2026-05-24T08:00:00+00:00"),
                 time_zone="Asia/Shanghai",
@@ -344,119 +344,6 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(confirm_messages[0].message_type, "result_card")
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
-
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
-    async def test_pending_schedule_regenerates_new_revision(
-        self,
-        _intent_mock,
-        _title_mock,
-        invoke_tool_mock,
-        _write_memory_mock,
-    ) -> None:
-        original = self._draft()
-        revised = original.model_copy(
-            update={
-                "source_text": "改成下周二下午三点在学院会议室开教学例会",
-                "start": EventDateTimeValue(
-                    dateTime=datetime.fromisoformat("2026-05-26T15:00:00+08:00"),
-                    timeZone="Asia/Shanghai",
-                ),
-                "end": EventDateTimeValue(
-                    dateTime=datetime.fromisoformat("2026-05-26T16:00:00+08:00"),
-                    timeZone="Asia/Shanghai",
-                ),
-            }
-        )
-        invoke_tool_mock.side_effect = [
-            (
-                SimpleNamespace(content="draft"),
-                {
-                    "status": "ok",
-                    "draft": original.model_dump(mode="json", by_alias=True),
-                    "draft_hash": "draft-hash-1",
-                    "missing_fields": [],
-                    "ambiguity_flags": [],
-                    "evidence_digest": ["明天下午三点"],
-                    "parse_confidence": 0.92,
-                },
-            ),
-            (
-                SimpleNamespace(content="conflicts"),
-                {
-                    "status": "ok",
-                    "conflict_items": [],
-                    "suggestions": [],
-                    "risk_level": "low",
-                    "approval": {
-                        "approval_token": "approval-token-1",
-                        "action": "create_schedule",
-                        "expires_at": datetime.now(timezone.utc).isoformat(),
-                        "draft_hash": "draft-hash-1",
-                    },
-                },
-            ),
-            (
-                SimpleNamespace(content="draft-2"),
-                {
-                    "status": "ok",
-                    "draft": revised.model_dump(mode="json", by_alias=True),
-                    "draft_hash": "draft-hash-2",
-                    "missing_fields": [],
-                    "ambiguity_flags": [],
-                    "evidence_digest": ["下周二下午三点"],
-                    "parse_confidence": 0.96,
-                },
-            ),
-            (
-                SimpleNamespace(content="conflicts-2"),
-                {
-                    "status": "ok",
-                    "conflict_items": [],
-                    "suggestions": [],
-                    "risk_level": "low",
-                    "approval": {
-                        "approval_token": "approval-token-2",
-                        "action": "create_schedule",
-                        "expires_at": datetime.now(timezone.utc).isoformat(),
-                        "draft_hash": "draft-hash-2",
-                    },
-                },
-            ),
-        ]
-        thread = create_conversation(self.db, self.user.id)
-        _, _, _, first_run = queue_message(
-            self.db,
-            self.user.id,
-            thread.id,
-            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
-        )
-        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
-
-        _, _, _, second_run = queue_message(
-            self.db,
-            self.user.id,
-            thread.id,
-            ConversationSendMessageRequest(text_content="改成下周二下午三点"),
-        )
-        second_events = [item async for item in consume_stream(self.db, self.user.id, thread.id, second_run.stream_token)]
-
-        self.assertFalse(any("当前还有一项待确认内容" in str(item) for item in second_events))
-        cards = [item["data"]["message"] for item in second_events if item["event"] == "card_snapshot"]
-        self.assertEqual([item["revision"] for item in cards], [2, 2])
-        history = self.db.scalars(
-            select(ConversationMessage)
-            .where(ConversationMessage.conversation_id == thread.id)
-            .order_by(ConversationMessage.id.asc())
-        ).all()
-        old_cards = [item for item in history if item.action_group_id == cards[0]["action_group_id"] and item.revision == 1]
-        self.assertTrue(old_cards)
-        self.assertTrue(all((item.structured_payload_json or {}).get("lifecycle_status") == "superseded" for item in old_cards))
-        self.assertTrue(all((item.structured_payload_json or {}).get("is_actionable") is False for item in old_cards))
-        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
-        self.assertEqual(int(pending.meta_json.get("revision") or 0), 2)
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
@@ -610,7 +497,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.user.id,
             thread.id,
             ConversationSendMessageRequest(
-                text_content="????????",
+                text_content="请帮我处理这个附件",
                 attachment_ids=[attachment.id],
                 selected_tool="schedule",
             ),
@@ -691,6 +578,211 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         delete_note(self.db, self.user.id, note.id)
 
         self.assertIsNone(self.db.get(QuickNote, note.id))
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="蓝桥杯安排")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_schedule_regeneration_keeps_user_history_in_source_text(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        original = self._draft().model_copy(
+            update={
+                "title": "蓝桥杯国赛",
+                "details": "用户下下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛，比赛时间是 9:00-13:00。",
+                "source_text": "我下下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛了，比赛时间是9:00-13:00",
+            }
+        )
+        revised = original.model_copy(
+            update={
+                "details": "用户下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛，比赛时间是 9:00-13:00。",
+                "source_text": "我下下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛了，比赛时间是9:00-13:00\n\n不对，是下周",
+            }
+        )
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft-1"),
+                {
+                    "status": "ok",
+                    "draft": original.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-1",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["比赛时间是 9:00-13:00"],
+                    "parse_confidence": 0.91,
+                },
+            ),
+            (
+                SimpleNamespace(content="draft-2"),
+                {
+                    "status": "ok",
+                    "draft": revised.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-2",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["最新更正为下周"],
+                    "parse_confidence": 0.96,
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, first_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(
+                text_content="我下下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛了，比赛时间是9:00-13:00"
+            ),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
+
+        _, _, _, second_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="不对，是下周"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, second_run.stream_token)]
+
+        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
+        latest_draft = ScheduleEventDraft.model_validate(pending.payload_json)
+        self.assertEqual(
+            latest_draft.source_text,
+            "我下下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛了，比赛时间是9:00-13:00\n\n不对，是下周",
+        )
+        self.assertEqual(
+            latest_draft.details,
+            "用户下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛，比赛时间是 9:00-13:00。",
+        )
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_pending_schedule_regenerates_new_revision_with_cards(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        original = self._draft()
+        revised = original.model_copy(
+            update={
+                "source_text": "改成下周二下午三点在学院会议室开教学例会",
+                "start": EventDateTimeValue(
+                    dateTime=datetime.fromisoformat("2026-05-26T15:00:00+08:00"),
+                    timeZone="Asia/Shanghai",
+                ),
+                "end": EventDateTimeValue(
+                    dateTime=datetime.fromisoformat("2026-05-26T16:00:00+08:00"),
+                    timeZone="Asia/Shanghai",
+                ),
+            }
+        )
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": original.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-1",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["明天下午三点"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="draft-2"),
+                {
+                    "status": "ok",
+                    "draft": revised.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-2",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["下周二下午三点"],
+                    "parse_confidence": 0.96,
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, first_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
+
+        _, _, _, second_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="改成下周二下午三点"),
+        )
+        second_events = [item async for item in consume_stream(self.db, self.user.id, thread.id, second_run.stream_token)]
+
+        self.assertFalse(any("当前还有一项待确认内容" in str(item) for item in second_events))
+        cards = [item["data"]["message"] for item in second_events if item["event"] == "card_snapshot"]
+        self.assertEqual([item["revision"] for item in cards], [2, 2])
+        history = self.db.scalars(
+            select(ConversationMessage)
+            .where(ConversationMessage.conversation_id == thread.id)
+            .order_by(ConversationMessage.id.asc())
+        ).all()
+        old_cards = [item for item in history if item.action_group_id == cards[0]["action_group_id"] and item.revision == 1]
+        self.assertTrue(old_cards)
+        self.assertTrue(all((item.structured_payload_json or {}).get("lifecycle_status") == "superseded" for item in old_cards))
+        self.assertTrue(all((item.structured_payload_json or {}).get("is_actionable") is False for item in old_cards))
+        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
+        self.assertEqual(int(pending.meta_json.get("revision") or 0), 2)
+
+    def test_superseded_approval_token_is_rejected(self) -> None:
+        from app.domains.approval.service import create_approval_request, consume_approval_request
+
+        approval1, token1 = create_approval_request(
+            self.db,
+            user_id=self.user.id,
+            action="update_schedule",
+            payload={"schedule_id": 1},
+            draft_hash="draft-1",
+            normalized_payload={"title": "旧预检"},
+            evidence_digest=[],
+            approval_scope="schedule:update:1",
+        )
+        approval2, token2 = create_approval_request(
+            self.db,
+            user_id=self.user.id,
+            action="update_schedule",
+            payload={"schedule_id": 1},
+            draft_hash="draft-2",
+            normalized_payload={"title": "新预检"},
+            evidence_digest=[],
+            approval_scope="schedule:update:1",
+        )
+        self.assertEqual(approval2.status, "pending")
+        refreshed = self.db.get(type(approval1), approval1.id)
+        self.assertEqual(refreshed.status, "superseded")
+        with self.assertRaises(ValueError):
+            consume_approval_request(
+                self.db,
+                user_id=self.user.id,
+                action="update_schedule",
+                approval_token=token1,
+                draft_hash="draft-1",
+            )
+        consume_approval_request(
+            self.db,
+            user_id=self.user.id,
+            action="update_schedule",
+            approval_token=token2,
+            draft_hash="draft-2",
+        )
 
 
 if __name__ == "__main__":

@@ -40,6 +40,41 @@ def _enqueue_memory_writeback(*, user_id: int, source_kind: str, source_ref_id: 
 DEFAULT_THREAD_TITLE = "新对话"
 
 
+def _normalize_source_history(*values: Any) -> list[str]:
+    history: list[str] = []
+    for value in values:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate and candidate not in history:
+                history.append(candidate)
+            continue
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, str):
+                    candidate = item.strip()
+                    if candidate and candidate not in history:
+                        history.append(candidate)
+    return history
+
+
+def _schedule_scope_from_action_group(action_group_id: str | None) -> str | None:
+    if not action_group_id:
+        return None
+    return f"conversation_schedule:{action_group_id}"
+
+
+def _schedule_draft_summary(draft: ScheduleEventDraft) -> str:
+    parts = [draft.title.strip()]
+    if draft.location:
+        parts.append(f"地点：{draft.location.strip()}")
+    if draft.details.strip():
+        parts.append(f"详情：{draft.details.strip()}")
+    parts.append(f"开始：{draft.start.date_time.isoformat()}")
+    parts.append(f"结束：{draft.end.date_time.isoformat()}")
+    return "\n".join(part for part in parts if part)
+
+
+
 def _error_payload(exc: Exception, *, assistant_message_id: int) -> dict[str, object]:
     if isinstance(exc, LLMServiceError):
         return {
@@ -585,6 +620,7 @@ async def _process_schedule_intake(
 ) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
     tool_events: list[dict[str, Any]] = []
     supersede_action_group_id = context.get("supersede_action_group_id")
+    schedule_scope = _schedule_scope_from_action_group(action_group_id or supersede_action_group_id)
     parse_audit = _start_tool_audit(
         db,
         agent_run_id=agent_run.id,
@@ -625,6 +661,7 @@ async def _process_schedule_intake(
     action_group_id = action_group_id or mint_token()
     created_ids: list[int] = []
     approval_required: dict[str, Any] | None = None
+    source_history = _normalize_source_history(draft.source_text)
 
     if missing_fields:
         final_text = "我已经整理出一条日程草稿，但还缺少关键信息。请先补充后再确认。"
@@ -646,6 +683,7 @@ async def _process_schedule_intake(
                 "parse_confidence": parse_confidence,
                 "action_group_id": action_group_id,
                 "revision": revision,
+                "source_history": source_history,
             },
         )
         card = _append_message(
@@ -681,26 +719,36 @@ async def _process_schedule_intake(
         request_json={
             "draft": draft.model_dump(mode="json", by_alias=True),
             "draft_hash": draft_hash,
+            "approval_scope": schedule_scope,
         },
     )
     tool_events.append({"event": "tool_call_started", "data": {"tool_name": "detect_schedule_conflicts"}})
-    tool_message, conflict_result = await invoke_synora_tool(
-        "detect_schedule_conflicts",
-        {
-            "draft": draft.model_dump(mode="json", by_alias=True),
-            "draft_hash": draft_hash,
-        },
+    conflict_result_model = detect_conflicts(
+        db,
+        user_id,
+        draft,
+        draft_hash,
+        approval_scope=schedule_scope,
     )
+    conflict_result = {
+        "status": conflict_result_model.status,
+        "conflict_items": [item.model_dump(mode="json", by_alias=True) for item in conflict_result_model.conflict_items],
+        "suggestions": [item.model_dump(mode="json", by_alias=True) for item in conflict_result_model.suggestions],
+        "risk_level": conflict_result_model.risk_level,
+        "approval": {
+            "approval_token": conflict_result_model.approval.approval_token,
+            "action": conflict_result_model.approval.action,
+            "expires_at": conflict_result_model.approval.expires_at.isoformat(),
+            "draft_hash": conflict_result_model.approval.draft_hash,
+        },
+    }
     _finish_tool_audit(
         db,
         conflict_audit,
         status="ok",
-        response_json={"content": str(tool_message.content), "structured": conflict_result},
+        response_json={"content": "detect_conflicts", "structured": conflict_result},
     )
     tool_events.append({"event": "tool_call_completed", "data": {"tool_name": "detect_schedule_conflicts"}})
-
-    if conflict_result.get("status") == "error":
-        raise ValueError(str(conflict_result.get("message") or "日程冲突检测失败。"))
 
     approval = dict(conflict_result.get("approval") or {})
     final_text = "我已经整理好日程草稿，并完成冲突检查。确认后我会正式创建日程和提醒。"
@@ -724,6 +772,7 @@ async def _process_schedule_intake(
             "parse_confidence": parse_confidence,
             "action_group_id": action_group_id,
             "revision": revision,
+            "source_history": source_history,
         },
     )
     draft_card = _append_message(
@@ -777,6 +826,7 @@ async def _process_schedule_intake(
         "approval_token": approval.get("approval_token"),
     }
     return final_text, created_ids, approval_required, tool_events
+
 
 
 async def _process_quick_note_intake(
@@ -919,6 +969,11 @@ def _submit_schedule_missing_fields(
     action_group_id = pending.meta_json.get("action_group_id") or mint_token()
     revision = int(pending.meta_json.get("revision") or 1) + 1
     _mark_action_group_status(db, action_group_id, lifecycle_status="superseded", is_actionable=False)
+    source_history = _normalize_source_history(
+        pending.meta_json.get("source_history"),
+        updated_draft.source_text,
+    )
+    updated_draft = updated_draft.model_copy(update={"source_text": "\n\n".join(source_history)})
 
     if missing_fields:
         draft_hash = build_draft_hash(updated_draft)
@@ -937,6 +992,7 @@ def _submit_schedule_missing_fields(
                 "missing_fields": missing_fields,
                 "action_group_id": action_group_id,
                 "revision": revision,
+                "source_history": source_history,
             },
         )
         return [
@@ -965,7 +1021,13 @@ def _submit_schedule_missing_fields(
             )
         ]
 
-    conflict_result = detect_conflicts(db, user_id, updated_draft, build_draft_hash(updated_draft))
+    conflict_result = detect_conflicts(
+        db,
+        user_id,
+        updated_draft,
+        build_draft_hash(updated_draft),
+        approval_scope=_schedule_scope_from_action_group(action_group_id),
+    )
     _upsert_pending_state(
         db,
         thread.id,
@@ -983,6 +1045,7 @@ def _submit_schedule_missing_fields(
             "risk_level": conflict_result.risk_level,
             "action_group_id": action_group_id,
             "revision": revision,
+            "source_history": source_history,
         },
     )
     draft_card = _append_message(
@@ -1031,6 +1094,7 @@ def _submit_schedule_missing_fields(
     return [draft_card, conflict_card]
 
 
+
 def _confirm_schedule_pending(
     db: Session,
     user_id: int,
@@ -1055,6 +1119,7 @@ def _confirm_schedule_pending(
             "summary": "日程已创建并安排提醒。",
             "title": schedule.title,
             "source_text": schedule_source_text,
+            "details": schedule.details,
             "start": {"dateTime": schedule.start_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
             "end": {"dateTime": schedule.end_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
             "channels": [job.channel for job in jobs],
@@ -1064,10 +1129,11 @@ def _confirm_schedule_pending(
         user_id=user_id,
         source_kind="confirmed_schedule",
         source_ref_id=str(schedule.id),
-        text=f"{schedule.title}，{schedule.details}".strip("，"),
+        text=f"{schedule.title} {schedule.details}".strip(),
         summary="已确认日程",
     )
     return [message]
+
 
 
 def _build_user_message_payload(
@@ -1456,16 +1522,18 @@ def _prepare_pending_regeneration(
     previous_context = dict(context)
     if pending.pending_type == "schedule":
         previous_draft = ScheduleEventDraft.model_validate(previous_payload)
-        base_text_parts = [
-            "你正在修改同一条待确认日程。",
-            f"上一版日程：{previous_draft.source_text or previous_draft.title}",
-            f"本轮补充或修正：{text_content}",
-        ]
-        merged_text = "\n".join(part for part in base_text_parts if part.strip())
+        source_history = _normalize_source_history(
+            pending.meta_json.get("source_history"),
+            previous_draft.source_text,
+            text_content,
+        )
+        merged_text = text_content.strip()
         previous_context["pending_regeneration"] = "schedule"
         previous_context["pending_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
         previous_context["pending_revision"] = str(int(pending.meta_json.get("revision") or 1) + 1)
         previous_context["supersede_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
+        previous_context["source_history"] = source_history
+        previous_context["previous_draft_summary"] = _schedule_draft_summary(previous_draft)
         return "schedule_intake", merged_text, merged_attachment_ids, attachment_parts, previous_context
 
     previous_content = str(previous_payload.get("content") or "").strip()

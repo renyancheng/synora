@@ -103,8 +103,8 @@ class ModelAdapter:
                 "你是 Synora 的中文智能助理。"
                 "回答要自然、准确、简洁。"
                 "只有在确实需要时才调用工具；不要伪造工具执行结果。"
-                "如果用户只是聊天或咨询，就直接回答。"
-                "如果用户请求创建日程或速记，而当前入口已明确路由到其他流程，则不要在这里重复创建。"
+                "如果用户只是聊天、提问或咨询，就直接回答。"
+                "如果用户请求创建日程或速记，而当前入口已经明确路由到其他流程，则不要在这里重复创建。"
             ),
             name="synora_conversation_agent",
         )
@@ -224,7 +224,7 @@ class ModelAdapter:
                 retryable=True,
                 debug_message=f"{type(exc).__name__}: status={exc.status_code} body={exc.body}",
             )
-        if isinstance(exc, json.JSONDecodeError | ValueError | TypeError):
+        if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError)):
             return LLMServiceError(
                 "llm_invalid_response",
                 "智能服务返回异常，本轮未完成。",
@@ -233,12 +233,7 @@ class ModelAdapter:
             )
         code = "llm_stream_failed" if streaming else "llm_invalid_response"
         message = "本轮回复生成失败，请检查网络后重试。" if streaming else "智能服务返回异常，本轮未完成。"
-        return LLMServiceError(
-            code,
-            message,
-            retryable=True,
-            debug_message=f"{type(exc).__name__}: {exc}",
-        )
+        return LLMServiceError(code, message, retryable=True, debug_message=f"{type(exc).__name__}: {exc}")
 
     def _raise_mapped_error(self, exc: Exception, *, operation: str, streaming: bool) -> None:
         mapped = self._map_exception(exc, operation=operation, streaming=streaming)
@@ -368,7 +363,7 @@ class ModelAdapter:
 
     @staticmethod
     def _looks_like_quick_note(text: str) -> bool:
-        keywords = ["记一下", "帮我记", "记住", "速记", "备忘", "记录", "存一下", "灵感", "想法", "待办"]
+        keywords = ["记一下", "帮我记", "记住", "速记", "备忘", "记录", "存一个", "灵感", "想法", "待办"]
         return any(keyword in text for keyword in keywords)
 
     @staticmethod
@@ -404,9 +399,9 @@ class ModelAdapter:
             operation="route_workflow",
             system_prompt=(
                 "你是 Synora 的工作流路由器。"
-                "只能在 schedule_intake 与 quick_note_intake 中二选一。"
-                "如果内容更像带时间地点的安排，就选 schedule_intake；"
-                "如果更像备忘、灵感、待办或资料整理，就选 quick_note_intake。"
+                "只能在 schedule_intake 和 quick_note_intake 中二选一。"
+                "如果内容更像带时间地点的安排，就选 schedule_intake。"
+                "如果内容更像备忘、灵感、待办或资料整理，就选 quick_note_intake。"
             ),
             user_text=json.dumps(
                 {
@@ -459,6 +454,9 @@ class ModelAdapter:
             system_prompt=(
                 "你是 Synora 的对话路由器。"
                 "只能在 general_chat、schedule_intake、quick_note_intake 之间选择。"
+                "如果用户在闲聊、提问、咨询建议，就选 general_chat。"
+                "如果核心目标是创建可提醒的日程，就选 schedule_intake。"
+                "如果核心目标是保存速记、想法、待办或摘要，就选 quick_note_intake。"
             ),
             user_text=json.dumps(
                 {
@@ -485,13 +483,14 @@ class ModelAdapter:
             operation="extract_schedule",
             system_prompt=(
                 "你是 Synora 的日程抽取助手。"
-                "请从文本和附件中提取一条待确认的日程草稿。"
-                "优先输出开始时间、结束时间、标题、地点、说明、是否全天和重复规则。"
-                "start_at 与 end_at 必须输出带时区偏移的 ISO 8601 时间；"
-                "无法确认时返回 null，并在 missing_fields 中列出 start_at 或 end_at。"
-                "如果只有开始时间而没有结束时间，默认持续 60 分钟。"
-                "parse_confidence 返回 0 到 1。"
-                "evidence_digest 返回 1 到 5 条中文依据。"
+                "请从用户原话、附件证据和参考记忆中提取一条待确认的日程草稿。"
+                "后续更正优先级高于前文冲突信息。"
+                "details 只输出事实摘要，不输出流程话术，不要复述“上一版”“修改为”等表达。"
+                "source_text 不由你生成，后端会回填用户原话历史。"
+                "start_at 和 end_at 必须输出带时区偏移的 ISO 8601 时间；无法确认时返回 null。"
+                "缺失字段只放入 missing_fields，不要猜测。"
+                "歧义只放入 ambiguity_flags。"
+                "evidence_digest 仅输出中文证据点。"
                 f"当前时区：{timezone_name}。参考时间：{reference_time.isoformat()}。"
             ),
             user_text=merged_text,
@@ -512,8 +511,9 @@ class ModelAdapter:
             system_prompt=(
                 "你是 Synora 的速记整理助手。"
                 "请把输入整理成简洁、自然的中文速记内容，并给出 2 到 5 个中文标签。"
-                "必须融合 manual_tags，不要漏掉用户手动指定的标签。"
-                "evidence_digest 返回 1 到 4 条中文依据。"
+                "尽量保留用户原意，不要过度改写，不要扩展不存在的信息。"
+                "必须融合 manual_tags，不要遗漏用户手动指定的标签。"
+                "evidence_digest 只输出中文依据。"
             ),
             user_text=json.dumps(
                 {

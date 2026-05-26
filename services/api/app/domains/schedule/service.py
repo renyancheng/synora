@@ -212,7 +212,14 @@ def detect_conflicts_core(*, db: Session, user_id: int, draft: dict | ScheduleEv
     }
 
 
-def detect_conflicts(db: Session, user_id: int, draft: ScheduleEventDraft, draft_hash: str) -> ConflictCheckResponse:
+def detect_conflicts(
+    db: Session,
+    user_id: int,
+    draft: ScheduleEventDraft,
+    draft_hash: str,
+    *,
+    approval_scope: str | None = None,
+) -> ConflictCheckResponse:
     canonical_hash = build_draft_hash(draft)
     result = detect_conflicts_core(db=db, user_id=user_id, draft=draft)
     approval_payload = {
@@ -227,6 +234,7 @@ def detect_conflicts(db: Session, user_id: int, draft: ScheduleEventDraft, draft
         payload=approval_payload,
         normalized_payload=draft.model_dump(mode="json", by_alias=True),
         evidence_digest=draft.evidence_digest,
+        approval_scope=approval_scope or f"schedule:create:{canonical_hash}",
     )
     return ConflictCheckResponse(
         conflict_items=[ConflictItem.model_validate(item) for item in result["conflict_items"]],
@@ -329,6 +337,7 @@ def preview_schedule_edit(
         payload=approval_payload,
         normalized_payload=draft.model_dump(mode="json", by_alias=True),
         evidence_digest=draft.evidence_digest,
+        approval_scope=f"schedule:update:{schedule_id}",
     )
     return draft, conflict_result, approval, token
 
