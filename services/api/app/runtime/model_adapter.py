@@ -68,11 +68,20 @@ class ModelAdapter:
         self._log_error(error, operation=operation, streaming=False)
         raise error
 
-    def _create_chat_model(self, *, temperature: float, streaming: bool = False) -> ChatOpenAI:
+    def _is_qwen_model(self) -> bool:
+        return "qwen" in self._settings.llm_model.lower()
+
+    def _create_chat_model(
+        self,
+        *,
+        temperature: float,
+        streaming: bool = False,
+        enable_thinking: bool | None = None,
+    ) -> ChatOpenAI:
         self._require_api_key(operation="create_chat_model")
-        extra_body: dict[str, object] = {}
-        if "qwen" in self._settings.llm_model.lower():
-            extra_body["enable_thinking"] = bool(self._settings.llm_enable_thinking)
+        extra_body: dict[str, object] | None = None
+        if self._is_qwen_model() and enable_thinking is not None:
+            extra_body = {"enable_thinking": bool(enable_thinking)}
         return ChatOpenAI(
             model=self._settings.llm_model,
             api_key=self._settings.llm_api_key,
@@ -82,11 +91,11 @@ class ModelAdapter:
             streaming=streaming,
             max_retries=0,
             use_responses_api=False,
-            extra_body=extra_body or None,
+            extra_body=extra_body,
         )
 
     def build_general_chat_agent(self, tools: Sequence[object]):
-        model = self._create_chat_model(temperature=0.35, streaming=True)
+        model = self._create_chat_model(temperature=0.35, streaming=True, enable_thinking=False)
         return create_agent(
             model=model,
             tools=tools,
@@ -130,7 +139,7 @@ class ModelAdapter:
                 if isinstance(text, str):
                     chunks.append(text)
             return "".join(chunks).strip()
-        return str(content or "").strip()
+        return ""
 
     def build_langchain_messages(
         self,
@@ -247,7 +256,7 @@ class ModelAdapter:
     ) -> BaseModel:
         self._require_api_key(operation=operation)
         try:
-            model = self._create_chat_model(temperature=0.1)
+            model = self._create_chat_model(temperature=0.1, enable_thinking=False)
             structured = model.with_structured_output(schema, method="function_calling")
             result = structured.invoke(
                 [
@@ -272,7 +281,7 @@ class ModelAdapter:
     ) -> BaseModel:
         self._require_api_key(operation=operation)
         try:
-            model = self._create_chat_model(temperature=0.1)
+            model = self._create_chat_model(temperature=0.1, enable_thinking=False)
             structured = model.with_structured_output(schema, method="function_calling")
             result = await structured.ainvoke(
                 [
@@ -296,7 +305,10 @@ class ModelAdapter:
     ) -> str:
         self._require_api_key(operation=operation)
         try:
-            model = self._create_chat_model(temperature=0.35)
+            model = self._create_chat_model(
+                temperature=0.35,
+                enable_thinking=self._settings.llm_enable_thinking if self._is_qwen_model() else None,
+            )
             response = model.invoke(
                 [
                     ("system", system_prompt),
@@ -320,7 +332,11 @@ class ModelAdapter:
     ) -> AsyncIterator[str]:
         self._require_api_key(operation=operation)
         try:
-            model = self._create_chat_model(temperature=0.35, streaming=True)
+            model = self._create_chat_model(
+                temperature=0.35,
+                streaming=True,
+                enable_thinking=self._settings.llm_enable_thinking if self._is_qwen_model() else None,
+            )
             stream = model.astream(
                 [
                     ("system", system_prompt),

@@ -20,6 +20,8 @@ def write_user_memory(
     try:
         service = MemoryService()
         entries = service.extract_memory_facts(text=text, summary=summary)
+        if not entries:
+            return 0
         records = service.upsert_memory_records(
             db,
             user_id=user_id,
@@ -30,4 +32,3 @@ def write_user_memory(
         return len(records)
     finally:
         db.close()
-

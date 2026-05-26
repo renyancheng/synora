@@ -120,17 +120,17 @@ class MemoryService:
             return []
 
         lowered = cleaned.lower()
-        memory_type = "profile_fact"
-        title = "用户长期事实"
-        if any(keyword in cleaned for keyword in ("偏好", "喜欢", "习惯", "通常", "总是", "提醒我")):
+        if any(keyword in cleaned for keyword in ("偏好", "喜欢", "习惯", "通常", "总是", "提醒我", "希望", "最好")):
             memory_type = "preference"
             title = "用户偏好"
-        elif any(keyword in cleaned for keyword in ("不要", "避免", "不能", "别在", "限制")):
+        elif any(keyword in cleaned for keyword in ("不要", "避免", "不能", "别在", "限制", "不希望")):
             memory_type = "constraint"
             title = "用户约束"
+        else:
+            return []
 
         if "schedule_saved" in lowered or "quick_note_saved" in lowered:
-            memory_type = "profile_fact"
+            return []
 
         return [{"memory_type": memory_type, "title": title, "content": cleaned, "summary": summary}]
 
@@ -217,6 +217,37 @@ class MemoryService:
             except Exception as exc:  # pragma: no cover
                 logger.warning("memory_vector_delete_failed detail=%s", exc)
         self._refresh_profile_summary(db, user_id=user_id)
+
+    def delete_records_by_source(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        source_kind: str,
+        source_ref_id: str | None,
+    ) -> int:
+        if not source_ref_id:
+            return 0
+        records = db.scalars(
+            select(MemoryRecord).where(
+                MemoryRecord.user_id == user_id,
+                MemoryRecord.source_kind == source_kind,
+                MemoryRecord.source_ref_id == source_ref_id,
+            )
+        ).all()
+        if not records:
+            return 0
+        node_ids = [item.vector_node_id for item in records if item.vector_node_id]
+        for record in records:
+            db.delete(record)
+        db.commit()
+        if self.is_enabled() and node_ids:
+            try:
+                self._get_vector_store().delete_nodes(node_ids=node_ids)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("memory_vector_delete_by_source_failed detail=%s", exc)
+        self._refresh_profile_summary(db, user_id=user_id)
+        return len(records)
 
     def clear_user_memory(self, db: Session, *, user_id: int) -> None:
         records = db.scalars(select(MemoryRecord).where(MemoryRecord.user_id == user_id)).all()

@@ -7,10 +7,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import Base
-from app.domains.conversation.service import apply_action, consume_stream, create_conversation, queue_message
+from app.domains.conversation.service import apply_action, consume_stream, create_conversation, delete_conversation, queue_message, rewind_last_turn, update_conversation_title
 from app.domains.quick_note.service import delete_note
 from app.domains.schedule.service import delete_schedule
-from app.models import Attachment, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
+from app.models import Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
 from app.runtime.model_adapter import ModelAdapter
 from app.schemas.common import EventDateTimeValue
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
@@ -25,6 +25,15 @@ class _FakeGeneralChatAgent:
         yield {
             "event": "on_chain_end",
             "data": {"output": {"messages": [SimpleNamespace(content="好的，我来帮你一起整理。")]}},
+        }
+
+
+class _FakeToolOnlyGeneralChatAgent:
+    async def astream_events(self, _payload, version="v2"):
+        assert version == "v2"
+        yield {
+            "event": "on_chain_end",
+            "data": {"output": {"messages": [object()]}},
         }
 
 
@@ -97,7 +106,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]["event"], "run_completed")
         self.assertEqual(self.db.get(type(thread), thread.id).title, "教学安排")
         self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "好的，我来帮你一起整理。")
-        self.assertGreaterEqual(write_memory_mock.call_count, 1)
+        self.assertEqual(write_memory_mock.call_count, 0)
 
     async def test_stream_returns_run_failed_when_llm_not_configured(self) -> None:
         thread = create_conversation(self.db, self.user.id)
@@ -118,10 +127,46 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.status, "failed")
         self.assertEqual(refreshed.text_content, "")
 
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
+    @patch.object(ModelAdapter, "build_general_chat_agent", return_value=_FakeToolOnlyGeneralChatAgent())
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="测试聊天")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    async def test_general_chat_does_not_leak_langchain_internal_repr(
+        self,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _agent_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="你好"),
+        )
+
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "")
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
     @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
-    async def test_schedule_message_creates_pending_cards(self, _intent_mock, _title_mock, invoke_tool_mock) -> None:
+    async def test_schedule_message_creates_pending_cards(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
         draft = self._draft()
         invoke_tool_mock.side_effect = [
             (
@@ -300,6 +345,196 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(confirm_messages[0].message_type, "result_card")
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_pending_schedule_regenerates_new_revision(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        original = self._draft()
+        revised = original.model_copy(
+            update={
+                "source_text": "改成下周二下午三点在学院会议室开教学例会",
+                "start": EventDateTimeValue(
+                    dateTime=datetime.fromisoformat("2026-05-26T15:00:00+08:00"),
+                    timeZone="Asia/Shanghai",
+                ),
+                "end": EventDateTimeValue(
+                    dateTime=datetime.fromisoformat("2026-05-26T16:00:00+08:00"),
+                    timeZone="Asia/Shanghai",
+                ),
+            }
+        )
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": original.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-1",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["明天下午三点"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token-1",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash-1",
+                    },
+                },
+            ),
+            (
+                SimpleNamespace(content="draft-2"),
+                {
+                    "status": "ok",
+                    "draft": revised.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-2",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["下周二下午三点"],
+                    "parse_confidence": 0.96,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts-2"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token-2",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash-2",
+                    },
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, first_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
+
+        _, _, _, second_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="改成下周二下午三点"),
+        )
+        second_events = [item async for item in consume_stream(self.db, self.user.id, thread.id, second_run.stream_token)]
+
+        self.assertFalse(any("当前还有一项待确认内容" in str(item) for item in second_events))
+        cards = [item["data"]["message"] for item in second_events if item["event"] == "card_snapshot"]
+        self.assertEqual([item["revision"] for item in cards], [2, 2])
+        history = self.db.scalars(
+            select(ConversationMessage)
+            .where(ConversationMessage.conversation_id == thread.id)
+            .order_by(ConversationMessage.id.asc())
+        ).all()
+        old_cards = [item for item in history if item.action_group_id == cards[0]["action_group_id"] and item.revision == 1]
+        self.assertTrue(old_cards)
+        self.assertTrue(all((item.structured_payload_json or {}).get("lifecycle_status") == "superseded" for item in old_cards))
+        self.assertTrue(all((item.structured_payload_json or {}).get("is_actionable") is False for item in old_cards))
+        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
+        self.assertEqual(int(pending.meta_json.get("revision") or 0), 2)
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="实验记录")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
+    async def test_pending_quick_note_regenerates_new_revision(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="note-1"),
+                {
+                    "status": "pending_approval",
+                    "normalized_content": "下周整理论文实验记录",
+                    "preview_tags": ["科研", "待办"],
+                    "attachment_ids": [],
+                    "evidence_digest": ["论文", "实验记录"],
+                    "approval": {
+                        "approval_token": "quick-note-token-1",
+                        "action": "create_quick_note",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "quick-note-hash-1",
+                    },
+                },
+            ),
+            (
+                SimpleNamespace(content="note-2"),
+                {
+                    "status": "pending_approval",
+                    "normalized_content": "下周三整理论文实验记录并补充图表",
+                    "preview_tags": ["科研", "待办", "图表"],
+                    "attachment_ids": [],
+                    "evidence_digest": ["下周三", "图表"],
+                    "approval": {
+                        "approval_token": "quick-note-token-2",
+                        "action": "create_quick_note",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "quick-note-hash-2",
+                    },
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, first_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
+
+        _, _, _, second_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="改成下周三，并补充图表"),
+        )
+        second_events = [item async for item in consume_stream(self.db, self.user.id, thread.id, second_run.stream_token)]
+
+        cards = [item["data"]["message"] for item in second_events if item["event"] == "card_snapshot"]
+        self.assertEqual([item["message_type"] for item in cards], ["quick_note_preview_card"])
+        self.assertEqual(cards[0]["revision"], 2)
+        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
+        self.assertEqual(pending.pending_type, "quick_note")
+        self.assertEqual(int(pending.meta_json.get("revision") or 0), 2)
+        history = self.db.scalars(
+            select(ConversationMessage)
+            .where(ConversationMessage.conversation_id == thread.id)
+            .order_by(ConversationMessage.id.asc())
+        ).all()
+        old_cards = [item for item in history if item.message_type == "quick_note_preview_card" and item.revision == 1]
+        self.assertTrue(old_cards)
+        self.assertTrue(all((item.structured_payload_json or {}).get("lifecycle_status") == "superseded" for item in old_cards))
+
     def test_delete_schedule_cascades_reminders_and_audits(self) -> None:
         schedule = Schedule(
             user_id=self.user.id,
@@ -386,6 +621,58 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(payload["attachment_refs"]), 1)
         self.assertEqual(payload["attachment_refs"][0]["attachment_id"], attachment.id)
         self.assertEqual(payload["attachment_refs"][0]["file_name"], "agenda.pdf")
+
+    def test_update_conversation_title(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        updated = update_conversation_title(self.db, self.user.id, thread.id, "新的标题")
+        self.assertEqual(updated.title, "新的标题")
+
+    def test_delete_conversation_removes_runs_and_messages(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="你好"),
+        )
+        delete_conversation(self.db, self.user.id, thread.id)
+        self.assertIsNone(self.db.get(type(thread), thread.id))
+        self.assertIsNone(self.db.get(type(agent_run), agent_run.id))
+
+    def test_rewind_last_turn_restores_user_payload(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        attachment = Attachment(
+            user_id=self.user.id,
+            file_name="agenda.pdf",
+            content_type="application/pdf",
+            source_type="attachment",
+            object_key="attachments/agenda-rewind.pdf",
+            storage_bucket="synora",
+            size_bytes=2048,
+            status="uploaded",
+        )
+        self.db.add(attachment)
+        self.db.commit()
+        self.db.refresh(attachment)
+
+        _, user_message, assistant_message, _ = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(
+                text_content="帮我处理这个附件",
+                attachment_ids=[attachment.id],
+                selected_tool="schedule",
+            ),
+        )
+        restored_thread, restored_message = rewind_last_turn(self.db, self.user.id, thread.id)
+        self.assertEqual(restored_thread.id, thread.id)
+        self.assertEqual(restored_message.text_content, user_message.text_content)
+        self.assertEqual((restored_message.structured_payload_json or {}).get("selected_tool"), "schedule")
+        refs = list((restored_message.structured_payload_json or {}).get("attachment_refs") or [])
+        self.assertEqual(len(refs), 1)
+        self.assertIsNone(self.db.get(ConversationMessage, user_message.id))
+        self.assertIsNone(self.db.get(ConversationMessage, assistant_message.id))
 
     def test_delete_quick_note_removes_note(self) -> None:
         note = QuickNote(

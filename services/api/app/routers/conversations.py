@@ -10,10 +10,13 @@ from app.domains.conversation.service import (
     apply_action,
     consume_stream,
     create_conversation,
+    delete_conversation,
     get_conversation,
     list_conversations,
     list_messages,
     queue_message,
+    rewind_last_turn,
+    update_conversation_title,
 )
 from app.models import ConversationMessage, ConversationThread, User
 from app.schemas.conversation import (
@@ -21,12 +24,16 @@ from app.schemas.conversation import (
     ConversationActionResponse,
     ConversationCreateRequest,
     ConversationCreateResponse,
+    ConversationDeleteResponse,
     ConversationListResponse,
     ConversationMessageItem,
     ConversationMessagesResponse,
+    ConversationRewindResponse,
     ConversationSendMessageRequest,
     ConversationSendMessageResponse,
     ConversationThreadItem,
+    ConversationUpdateRequest,
+    ConversationUpdateResponse,
 )
 
 router = APIRouter(prefix="/agent/conversations", tags=["conversations"])
@@ -89,6 +96,33 @@ def get_conversation_messages(
         conversation=_thread_item(thread),
         items=[_message_item(item) for item in messages],
     )
+
+
+@router.patch("/{conversation_id}", response_model=ConversationUpdateResponse)
+def rename_conversation(
+    conversation_id: int,
+    payload: ConversationUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ConversationUpdateResponse:
+    try:
+        thread = update_conversation_title(db, current_user.id, conversation_id, payload.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return ConversationUpdateResponse(conversation=_thread_item(thread))
+
+
+@router.delete("/{conversation_id}", response_model=ConversationDeleteResponse)
+def remove_conversation(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ConversationDeleteResponse:
+    try:
+        delete_conversation(db, current_user.id, conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return ConversationDeleteResponse(deleted_conversation_id=conversation_id)
 
 
 @router.post("/{conversation_id}/messages", response_model=ConversationSendMessageResponse)
@@ -164,4 +198,20 @@ def perform_conversation_action(
     return ConversationActionResponse(
         conversation=_thread_item(thread),
         assistant_messages=[_message_item(item) for item in assistant_messages],
+    )
+
+
+@router.post("/{conversation_id}/rewind-last-turn", response_model=ConversationRewindResponse)
+def rewind_conversation_last_turn(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ConversationRewindResponse:
+    try:
+        thread, restored_message = rewind_last_turn(db, current_user.id, conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return ConversationRewindResponse(
+        conversation=_thread_item(thread),
+        restored_message=_message_item(restored_message),
     )

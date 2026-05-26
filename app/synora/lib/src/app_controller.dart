@@ -98,6 +98,15 @@ class AppController extends ChangeNotifier {
   List<ComposerAttachment> get draftAttachments => List<ComposerAttachment>.unmodifiable(activeState.draftAttachments);
   ConversationTool? get draftTool => activeState.draftTool;
 
+  int? get latestUserMessageId {
+    for (final message in activeState.messages.reversed) {
+      if (message.isUser) {
+        return message.id;
+      }
+    }
+    return null;
+  }
+
   ConversationThreadItem? get activeConversation {
     if (isDraftConversation) {
       return null;
@@ -244,6 +253,13 @@ class AppController extends ChangeNotifier {
     );
   }
 
+  bool canEditMessage(ConversationMessageItem message) {
+    if (!message.isUser) {
+      return false;
+    }
+    return latestUserMessageId == message.id;
+  }
+
   Future<void> sendChatMessage() async {
     if (!isAuthenticated) {
       return;
@@ -382,6 +398,69 @@ class AppController extends ChangeNotifier {
       isLoading: false,
       isDraft: false,
       clearLastError: true,
+    );
+    await _refreshCollectionsOnly();
+    notifyListeners();
+  }
+
+  Future<void> renameConversation({
+    required int conversationId,
+    required String title,
+  }) async {
+    final updated = await _apiClient.renameConversation(conversationId: conversationId, title: title);
+    _upsertConversation(updated);
+    notifyListeners();
+  }
+
+  Future<void> deleteConversation(int conversationId) async {
+    await _apiClient.deleteConversation(conversationId);
+    _conversations = _conversations.where((item) => item.id != conversationId).toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _conversationStates.remove(conversationId);
+    if (_activeConversationId == conversationId) {
+      beginDraftConversation(notify: false);
+    }
+    notifyListeners();
+  }
+
+  Future<void> editResendMessage(ConversationMessageItem message) async {
+    if (!canEditMessage(message)) {
+      return;
+    }
+    if (message.status == 'failed') {
+      final messages = List<ConversationMessageItem>.from(activeState.messages)..removeWhere((item) => item.id == message.id);
+      final attachments = message.localAttachments.isNotEmpty
+          ? message.localAttachments.map(ComposerAttachment.local).toList()
+          : message.attachmentRefs.map(ComposerAttachment.remote).toList();
+      _setStateFor(
+        _activeConversationId,
+        activeState.copyWith(
+          messages: messages,
+          draftText: message.textContent ?? '',
+          draftAttachments: attachments,
+          draftTool: message.selectedTool,
+          clearLastError: true,
+        ),
+      );
+      return;
+    }
+    if (isDraftConversation) {
+      refillComposerFromMessage(message);
+      return;
+    }
+    final result = await _apiClient.rewindConversationLastTurn(_activeConversationId);
+    final refreshed = await _apiClient.fetchConversationMessages(_activeConversationId);
+    final restored = result.restoredMessage;
+    final attachments = restored.attachmentRefs.map(ComposerAttachment.remote).toList();
+    _upsertConversation(result.conversation);
+    _conversationStates[_activeConversationId] = (_conversationStates[_activeConversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[])).copyWith(
+      messages: refreshed.$2,
+      draftText: restored.textContent ?? '',
+      draftAttachments: attachments,
+      draftTool: restored.selectedTool,
+      isDraft: false,
+      clearLastError: true,
+      clearStreamStatusLabel: true,
     );
     await _refreshCollectionsOnly();
     notifyListeners();

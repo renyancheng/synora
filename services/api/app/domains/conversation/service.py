@@ -97,6 +97,115 @@ def list_messages(db: Session, user_id: int, conversation_id: int) -> tuple[Conv
     return thread, list(messages)
 
 
+def update_conversation_title(db: Session, user_id: int, conversation_id: int, title: str) -> ConversationThread:
+    thread = get_conversation(db, user_id, conversation_id)
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("对话标题不能为空。")
+    thread.title = normalized[:120]
+    db.commit()
+    db.refresh(thread)
+    return thread
+
+
+def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None:
+    thread = get_conversation(db, user_id, conversation_id)
+    agent_runs = db.scalars(select(AgentRun).where(AgentRun.conversation_id == conversation_id)).all()
+    if agent_runs:
+        run_ids = [item.id for item in agent_runs]
+        audits = db.scalars(select(AgentToolCallAudit).where(AgentToolCallAudit.agent_run_id.in_(run_ids))).all()
+        for audit in audits:
+            db.delete(audit)
+        for run in agent_runs:
+            db.delete(run)
+    db.delete(thread)
+    db.commit()
+
+
+def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[ConversationThread, ConversationMessage]:
+    thread = get_conversation(db, user_id, conversation_id)
+    user_message = db.scalar(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation_id,
+            ConversationMessage.role == "user",
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(1)
+    )
+    if user_message is None:
+        raise ValueError("当前没有可撤回的消息。")
+
+    restored_message = ConversationMessage(
+        id=user_message.id,
+        conversation_id=user_message.conversation_id,
+        role=user_message.role,
+        message_type=user_message.message_type,
+        status=user_message.status,
+        text_content=user_message.text_content,
+        structured_payload_json=dict(user_message.structured_payload_json or {}),
+        action_group_id=user_message.action_group_id,
+        revision=user_message.revision,
+        created_at=user_message.created_at,
+    )
+
+    agent_run = db.scalar(
+        select(AgentRun)
+        .where(
+            AgentRun.conversation_id == conversation_id,
+            AgentRun.user_message_id == user_message.id,
+        )
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        .limit(1)
+    )
+    created_message_ids: list[int] = []
+    assistant_message_id: int | None = None
+    if agent_run is not None:
+        created_message_ids = [int(item) for item in list(agent_run.output_json.get("created_message_ids") or []) if isinstance(item, int)]
+        assistant_message_id = agent_run.assistant_message_id
+        audits = db.scalars(select(AgentToolCallAudit).where(AgentToolCallAudit.agent_run_id == agent_run.id)).all()
+        for audit in audits:
+            db.delete(audit)
+        db.delete(agent_run)
+
+    for message_id in created_message_ids:
+        message = db.get(ConversationMessage, message_id)
+        if message is not None:
+            db.delete(message)
+
+    if assistant_message_id is not None:
+        assistant_message = db.get(ConversationMessage, assistant_message_id)
+        if assistant_message is not None:
+            db.delete(assistant_message)
+
+    pending = _get_pending_state(db, conversation_id)
+    if pending is not None:
+        db.delete(pending)
+
+    memory_service = MemoryService()
+
+    db.delete(user_message)
+    db.commit()
+
+    memory_service.delete_records_by_source(
+        db,
+        user_id=user_id,
+        source_kind="conversation_message",
+        source_ref_id=str(user_message.id),
+    )
+
+    latest_message = db.scalar(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(1)
+    )
+    thread.last_message_at = latest_message.created_at if latest_message is not None else thread.created_at
+    db.commit()
+    db.refresh(thread)
+    return thread, restored_message
+
+
 def queue_message(
     db: Session,
     user_id: int,
@@ -208,25 +317,27 @@ async def consume_stream(
 
     try:
         pending = _get_pending_state(db, conversation_id)
-        if pending:
-            final_text = "当前还有一项待确认内容。请先处理当前卡片，或先取消后再继续新的话题。"
-            async for item in _emit_text_stream(db, assistant_message, final_text):
-                yield item
-            _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
-            yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
-            yield {"event": "run_completed", "data": {"stream_id": stream_id}}
-            return
-
         model = ModelAdapter()
-        intent = await model.aroute_conversation_intent(
-            {
-                "text_content": text_content,
-                "attachment_ids": attachment_ids,
-                "selected_tool": selected_tool,
-                "context": context,
-            },
-            attachment_parts=attachment_parts,
-        )
+        if pending:
+            intent, text_content, attachment_ids, attachment_parts, context = _prepare_pending_regeneration(
+                db,
+                user_id=user_id,
+                pending=pending,
+                text_content=text_content,
+                attachment_ids=attachment_ids,
+                attachment_parts=attachment_parts,
+                context=context,
+            )
+        else:
+            intent = await model.aroute_conversation_intent(
+                {
+                    "text_content": text_content,
+                    "attachment_ids": attachment_ids,
+                    "selected_tool": selected_tool,
+                    "context": context,
+                },
+                attachment_parts=attachment_parts,
+            )
         agent_run.workflow = intent
         agent_run.output_json = {
             **dict(agent_run.output_json or {}),
@@ -261,6 +372,8 @@ async def consume_stream(
                 text_content=text_content,
                 attachment_ids=attachment_ids,
                 context=context,
+                action_group_id=context.get("pending_action_group_id") or None,
+                revision=int(context.get("pending_revision") or 1),
             )
         else:
             final_text, created_ids, requires_approval, tool_events = await _process_quick_note_intake(
@@ -271,6 +384,8 @@ async def consume_stream(
                 text_content=text_content,
                 attachment_ids=attachment_ids,
                 context=context,
+                action_group_id=context.get("pending_action_group_id") or None,
+                revision=int(context.get("pending_revision") or 1),
             )
 
         for tool_event in tool_events:
@@ -447,7 +562,7 @@ async def _stream_general_chat(
 
         if event_name == "on_chain_end":
             tail = _extract_langchain_final_text(event)
-            if tail and not final_text:
+            if tail:
                 final_text = tail
                 assistant_message.text_content = final_text
                 db.commit()
@@ -465,8 +580,11 @@ async def _process_schedule_intake(
     text_content: str,
     attachment_ids: list[int],
     context: dict[str, str],
+    action_group_id: str | None = None,
+    revision: int = 1,
 ) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
     tool_events: list[dict[str, Any]] = []
+    supersede_action_group_id = context.get("supersede_action_group_id")
     parse_audit = _start_tool_audit(
         db,
         agent_run_id=agent_run.id,
@@ -504,13 +622,13 @@ async def _process_schedule_intake(
     evidence_digest = list(parsed.get("evidence_digest") or draft.evidence_digest)
     parse_confidence = float(parsed.get("parse_confidence") or draft.parse_confidence)
 
-    action_group_id = mint_token()
-    revision = 1
+    action_group_id = action_group_id or mint_token()
     created_ids: list[int] = []
     approval_required: dict[str, Any] | None = None
 
     if missing_fields:
         final_text = "我已经整理出一条日程草稿，但还缺少关键信息。请先补充后再确认。"
+        _mark_action_group_status(db, supersede_action_group_id, lifecycle_status="superseded", is_actionable=False)
         _upsert_pending_state(
             db,
             thread.id,
@@ -586,6 +704,7 @@ async def _process_schedule_intake(
 
     approval = dict(conflict_result.get("approval") or {})
     final_text = "我已经整理好日程草稿，并完成冲突检查。确认后我会正式创建日程和提醒。"
+    _mark_action_group_status(db, supersede_action_group_id, lifecycle_status="superseded", is_actionable=False)
     _upsert_pending_state(
         db,
         thread.id,
@@ -669,8 +788,11 @@ async def _process_quick_note_intake(
     text_content: str,
     attachment_ids: list[int],
     context: dict[str, str],
+    action_group_id: str | None = None,
+    revision: int = 1,
 ) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
     tool_events: list[dict[str, Any]] = []
+    supersede_action_group_id = context.get("supersede_action_group_id")
     tool_audit = _start_tool_audit(
         db,
         agent_run_id=agent_run.id,
@@ -709,8 +831,8 @@ async def _process_quick_note_intake(
     evidence_digest = list(parsed.get("evidence_digest") or [])
 
     final_text = "我已经整理好这条速记，确认后就会正式保存。"
-    action_group_id = mint_token()
-    revision = 1
+    action_group_id = action_group_id or mint_token()
+    _mark_action_group_status(db, supersede_action_group_id, lifecycle_status="superseded", is_actionable=False)
     _upsert_pending_state(
         db,
         thread.id,
@@ -1083,14 +1205,16 @@ def _finalize_run(
     agent_run.completed_at = datetime.now(timezone.utc)
     db.commit()
     user_message = db.get(ConversationMessage, agent_run.user_message_id) if agent_run.user_message_id else None
-    if user_message and (user_message.text_content or "").strip():
-        _enqueue_memory_writeback(
-            user_id=agent_run.user_id,
-            source_kind="conversation_message",
-            source_ref_id=str(user_message.id),
-            text=(user_message.text_content or "").strip(),
-            summary=assistant_text[:200],
-        )
+    if user_message and (user_message.text_content or "").strip() and agent_run.workflow == "general_chat":
+        memory_entries = MemoryService().extract_memory_facts(text=(user_message.text_content or "").strip(), summary=assistant_text[:200])
+        if memory_entries:
+            _enqueue_memory_writeback(
+                user_id=agent_run.user_id,
+                source_kind="conversation_message",
+                source_ref_id=str(user_message.id),
+                text=(user_message.text_content or "").strip(),
+                summary=assistant_text[:200],
+            )
 
 
 def _mark_action_group_status(
@@ -1300,6 +1424,59 @@ def _extract_langchain_final_text(event: dict[str, Any]) -> str:
         messages = output.get("messages")
         if isinstance(messages, list) and messages:
             return ModelAdapter._extract_message_text(messages[-1])
+        if isinstance(output.get("output"), str):
+            return str(output.get("output")).strip()
+        return ""
     if isinstance(output, list) and output:
         return ModelAdapter._extract_message_text(output[-1])
     return ModelAdapter._extract_message_text(output)
+
+
+def _prepare_pending_regeneration(
+    db: Session,
+    *,
+    user_id: int,
+    pending: ConversationPendingState,
+    text_content: str,
+    attachment_ids: list[int],
+    attachment_parts: list[dict[str, Any]],
+    context: dict[str, str],
+) -> tuple[str, str, list[int], list[dict[str, Any]], dict[str, str]]:
+    previous_attachment_ids = list(pending.attachment_ids_json or [])
+    merged_attachment_ids: list[int] = []
+    for attachment_id in previous_attachment_ids + list(attachment_ids):
+        if attachment_id not in merged_attachment_ids:
+            merged_attachment_ids.append(attachment_id)
+
+    if merged_attachment_ids != list(attachment_ids):
+        assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=merged_attachment_ids)
+        attachment_parts = [part for asset in assets for part in asset.parts]
+
+    previous_payload = dict(pending.payload_json or {})
+    previous_context = dict(context)
+    if pending.pending_type == "schedule":
+        previous_draft = ScheduleEventDraft.model_validate(previous_payload)
+        base_text_parts = [
+            "你正在修改同一条待确认日程。",
+            f"上一版日程：{previous_draft.source_text or previous_draft.title}",
+            f"本轮补充或修正：{text_content}",
+        ]
+        merged_text = "\n".join(part for part in base_text_parts if part.strip())
+        previous_context["pending_regeneration"] = "schedule"
+        previous_context["pending_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
+        previous_context["pending_revision"] = str(int(pending.meta_json.get("revision") or 1) + 1)
+        previous_context["supersede_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
+        return "schedule_intake", merged_text, merged_attachment_ids, attachment_parts, previous_context
+
+    previous_content = str(previous_payload.get("content") or "").strip()
+    base_text_parts = [
+        "你正在修改同一条待确认速记。",
+        f"上一版速记：{previous_content}",
+        f"本轮补充或修正：{text_content}",
+    ]
+    merged_text = "\n".join(part for part in base_text_parts if part.strip())
+    previous_context["pending_regeneration"] = "quick_note"
+    previous_context["pending_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
+    previous_context["pending_revision"] = str(int(pending.meta_json.get("revision") or 1) + 1)
+    previous_context["supersede_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
+    return "quick_note_intake", merged_text, merged_attachment_ids, attachment_parts, previous_context

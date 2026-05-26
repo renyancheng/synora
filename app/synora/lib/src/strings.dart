@@ -50,6 +50,10 @@
   static const copied = '已复制。';
   static const copiedToComposer = '已回填到输入框，可继续编辑后发送。';
   static const nothingToCopy = '这条消息没有可复制的文字。';
+  static const conversationMenu = '对话菜单';
+  static const renameConversation = '重命名对话';
+  static const renameConversationHint = '输入新的对话标题';
+  static const deleteConversation = '删除此对话';
   static const sourceTextField = '原始描述';
   static const todayLabel = '今天';
   static const monthViewTitle = '月历';
@@ -318,5 +322,13 @@
         final trimmed = message?.trim() ?? '';
         return trimmed.isEmpty ? '这次处理没有完成，请稍后再试。' : trimmed;
     }
+  }
+
+  static String deleteConversationMessage(String title) {
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) {
+      return '删除后将无法恢复这段对话历史，确定继续吗？';
+    }
+    return '确定删除“$trimmed”这段对话吗？删除后无法恢复。';
   }
 }

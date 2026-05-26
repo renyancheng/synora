@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     llm_api_key: str = ""
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    llm_model: str = "qwen3.6-plus"
+    llm_model: str = "qwen3.6-flash"
     llm_enable_thinking: bool = False
     llm_timeout_seconds: int = 90
     llm_max_pdf_pages: int = 6

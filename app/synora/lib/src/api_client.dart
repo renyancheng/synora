@@ -123,6 +123,27 @@ class ApiClient {
     return (conversation, items);
   }
 
+  Future<ConversationThreadItem> renameConversation({
+    required int conversationId,
+    required String title,
+  }) async {
+    final json = await _sendJson(
+      'PATCH',
+      '/agent/conversations/$conversationId',
+      body: <String, dynamic>{'title': title},
+    );
+    return ConversationThreadItem.fromJson((json as Map<String, dynamic>)['conversation'] as Map<String, dynamic>);
+  }
+
+  Future<void> deleteConversation(int conversationId) async {
+    await _sendJson('DELETE', '/agent/conversations/$conversationId');
+  }
+
+  Future<ConversationRewindResult> rewindConversationLastTurn(int conversationId) async {
+    final json = await _sendJson('POST', '/agent/conversations/$conversationId/rewind-last-turn');
+    return ConversationRewindResult.fromJson(json as Map<String, dynamic>);
+  }
+
   Future<ConversationSendAcceptedResult> sendConversationMessage({
     required int conversationId,
     required String textContent,

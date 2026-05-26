@@ -644,6 +644,22 @@ class ConversationThreadItem {
       lastMessageAt: DateTime.parse(json['last_message_at'] as String),
     );
   }
+
+  ConversationThreadItem copyWith({
+    int? id,
+    String? title,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    DateTime? lastMessageAt,
+  }) {
+    return ConversationThreadItem(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      lastMessageAt: lastMessageAt ?? this.lastMessageAt,
+    );
+  }
 }
 
 class ConversationMessageItem {
@@ -784,6 +800,23 @@ class ConversationActionResult {
       assistantMessages: (json['assistant_messages'] as List<dynamic>)
           .map((item) => ConversationMessageItem.fromJson(item as Map<String, dynamic>))
           .toList(),
+    );
+  }
+}
+
+class ConversationRewindResult {
+  ConversationRewindResult({
+    required this.conversation,
+    required this.restoredMessage,
+  });
+
+  final ConversationThreadItem conversation;
+  final ConversationMessageItem restoredMessage;
+
+  factory ConversationRewindResult.fromJson(Map<String, dynamic> json) {
+    return ConversationRewindResult(
+      conversation: ConversationThreadItem.fromJson(json['conversation'] as Map<String, dynamic>),
+      restoredMessage: ConversationMessageItem.fromJson(json['restored_message'] as Map<String, dynamic>),
     );
   }
 }

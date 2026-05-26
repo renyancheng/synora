@@ -48,6 +48,15 @@ class ConversationMessagesResponse(BaseModel):
     items: list[ConversationMessageItem]
 
 
+class ConversationUpdateRequest(BaseModel):
+    title: str
+
+
+class ConversationUpdateResponse(BaseModel):
+    status: str = "ok"
+    conversation: ConversationThreadItem
+
+
 class ConversationSendMessageRequest(BaseModel):
     text_content: str | None = None
     attachment_ids: list[int] = Field(default_factory=list)
@@ -72,3 +81,14 @@ class ConversationActionResponse(BaseModel):
     status: str = "ok"
     conversation: ConversationThreadItem
     assistant_messages: list[ConversationMessageItem]
+
+
+class ConversationDeleteResponse(BaseModel):
+    status: str = "ok"
+    deleted_conversation_id: int
+
+
+class ConversationRewindResponse(BaseModel):
+    status: str = "ok"
+    conversation: ConversationThreadItem
+    restored_message: ConversationMessageItem

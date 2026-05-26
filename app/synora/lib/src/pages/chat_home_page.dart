@@ -129,6 +129,109 @@ class _ChatHomePageState extends State<ChatHomePage> {
     }
   }
 
+  Future<void> _showConversationMenu(ConversationThreadItem item) async {
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text(AppStrings.renameConversation),
+              onTap: () => Navigator.of(context).pop('rename'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text(AppStrings.deleteConversation),
+              onTap: () => Navigator.of(context).pop('delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || result == null) {
+      return;
+    }
+    if (result == 'rename') {
+      await _renameConversation(item);
+      return;
+    }
+    if (result == 'delete') {
+      await _deleteConversation(item);
+    }
+  }
+
+  Future<void> _renameConversation(ConversationThreadItem item) async {
+    final controller = TextEditingController(text: item.title);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text(AppStrings.renameConversation),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(item.title, style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              decoration: const InputDecoration(hintText: AppStrings.renameConversationHint),
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text(AppStrings.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text(AppStrings.confirmSave),
+          ),
+        ],
+      ),
+    );
+    if (result == null) {
+      return;
+    }
+    try {
+      await widget.controller.renameConversation(conversationId: item.id, title: result);
+    } catch (error) {
+      _showMessage(error.toString());
+    }
+  }
+
+  Future<void> _deleteConversation(ConversationThreadItem item) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text(AppStrings.deleteConversation),
+        content: Text(AppStrings.deleteConversationMessage(item.title)),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text(AppStrings.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text(AppStrings.delete),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    try {
+      await widget.controller.deleteConversation(item.id);
+      _syncComposerFromController(force: true);
+    } catch (error) {
+      _showMessage(error.toString());
+    }
+  }
+
   Future<void> _openComposerMenu() async {
     final result = await showModalBottomSheet<_ComposerMenuResult>(
       context: context,
@@ -202,9 +305,19 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 
   void _editResendMessage(ConversationMessageItem message) {
-    widget.controller.refillComposerFromMessage(message);
-    _syncComposerFromController(force: true);
-    _showMessage(AppStrings.copiedToComposer);
+    widget.controller.editResendMessage(message).then((_) {
+      if (!mounted) {
+        return;
+      }
+      _syncComposerFromController(force: true);
+      _showMessage(AppStrings.copiedToComposer);
+      _scrollToBottom();
+    }).catchError((error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage(error.toString());
+    });
   }
 
   void _showVoiceComingSoon() {
@@ -346,6 +459,11 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
+                                trailing: IconButton(
+                                  icon: const Icon(Icons.more_horiz),
+                                  tooltip: AppStrings.conversationMenu,
+                                  onPressed: () => _showConversationMenu(item),
+                                ),
                                 onTap: () => _selectConversation(item.id),
                               );
                             },
@@ -372,7 +490,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                 message: message,
                                 onAction: _performAction,
                                 onCopy: message.isUser ? () => _copyMessage(message) : null,
-                                onEditResend: message.isUser ? () => _editResendMessage(message) : null,
+                                onEditResend: widget.controller.canEditMessage(message) ? () => _editResendMessage(message) : null,
                               );
                             },
                           ),
@@ -423,57 +541,74 @@ class _ChatHomePageState extends State<ChatHomePage> {
                         const SizedBox(height: 10),
                       ],
                       Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
+                        crossAxisAlignment: CrossAxisAlignment.center,
                         children: <Widget>[
-                          IconButton(
-                            onPressed: sending ? null : _openComposerMenu,
-                            tooltip: AppStrings.attach,
-                            icon: const Icon(Icons.add_circle_outline),
+                          SizedBox(
+                            width: 48,
+                            height: 48,
+                            child: IconButton(
+                              onPressed: sending ? null : _openComposerMenu,
+                              tooltip: AppStrings.attach,
+                              icon: const Icon(Icons.add_circle_outline),
+                            ),
                           ),
+                          const SizedBox(width: 4),
                           Expanded(
-                            child: TextField(
-                              controller: _textController,
-                              maxLines: 1,
-                              textInputAction: TextInputAction.send,
-                              onSubmitted: (_) {
-                                if (!sending && hasInput) {
-                                  _sendMessage();
-                                }
-                              },
-                              decoration: const InputDecoration(
-                                hintText: AppStrings.composerHint,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(minHeight: 60),
+                              child: Align(
+                                alignment: Alignment.center,
+                                child: TextField(
+                                  controller: _textController,
+                                  minLines: 1,
+                                  maxLines: 4,
+                                  textAlignVertical: TextAlignVertical.center,
+                                  textInputAction: TextInputAction.newline,
+                                  decoration: const InputDecoration(
+                                    hintText: AppStrings.composerHint,
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 220),
-                            transitionBuilder: (child, animation) => ScaleTransition(scale: animation, child: child),
-                            child: sending
-                                ? Container(
-                                    key: const ValueKey('loading'),
-                                    width: 44,
-                                    height: 44,
-                                    alignment: Alignment.center,
-                                    child: const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(strokeWidth: 2.2),
-                                    ),
-                                  )
-                                : hasInput
-                                    ? IconButton.filled(
-                                        key: const ValueKey('send'),
-                                        onPressed: _sendMessage,
-                                        icon: const Icon(Icons.send_rounded),
-                                        tooltip: AppStrings.send,
+                          const SizedBox(width: 4),
+                          SizedBox(
+                            width: 48,
+                            height: 48,
+                            child: Center(
+                              child: AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 220),
+                                transitionBuilder: (child, animation) => ScaleTransition(scale: animation, child: child),
+                                child: sending
+                                    ? const SizedBox(
+                                        key: ValueKey('loading'),
+                                        width: 48,
+                                        height: 48,
+                                        child: Center(
+                                          child: SizedBox(
+                                            width: 20,
+                                            height: 20,
+                                            child: CircularProgressIndicator(strokeWidth: 2.2),
+                                          ),
+                                        ),
                                       )
-                                    : IconButton(
-                                        key: const ValueKey('voice'),
-                                        onPressed: _showVoiceComingSoon,
-                                        icon: const Icon(Icons.mic_none),
-                                        tooltip: AppStrings.voice,
-                                      ),
+                                    : hasInput
+                                        ? IconButton.filled(
+                                            key: const ValueKey('send'),
+                                            onPressed: _sendMessage,
+                                            icon: const Icon(Icons.send_rounded, size: 20),
+                                            tooltip: AppStrings.send,
+                                          )
+                                        : IconButton(
+                                            key: const ValueKey('voice'),
+                                            onPressed: _showVoiceComingSoon,
+                                            icon: const Icon(Icons.mic_none),
+                                            tooltip: AppStrings.voice,
+                                          ),
+                              ),
+                            ),
                           ),
                         ],
                       ),
@@ -679,73 +814,88 @@ class _ConversationMessageView extends StatelessWidget {
     if (message.messageType == 'text') {
       return Align(
         alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: GestureDetector(
-          onLongPress: isUser ? () => _showMessageMenu(context) : null,
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 580),
-            margin: const EdgeInsets.only(bottom: 12),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: isUser ? const Color(0xFF176B5A) : Colors.white,
-              borderRadius: BorderRadius.circular(18),
-              boxShadow: const <BoxShadow>[
-                BoxShadow(
-                  color: Color(0x14000000),
-                  blurRadius: 12,
-                  offset: Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                if ((message.textContent ?? '').trim().isNotEmpty)
-                  Text(
-                    message.textContent ?? '',
-                    style: TextStyle(color: isUser ? Colors.white : const Color(0xFF173C35), height: 1.55),
-                  ),
-                if (message.isUser && (message.attachmentRefs.isNotEmpty || message.localAttachments.isNotEmpty || message.selectedTool != null)) ...<Widget>[
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: <Widget>[
-                      ...message.attachmentRefs.map(
-                        (item) => _MetaChip(
-                          label: item.fileName,
-                          icon: Icons.attach_file,
-                          dark: isUser,
-                        ),
-                      ),
-                      ...message.localAttachments.map(
-                        (item) => _MetaChip(
-                          label: item.fileName,
-                          icon: Icons.attach_file,
-                          dark: isUser,
-                        ),
-                      ),
-                      if (message.selectedTool != null)
-                        _MetaChip(
-                          label: AppStrings.toolLabel(message.selectedTool!.apiValue),
-                          icon: message.selectedTool == ConversationTool.schedule ? Icons.calendar_month_outlined : Icons.sticky_note_2_outlined,
-                          dark: isUser,
-                        ),
-                    ],
+        child: Column(
+          crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: <Widget>[
+            Container(
+              constraints: const BoxConstraints(maxWidth: 580),
+              margin: const EdgeInsets.only(bottom: 6),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: isUser ? const Color(0xFF176B5A) : Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                boxShadow: const <BoxShadow>[
+                  BoxShadow(
+                    color: Color(0x14000000),
+                    blurRadius: 12,
+                    offset: Offset(0, 4),
                   ),
                 ],
-                if (_statusLabel(message.status) != null) ...<Widget>[
-                  const SizedBox(height: 8),
-                  Text(
-                    _statusLabel(message.status)!,
-                    style: TextStyle(
-                      color: isUser ? Colors.white70 : const Color(0xFF617B74),
-                      fontSize: 12,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  if ((message.textContent ?? '').trim().isNotEmpty)
+                    Text(
+                      message.textContent ?? '',
+                      style: TextStyle(color: isUser ? Colors.white : const Color(0xFF173C35), height: 1.55),
                     ),
-                  ),
+                  if (message.isUser && (message.attachmentRefs.isNotEmpty || message.localAttachments.isNotEmpty || message.selectedTool != null)) ...<Widget>[
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: <Widget>[
+                        ...message.attachmentRefs.map((item) => _MetaChip(label: item.fileName, icon: Icons.attach_file, dark: isUser)),
+                        ...message.localAttachments.map((item) => _MetaChip(label: item.fileName, icon: Icons.attach_file, dark: isUser)),
+                        if (message.selectedTool != null)
+                          _MetaChip(
+                            label: AppStrings.toolLabel(message.selectedTool!.apiValue),
+                            icon: message.selectedTool == ConversationTool.schedule ? Icons.calendar_month_outlined : Icons.sticky_note_2_outlined,
+                            dark: isUser,
+                          ),
+                      ],
+                    ),
+                  ],
+                  if (_statusLabel(message.status) != null) ...<Widget>[
+                    const SizedBox(height: 8),
+                    Text(
+                      _statusLabel(message.status)!,
+                      style: TextStyle(
+                        color: isUser ? Colors.white70 : const Color(0xFF617B74),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
-          ),
+            if (message.isUser && (onCopy != null || onEditResend != null))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12, right: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    if (onCopy != null)
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 18,
+                        tooltip: AppStrings.copy,
+                        onPressed: onCopy,
+                        icon: const Icon(Icons.content_copy_outlined),
+                      ),
+                    if (onEditResend != null)
+                      IconButton(
+                        visualDensity: VisualDensity.compact,
+                        iconSize: 18,
+                        tooltip: AppStrings.editResend,
+                        onPressed: onEditResend,
+                        icon: const Icon(Icons.edit_outlined),
+                      ),
+                  ],
+                ),
+              ),
+          ],
         ),
       );
     }
@@ -761,34 +911,6 @@ class _ConversationMessageView extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  Future<void> _showMessageMenu(BuildContext context) async {
-    final result = await showModalBottomSheet<String>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            ListTile(
-              leading: const Icon(Icons.content_copy_outlined),
-              title: const Text(AppStrings.copy),
-              onTap: () => Navigator.of(context).pop('copy'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.edit_outlined),
-              title: const Text(AppStrings.editResend),
-              onTap: () => Navigator.of(context).pop('edit'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (result == 'copy') {
-      onCopy?.call();
-    } else if (result == 'edit') {
-      onEditResend?.call();
-    }
   }
 
   String? _statusLabel(String status) {

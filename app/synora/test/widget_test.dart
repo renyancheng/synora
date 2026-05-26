@@ -6,6 +6,7 @@ import 'package:synora/src/app_controller.dart';
 import 'package:synora/src/models.dart';
 import 'package:synora/src/strings.dart';
 
+
 class FakeApiClient extends ApiClient {
   FakeApiClient() : super(baseUrl: 'http://localhost:8000');
 
@@ -75,17 +76,44 @@ class FakeApiClient extends ApiClient {
       <ConversationMessageItem>[
         ConversationMessageItem(
           id: 1,
+          role: 'user',
+          messageType: 'text',
+          status: 'completed',
+          textContent: '帮我看一下明天下午安排',
+          structuredPayload: const <String, dynamic>{},
+          createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
+        ),
+        ConversationMessageItem(
+          id: 2,
           role: 'assistant',
           messageType: 'text',
           status: 'completed',
-          textContent: '你好，我在这里。',
+          textContent: '可以，你继续说。',
           structuredPayload: const <String, dynamic>{},
-          createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
+          createdAt: DateTime.parse('2026-05-23T10:00:01Z'),
         ),
       ],
     );
   }
+
+  @override
+  Future<ConversationThreadItem> renameConversation({
+    required int conversationId,
+    required String title,
+  }) async {
+    return ConversationThreadItem(
+      id: conversationId,
+      title: title,
+      createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
+      updatedAt: DateTime.parse('2026-05-23T10:00:00Z'),
+      lastMessageAt: DateTime.parse('2026-05-23T10:00:00Z'),
+    );
+  }
+
+  @override
+  Future<void> deleteConversation(int conversationId) async {}
 }
+
 
 void main() {
   testWidgets('默认显示中文登录页', (tester) async {
@@ -125,7 +153,7 @@ void main() {
     expect(find.byIcon(Icons.mic_none), findsOneWidget);
     expect(find.byIcon(Icons.send_rounded), findsNothing);
 
-    await tester.enterText(find.byType(TextField), '明天下午三点开会');
+    await tester.enterText(find.byType(TextField).first, '明天下午三点开会');
     await tester.pumpAndSettle();
 
     expect(find.byIcon(Icons.send_rounded), findsOneWidget);
@@ -150,5 +178,21 @@ void main() {
 
     expect(find.text(AppStrings.memorySummary), findsOneWidget);
     expect(find.text('提醒偏好'), findsOneWidget);
+  });
+
+  testWidgets('历史会话只允许最后一条用户消息显示编辑按钮', (tester) async {
+    final controller = AppController(apiClient: FakeApiClient());
+    await controller.login('han.teacher@example.com', 'SynoraMVP123!');
+
+    await tester.pumpWidget(SynoraApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('打开侧边栏'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('教学安排'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip(AppStrings.copy), findsOneWidget);
+    expect(find.byTooltip(AppStrings.editResend), findsOneWidget);
   });
 }

@@ -88,7 +88,17 @@ class MemoryServiceTests(unittest.TestCase):
         self.assertEqual(context.summary, "韩老师通常希望提前一天提醒，晚上不要安排会议。")
         self.assertEqual(context.items, [])
 
+    def test_extract_memory_facts_ignores_generic_chat(self) -> None:
+        service = MemoryService()
+        self.assertEqual(service.extract_memory_facts(text="你好，今天天气怎么样"), [])
+
+    def test_extract_memory_facts_keeps_preference_and_constraint(self) -> None:
+        service = MemoryService()
+        preference = service.extract_memory_facts(text="我通常希望提前一天提醒我")
+        constraint = service.extract_memory_facts(text="晚上十点后不要再安排会议")
+        self.assertEqual(preference[0]["memory_type"], "preference")
+        self.assertEqual(constraint[0]["memory_type"], "constraint")
+
 
 if __name__ == "__main__":
     unittest.main()
-
