@@ -478,6 +478,39 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<ScheduleEditPreviewResult> previewScheduleEdit({
+    required int scheduleId,
+    required ScheduleDraft draft,
+  }) {
+    return _apiClient.previewScheduleEdit(scheduleId: scheduleId, draft: draft);
+  }
+
+  Future<ScheduleItem> confirmScheduleEdit({
+    required int scheduleId,
+    required String approvalToken,
+    required ScheduleDraft draft,
+  }) async {
+    final result = await _apiClient.confirmScheduleEdit(
+      scheduleId: scheduleId,
+      approvalToken: approvalToken,
+      normalizedDraft: draft,
+    );
+    await _refreshCollectionsOnly();
+    notifyListeners();
+    return result.schedule;
+  }
+
+  Future<QuickNoteItem> updateQuickNote({
+    required int noteId,
+    required String content,
+    required List<String> tags,
+  }) async {
+    final item = await _apiClient.updateQuickNote(noteId: noteId, content: content, tags: tags);
+    await _refreshCollectionsOnly();
+    notifyListeners();
+    return item;
+  }
+
   Future<void> refreshNotifications() async {
     _notifications = await _apiClient.fetchNotifications();
     notifyListeners();

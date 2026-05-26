@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.domains.memory.service import MemoryService
 from app.models import NotificationAudit, ReminderJob, Schedule
 from app.runtime.approval_gate import ApprovalGate
 from app.runtime.model_adapter import ModelAdapter
@@ -147,7 +148,9 @@ def create_schedule_draft(db: Session, user_id: int, payload: ScheduleDraftInput
 
 
 def detect_conflicts_core(*, db: Session, user_id: int, draft: dict | ScheduleEventDraft, draft_hash: str | None = None) -> dict:
-    del draft_hash
+    excluded_schedule_id = None
+    if draft_hash and draft_hash.isdigit():
+        excluded_schedule_id = int(draft_hash)
     schedule_draft = draft if isinstance(draft, ScheduleEventDraft) else ScheduleEventDraft.model_validate(draft)
     draft_start, draft_end = _event_bounds(schedule_draft)
     draft_occurrences = _expand_occurrences(
@@ -161,6 +164,8 @@ def detect_conflicts_core(*, db: Session, user_id: int, draft: dict | ScheduleEv
     suggestions: list[ConflictSuggestion] = []
 
     for row in rows:
+        if excluded_schedule_id is not None and row.id == excluded_schedule_id:
+            continue
         row_occurrences = _expand_occurrences(
             start_at=row.start_at,
             end_at=row.end_at,
@@ -291,6 +296,118 @@ def create_schedule_after_approval(db: Session, user_id: int, approval_token: st
     result = create_schedule_after_approval_core(db=db, user_id=user_id, approval_token=approval_token, draft=draft)
     schedule = db.get(Schedule, result["schedule_id"])
     jobs = db.scalars(select(ReminderJob).where(ReminderJob.schedule_id == schedule.id).order_by(ReminderJob.id.asc())).all()
+    return schedule, list(jobs)
+
+
+def preview_schedule_edit(
+    db: Session,
+    user_id: int,
+    *,
+    schedule_id: int,
+    draft: ScheduleEventDraft,
+) -> tuple[ScheduleEventDraft, dict, object, str]:
+    schedule = db.scalar(select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user_id))
+    if not schedule:
+        raise ValueError("日程不存在或已被删除。")
+    canonical_hash = build_draft_hash(draft)
+    conflict_result = detect_conflicts_core(
+        db=db,
+        user_id=user_id,
+        draft=draft,
+        draft_hash=str(schedule_id),
+    )
+    approval_payload = {
+        "schedule_id": schedule_id,
+        "draft": draft.model_dump(mode="json", by_alias=True),
+        "conflicts": conflict_result["conflict_items"],
+    }
+    approval, token = ApprovalGate().create(
+        db,
+        user_id=user_id,
+        action="update_schedule",
+        draft_hash=canonical_hash,
+        payload=approval_payload,
+        normalized_payload=draft.model_dump(mode="json", by_alias=True),
+        evidence_digest=draft.evidence_digest,
+    )
+    return draft, conflict_result, approval, token
+
+
+def confirm_schedule_edit(
+    db: Session,
+    user_id: int,
+    *,
+    schedule_id: int,
+    approval_token: str,
+    draft: ScheduleEventDraft,
+) -> tuple[Schedule, list[ReminderJob]]:
+    schedule = db.scalar(select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user_id))
+    if not schedule:
+        raise ValueError("日程不存在或已被删除。")
+
+    draft_hash = build_draft_hash(draft)
+    ApprovalGate().consume(
+        db,
+        user_id=user_id,
+        action="update_schedule",
+        approval_token=approval_token,
+        draft_hash=draft_hash,
+    )
+
+    start_at, end_at = _event_bounds(draft)
+    reminder_offsets = ModelAdapter.compute_reminder_offsets(start_at)
+    primary_reminder_at = min(start_at + timedelta(minutes=offset) for offset in reminder_offsets)
+
+    schedule.title = draft.title
+    schedule.location = draft.location
+    schedule.details = draft.details
+    schedule.source_text = draft.source_text
+    schedule.start_at = start_at
+    schedule.end_at = end_at
+    schedule.time_zone = draft.start.time_zone
+    schedule.is_all_day = draft.is_all_day
+    schedule.recurrence_rules_json = list(draft.recurrence)
+    schedule.reminder_offsets_minutes_json = reminder_offsets
+    schedule.source_attachment_ids = list(draft.source_attachment_ids)
+    schedule.parse_confidence = draft.parse_confidence
+    schedule.scheduled_at = start_at
+    schedule.duration_minutes = _event_duration_minutes(draft)
+    schedule.reminder_at = primary_reminder_at
+    schedule.status = "scheduled"
+
+    reminder_job_ids = db.scalars(select(ReminderJob.id).where(ReminderJob.schedule_id == schedule.id)).all()
+    if reminder_job_ids:
+        db.execute(delete(NotificationAudit).where(NotificationAudit.reminder_job_id.in_(list(reminder_job_ids))))
+    db.execute(delete(ReminderJob).where(ReminderJob.schedule_id == schedule.id))
+    db.commit()
+    db.refresh(schedule)
+
+    jobs = _build_reminder_jobs(schedule)
+    db.add_all(jobs)
+    db.commit()
+    for job in jobs:
+        db.refresh(job)
+
+    MemoryService().delete_records_by_source(
+        db,
+        user_id=user_id,
+        source_kind="confirmed_schedule",
+        source_ref_id=str(schedule.id),
+    )
+    MemoryService().upsert_memory_records(
+        db,
+        user_id=user_id,
+        source_kind="confirmed_schedule",
+        source_ref_id=str(schedule.id),
+        entries=[
+            {
+                "memory_type": "confirmed_schedule",
+                "title": schedule.title,
+                "content": f"{schedule.title} {schedule.details}".strip(),
+                "summary": "已确认日程",
+            }
+        ],
+    )
     return schedule, list(jobs)
 
 

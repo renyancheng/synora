@@ -3,6 +3,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.domains.memory.service import MemoryService
 from app.models import QuickNote
 from app.runtime.approval_gate import ApprovalGate
 from app.runtime.tool_impls import prepare_quick_note_draft
@@ -87,6 +88,50 @@ def save_note_after_approval(
 
 def list_notes(db: Session, user_id: int) -> list[QuickNote]:
     return db.scalars(select(QuickNote).where(QuickNote.user_id == user_id).order_by(QuickNote.created_at.desc())).all()
+
+
+def update_note(
+    db: Session,
+    user_id: int,
+    *,
+    note_id: int,
+    content: str,
+    tags: list[str],
+) -> QuickNote:
+    note = db.scalar(select(QuickNote).where(QuickNote.id == note_id, QuickNote.user_id == user_id))
+    if not note:
+        raise ValueError("速记不存在或已被删除。")
+    normalized_content = content.strip()
+    if not normalized_content:
+        raise ValueError("速记内容不能为空。")
+    normalized_tags = [tag.strip() for tag in tags if tag.strip()]
+    note.content = normalized_content
+    note.tags_csv = ",".join(normalized_tags)
+    note.topic_tags_json = normalized_tags
+    note.source_text = normalized_content
+    db.commit()
+    db.refresh(note)
+    MemoryService().delete_records_by_source(
+        db,
+        user_id=user_id,
+        source_kind="confirmed_quick_note",
+        source_ref_id=str(note.id),
+    )
+    MemoryService().upsert_memory_records(
+        db,
+        user_id=user_id,
+        source_kind="confirmed_quick_note",
+        source_ref_id=str(note.id),
+        entries=[
+            {
+                "memory_type": "confirmed_quick_note",
+                "title": normalized_content[:60] or "已确认速记",
+                "content": normalized_content,
+                "summary": "已确认速记",
+            }
+        ],
+    )
+    return note
 
 
 def delete_note(db: Session, user_id: int, note_id: int) -> None:

@@ -84,6 +84,31 @@ class ScheduleConfirmResponse(BaseModel):
     reminder_jobs: list[ReminderJobInfo]
 
 
+class ScheduleEditPreviewRequest(BaseModel):
+    draft: ScheduleEventDraft
+
+
+class ScheduleEditPreviewResponse(BaseModel):
+    status: str = "ok"
+    schedule_id: int
+    draft: ScheduleEventDraft
+    conflict_items: list[ConflictItem]
+    suggestions: list[ConflictSuggestion]
+    risk_level: str
+    approval: ApprovalInfo
+
+
+class ScheduleEditConfirmRequest(BaseModel):
+    approval_token: str
+    normalized_draft: ScheduleEventDraft
+
+
+class ScheduleEditConfirmResponse(BaseModel):
+    status: str = "ok"
+    schedule: "ScheduleItem"
+    reminder_jobs: list[ReminderJobInfo]
+
+
 class ScheduleItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -96,6 +121,7 @@ class ScheduleItem(BaseModel):
     start: EventDateTimeValue
     end: EventDateTimeValue
     recurrence: list[str] = Field(default_factory=list)
+    source_attachment_ids: list[int] = Field(default_factory=list)
     reminder_offsets_minutes: list[int]
     status: str
     created_at: datetime

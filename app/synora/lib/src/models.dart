@@ -4,6 +4,7 @@ enum ConversationTool { schedule, quickNote }
 
 enum VoiceInputState {
   idle,
+  awaitingDownloadConfirmation,
   downloading,
   initializing,
   listening,
@@ -415,6 +416,58 @@ class ScheduleConfirmResult {
   }
 }
 
+class ScheduleEditPreviewResult {
+  ScheduleEditPreviewResult({
+    required this.scheduleId,
+    required this.draft,
+    required this.conflictItems,
+    required this.suggestions,
+    required this.riskLevel,
+    required this.approval,
+  });
+
+  final int scheduleId;
+  final ScheduleDraft draft;
+  final List<ConflictItem> conflictItems;
+  final List<ConflictSuggestion> suggestions;
+  final String riskLevel;
+  final ApprovalInfo approval;
+
+  factory ScheduleEditPreviewResult.fromJson(Map<String, dynamic> json) {
+    return ScheduleEditPreviewResult(
+      scheduleId: json['schedule_id'] as int,
+      draft: ScheduleDraft.fromJson(json['draft'] as Map<String, dynamic>),
+      conflictItems: (json['conflict_items'] as List<dynamic>? ?? <dynamic>[])
+          .map((item) => ConflictItem.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      suggestions: (json['suggestions'] as List<dynamic>? ?? <dynamic>[])
+          .map((item) => ConflictSuggestion.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      riskLevel: json['risk_level'] as String? ?? 'low',
+      approval: ApprovalInfo.fromJson(json['approval'] as Map<String, dynamic>),
+    );
+  }
+}
+
+class ScheduleEditConfirmResult {
+  ScheduleEditConfirmResult({
+    required this.schedule,
+    required this.reminderJobs,
+  });
+
+  final ScheduleItem schedule;
+  final List<ReminderJobInfo> reminderJobs;
+
+  factory ScheduleEditConfirmResult.fromJson(Map<String, dynamic> json) {
+    return ScheduleEditConfirmResult(
+      schedule: ScheduleItem.fromJson(json['schedule'] as Map<String, dynamic>),
+      reminderJobs: (json['reminder_jobs'] as List<dynamic>? ?? <dynamic>[])
+          .map((item) => ReminderJobInfo.fromJson(item as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+}
+
 class ScheduleItem {
   ScheduleItem({
     required this.id,
@@ -425,6 +478,7 @@ class ScheduleItem {
     required this.start,
     required this.end,
     required this.recurrence,
+    required this.sourceAttachmentIds,
     required this.reminderOffsetsMinutes,
     required this.status,
     required this.createdAt,
@@ -441,6 +495,7 @@ class ScheduleItem {
   final EventDateTimeValue start;
   final EventDateTimeValue end;
   final List<String> recurrence;
+  final List<int> sourceAttachmentIds;
   final List<int> reminderOffsetsMinutes;
   final String status;
   final DateTime createdAt;
@@ -457,10 +512,45 @@ class ScheduleItem {
       start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
       end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
       recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
       reminderOffsetsMinutes: (json['reminder_offsets_minutes'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
       status: json['status'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
       parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
+    );
+  }
+
+  ScheduleItem copyWith({
+    int? id,
+    String? title,
+    String? location,
+    String? details,
+    String? sourceText,
+    bool? isAllDay,
+    EventDateTimeValue? start,
+    EventDateTimeValue? end,
+    List<String>? recurrence,
+    List<int>? sourceAttachmentIds,
+    List<int>? reminderOffsetsMinutes,
+    String? status,
+    DateTime? createdAt,
+    double? parseConfidence,
+  }) {
+    return ScheduleItem(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      location: location ?? this.location,
+      details: details ?? this.details,
+      sourceText: sourceText ?? this.sourceText,
+      isAllDay: isAllDay ?? this.isAllDay,
+      start: start ?? this.start,
+      end: end ?? this.end,
+      recurrence: recurrence ?? this.recurrence,
+      sourceAttachmentIds: sourceAttachmentIds ?? this.sourceAttachmentIds,
+      reminderOffsetsMinutes: reminderOffsetsMinutes ?? this.reminderOffsetsMinutes,
+      status: status ?? this.status,
+      createdAt: createdAt ?? this.createdAt,
+      parseConfidence: parseConfidence ?? this.parseConfidence,
     );
   }
 }

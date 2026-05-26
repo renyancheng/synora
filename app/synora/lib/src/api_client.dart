@@ -222,8 +222,49 @@ class ApiClient {
     await _sendJson('DELETE', '/schedule/$scheduleId');
   }
 
+  Future<ScheduleEditPreviewResult> previewScheduleEdit({
+    required int scheduleId,
+    required ScheduleDraft draft,
+  }) async {
+    final json = await _sendJson(
+      'POST',
+      '/schedule/$scheduleId/edits/preview',
+      body: <String, dynamic>{'draft': draft.toJson()},
+    );
+    return ScheduleEditPreviewResult.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<ScheduleEditConfirmResult> confirmScheduleEdit({
+    required int scheduleId,
+    required String approvalToken,
+    required ScheduleDraft normalizedDraft,
+  }) async {
+    final json = await _sendJson(
+      'POST',
+      '/schedule/$scheduleId/edits/confirm',
+      body: <String, dynamic>{
+        'approval_token': approvalToken,
+        'normalized_draft': normalizedDraft.toJson(),
+      },
+    );
+    return ScheduleEditConfirmResult.fromJson(json as Map<String, dynamic>);
+  }
+
   Future<void> deleteQuickNote(int noteId) async {
     await _sendJson('DELETE', '/quick-notes/$noteId');
+  }
+
+  Future<QuickNoteItem> updateQuickNote({
+    required int noteId,
+    required String content,
+    required List<String> tags,
+  }) async {
+    final json = await _sendJson(
+      'PATCH',
+      '/quick-notes/$noteId',
+      body: <String, dynamic>{'content': content, 'tags': tags},
+    );
+    return QuickNoteItem.fromJson(json as Map<String, dynamic>);
   }
 
   Future<dynamic> _sendJson(

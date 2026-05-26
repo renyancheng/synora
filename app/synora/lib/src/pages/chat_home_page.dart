@@ -1,4 +1,6 @@
-﻿import 'package:flutter/material.dart';
+﻿import 'dart:async';
+
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_controller.dart';
@@ -7,6 +9,7 @@ import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
 import '../voice_input_service.dart';
+import 'event_date_time_field.dart';
 import 'quick_note_list_page.dart';
 import 'schedule_list_page.dart';
 import 'settings_page.dart';
@@ -41,6 +44,8 @@ class _ChatHomePageState extends State<ChatHomePage> {
 
   String? get _voiceStatusLabel {
     switch (_voiceState) {
+      case VoiceInputState.awaitingDownloadConfirmation:
+        return null;
       case VoiceInputState.downloading:
         if (_voiceDownloadProgress != null) {
           final percent = (_voiceDownloadProgress! * 100).clamp(0, 100).toStringAsFixed(0);
@@ -383,16 +388,94 @@ class _ChatHomePageState extends State<ChatHomePage> {
 
   Future<void> _startVoiceInput() async {
     try {
+      final hasModel = await _voiceInputService.hasModel();
+      if (!mounted) {
+        return;
+      }
+      if (!hasModel) {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text(AppStrings.voiceDownloadConfirmTitle),
+            content: const Text(AppStrings.voiceDownloadConfirmMessage),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text(AppStrings.cancel),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text(AppStrings.voiceDownloadAction),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true) {
+          return;
+        }
+      }
       _setVoiceState(VoiceInputState.downloading, progress: 0);
+      if (!hasModel && mounted) {
+        unawaited(_showDownloadProgressDialog());
+      }
       await _voiceInputService.ensureReady(
         onDownloadProgress: (value) => _setVoiceState(VoiceInputState.downloading, progress: value),
       );
+      if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
       _setVoiceState(VoiceInputState.initializing, clearProgress: true);
       await _voiceInputService.startListening();
       _setVoiceState(VoiceInputState.listening, clearProgress: true);
     } catch (error) {
+      if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
       _setVoiceFailure(error);
     }
+  }
+
+  Future<void> _showDownloadProgressDialog() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text(AppStrings.voiceDownloadConfirmTitle),
+          content: StatefulBuilder(
+            builder: (context, setDialogState) {
+              Future<void>.delayed(const Duration(milliseconds: 180), () {
+                if (context.mounted) {
+                  setDialogState(() {});
+                }
+              });
+              final progress = _voiceDownloadProgress;
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(progress == null ? AppStrings.voiceDownloading : '${AppStrings.voiceDownloading} ${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%'),
+                  const SizedBox(height: 16),
+                  LinearProgressIndicator(value: progress),
+                ],
+              );
+            },
+          ),
+          actions: <Widget>[
+            FilledButton.tonal(
+              onPressed: () async {
+                await _voiceInputService.cancelModelDownload();
+                if (context.mounted) {
+                  Navigator.of(context).pop();
+                }
+              },
+              child: const Text(AppStrings.voiceDownloadCancelAction),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _stopVoiceInput() async {
@@ -1130,10 +1213,10 @@ class _ScheduleDraftCard extends StatefulWidget {
 
 class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
   late final TextEditingController _titleController;
-  late final TextEditingController _startController;
-  late final TextEditingController _endController;
   late final TextEditingController _locationController;
   late final TextEditingController _detailsController;
+  late DateTime? _startValue;
+  late DateTime? _endValue;
   bool _busy = false;
 
   Map<String, dynamic> get _payload => widget.message.structuredPayload;
@@ -1147,35 +1230,21 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
     _detailsController = TextEditingController(text: _draft['details'] as String? ?? '');
     final start = _draft['start'] as Map<String, dynamic>?;
     final end = _draft['end'] as Map<String, dynamic>?;
-    _startController = TextEditingController(
-      text: start == null ? '' : formatDateTime(DateTime.tryParse(start['dateTime'] as String? ?? '')),
-    );
-    _endController = TextEditingController(
-      text: end == null ? '' : formatDateTime(DateTime.tryParse(end['dateTime'] as String? ?? '')),
-    );
+    _startValue = start == null ? null : DateTime.tryParse(start['dateTime'] as String? ?? '')?.toLocal();
+    _endValue = end == null ? null : DateTime.tryParse(end['dateTime'] as String? ?? '')?.toLocal();
   }
 
   @override
   void dispose() {
     _titleController.dispose();
-    _startController.dispose();
-    _endController.dispose();
     _locationController.dispose();
     _detailsController.dispose();
     super.dispose();
   }
 
   Future<void> _submitMissingFields() async {
-    final parsedStart = _startController.text.trim().isEmpty ? null : parseEditableDateTime(_startController.text.trim());
-    final parsedEnd = _endController.text.trim().isEmpty ? null : parseEditableDateTime(_endController.text.trim());
-    if (_startController.text.trim().isNotEmpty && parsedStart == null) {
-      _showTimeError();
-      return;
-    }
-    if (_endController.text.trim().isNotEmpty && parsedEnd == null) {
-      _showTimeError();
-      return;
-    }
+    final parsedStart = _startValue;
+    final parsedEnd = _endValue;
     setState(() => _busy = true);
     try {
       await widget.onAction(
@@ -1217,12 +1286,6 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
     }
   }
 
-  void _showTimeError() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text(AppStrings.timeFormatHint)),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final missingFields = (_payload['missing_fields'] as List<dynamic>? ?? <dynamic>[]).cast<String>();
@@ -1247,16 +1310,37 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
             decoration: const InputDecoration(labelText: AppStrings.titleField),
           ),
           const SizedBox(height: 12),
-          TextField(
-            controller: _startController,
+          EventDateTimeField(
+            label: AppStrings.startField,
+            value: _startValue,
+            isAllDay: false,
             enabled: isEditing && !_busy,
-            decoration: const InputDecoration(labelText: AppStrings.startField),
+            onChanged: (value) {
+              if (value == null) {
+                return;
+              }
+              setState(() {
+                _startValue = value;
+                if (_endValue == null || !_endValue!.isAfter(value)) {
+                  _endValue = value.add(const Duration(hours: 1));
+                }
+              });
+            },
           ),
           const SizedBox(height: 12),
-          TextField(
-            controller: _endController,
+          EventDateTimeField(
+            label: AppStrings.endField,
+            value: _endValue,
+            isAllDay: false,
             enabled: isEditing && !_busy,
-            decoration: const InputDecoration(labelText: AppStrings.endField),
+            onChanged: (value) {
+              if (value == null) {
+                return;
+              }
+              setState(() {
+                _endValue = value.isAfter(_startValue ?? value) ? value : (_startValue ?? value).add(const Duration(hours: 1));
+              });
+            },
           ),
           const SizedBox(height: 12),
           TextField(

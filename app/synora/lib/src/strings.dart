@@ -36,6 +36,10 @@
   static const streaming = '生成中…';
   static const sendFailed = '发送失败';
   static const voiceComingSoon = '语音输入首版仅支持 Android。';
+  static const voiceDownloadConfirmTitle = '下载语音模型';
+  static const voiceDownloadConfirmMessage = '首次使用语音输入需要下载本地语音模型，下载完成后才可开始识别。是否继续？';
+  static const voiceDownloadAction = '下载';
+  static const voiceDownloadCancelAction = '取消下载';
   static const voiceDownloading = '正在下载语音模型…';
   static const voiceInitializing = '正在准备语音识别…';
   static const voiceListening = '正在聆听…';
@@ -45,6 +49,7 @@
   static const voiceEmptyResult = '没有识别到清晰的语音内容，请再试一次。';
   static const voicePermissionDenied = '未获得麦克风权限，请先开启后再试。';
   static const voiceModelDownloadFailed = '语音模型下载失败，请检查网络后重试。';
+  static const voiceModelDownloadCancelled = '已取消语音模型下载。';
   static const voiceInitializationFailed = '语音识别初始化失败，请稍后重试。';
   static const voiceUnsupportedDevice = '当前设备暂不支持这组录音参数。';
   static const voiceCancelled = '已取消语音输入。';
@@ -118,6 +123,13 @@
   static const submitMissingFields = '提交补充信息';
   static const cancelPendingAction = '取消';
   static const saveSuccess = '保存成功。';
+  static const saveChanges = '保存';
+  static const edit = '编辑';
+  static const editSchedule = '编辑日程';
+  static const editQuickNote = '编辑速记';
+  static const titleRequired = '请输入标题。';
+  static const endBeforeStart = '结束时间不能早于开始时间。';
+  static const quickNoteContentRequired = '请输入速记内容。';
 
   static const scheduleListTitle = '我的日程';
   static const quickNoteListTitle = '我的速记';
@@ -145,6 +157,8 @@
         return voicePermissionDenied;
       case 'download_failed':
         return voiceModelDownloadFailed;
+      case 'download_cancelled':
+        return voiceModelDownloadCancelled;
       case 'init_failed':
         return voiceInitializationFailed;
       case 'unsupported_device':

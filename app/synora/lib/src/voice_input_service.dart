@@ -26,14 +26,13 @@ class VoiceInputResult {
 }
 
 class VoiceInputService {
-  VoiceInputService({http.Client? httpClient}) : _httpClient = httpClient ?? http.Client();
+  VoiceInputService({http.Client? httpClient});
 
   static const String _modelVersion = 'sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20';
   static const String _downloadUrl =
       'https://gh-proxy.org/https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20.tar.bz2';
   static const int _sampleRate = 16000;
 
-  final http.Client _httpClient;
   final AudioRecorder _audioRecorder = AudioRecorder();
 
   sherpa_onnx.OnlineRecognizer? _recognizer;
@@ -41,8 +40,17 @@ class VoiceInputService {
   StreamSubscription<Uint8List>? _audioSubscription;
   String _lastText = '';
   bool _initialized = false;
+  bool _downloadCancelled = false;
+  http.Client? _downloadClient;
 
   Future<bool> get isSupported async => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<bool> hasModel() async {
+    final root = await getApplicationSupportDirectory();
+    final modelsRoot = Directory(path.join(root.path, 'asr_models'));
+    final modelDir = Directory(path.join(modelsRoot.path, _modelVersion));
+    return _isModelReady(modelDir);
+  }
 
   Future<void> ensureReady({ValueChanged<double>? onDownloadProgress}) async {
     if (!await isSupported) {
@@ -71,6 +79,11 @@ class VoiceInputService {
     } catch (_) {
       throw VoiceInputException('init_failed', '语音识别初始化失败，请稍后重试。');
     }
+  }
+
+  Future<void> cancelModelDownload() async {
+    _downloadCancelled = true;
+    _downloadClient?.close();
   }
 
   Future<void> startListening() async {
@@ -134,6 +147,7 @@ class VoiceInputService {
 
   Future<void> dispose() async {
     await cancelListening();
+    _downloadClient?.close();
     _audioRecorder.dispose();
     _recognizer?.free();
   }
@@ -181,8 +195,10 @@ class VoiceInputService {
     }
     await modelsRoot.create(recursive: true);
     final archiveFile = File(path.join(modelsRoot.path, '$_modelVersion.tar.bz2'));
+    _downloadCancelled = false;
+    _downloadClient = http.Client();
     try {
-      final response = await _httpClient.send(http.Request('GET', Uri.parse(_downloadUrl)));
+      final response = await _downloadClient!.send(http.Request('GET', Uri.parse(_downloadUrl)));
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw VoiceInputException('download_failed', '语音模型下载失败，请检查网络后重试。');
       }
@@ -190,6 +206,10 @@ class VoiceInputService {
       final total = response.contentLength ?? 0;
       var received = 0;
       await for (final chunk in response.stream) {
+        if (_downloadCancelled) {
+          await sink.close();
+          throw VoiceInputException('download_cancelled', '已取消语音模型下载。');
+        }
         sink.add(chunk);
         received += chunk.length;
         if (total > 0 && onDownloadProgress != null) {
@@ -197,10 +217,16 @@ class VoiceInputService {
         }
       }
       await sink.close();
+      if (_downloadCancelled) {
+        throw VoiceInputException('download_cancelled', '已取消语音模型下载。');
+      }
       final compressed = await archiveFile.readAsBytes();
       final tarBytes = BZip2Decoder().decodeBytes(compressed);
       final archive = TarDecoder().decodeBytes(tarBytes);
       for (final file in archive.files) {
+        if (_downloadCancelled) {
+          throw VoiceInputException('download_cancelled', '已取消语音模型下载。');
+        }
         final outputPath = path.join(modelsRoot.path, file.name);
         if (file.isFile) {
           final out = File(outputPath);
@@ -214,14 +240,23 @@ class VoiceInputService {
         throw VoiceInputException('download_failed', '语音模型下载失败，请检查网络后重试。');
       }
       return modelDir;
-    } catch (error) {
-      if (error is VoiceInputException) {
-        rethrow;
+    } on VoiceInputException {
+      rethrow;
+    } catch (_) {
+      if (_downloadCancelled) {
+        throw VoiceInputException('download_cancelled', '已取消语音模型下载。');
       }
       throw VoiceInputException('download_failed', '语音模型下载失败，请检查网络后重试。');
     } finally {
+      _downloadClient?.close();
+      _downloadClient = null;
       if (await archiveFile.exists()) {
         await archiveFile.delete();
+      }
+      if (_downloadCancelled && await modelDir.exists()) {
+        try {
+          await modelDir.delete(recursive: true);
+        } catch (_) {}
       }
     }
   }

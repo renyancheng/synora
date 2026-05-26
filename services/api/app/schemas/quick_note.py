@@ -36,6 +36,11 @@ class QuickNoteSavedResponse(BaseModel):
     topic_tags: list[str]
 
 
+class QuickNoteUpdateRequest(BaseModel):
+    content: str
+    tags: list[str] = Field(default_factory=list)
+
+
 class QuickNoteItem(BaseModel):
     id: int
     content: str

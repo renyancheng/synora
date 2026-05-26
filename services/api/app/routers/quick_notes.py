@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies import get_current_user
-from app.domains.quick_note.service import create_quick_note_draft, delete_note, list_notes, save_note_after_approval
+from app.domains.quick_note.service import create_quick_note_draft, delete_note, list_notes, save_note_after_approval, update_note
 from app.models import User
 from app.runtime.errors import LLMServiceError
 from app.schemas.common import ApiEnvelope
@@ -13,6 +13,7 @@ from app.schemas.quick_note import (
     QuickNoteDraftResponse,
     QuickNoteItem,
     QuickNoteSavedResponse,
+    QuickNoteUpdateRequest,
 )
 
 router = APIRouter(prefix="/quick-notes", tags=["quick_notes"])
@@ -82,6 +83,26 @@ def get_quick_notes(
         )
         for row in rows
     ]
+
+
+@router.patch("/{note_id}", response_model=QuickNoteItem)
+def patch_quick_note(
+    note_id: int,
+    payload: QuickNoteUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> QuickNoteItem:
+    try:
+        row = update_note(db, current_user.id, note_id=note_id, content=payload.content, tags=payload.tags)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return QuickNoteItem(
+        id=row.id,
+        content=row.content,
+        tags=[tag for tag in row.tags_csv.split(",") if tag],
+        created_at=row.created_at,
+        source_attachment_ids=list(row.source_attachment_ids or []),
+    )
 
 
 @router.delete("/{note_id}", response_model=ApiEnvelope)

@@ -4,6 +4,7 @@ import '../app_controller.dart';
 import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
+import 'schedule_detail_page.dart';
 
 class ScheduleListPage extends StatefulWidget {
   const ScheduleListPage({super.key, required this.controller});
@@ -26,84 +27,15 @@ class _ScheduleListPageState extends State<ScheduleListPage> {
     _selectedDay = DateTime(now.year, now.month, now.day);
   }
 
-  Future<void> _showDetails(BuildContext context, ScheduleItem item) async {
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(item.title),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text('${AppStrings.startField}：${formatEventRange(start: item.start, end: item.end, isAllDay: item.isAllDay)}'),
-              const SizedBox(height: 8),
-              if (item.location != null && item.location!.trim().isNotEmpty) ...<Widget>[
-                Text('${AppStrings.locationField}：${item.location}'),
-                const SizedBox(height: 8),
-              ],
-              Text('${AppStrings.reminderField}：${formatReminderOffsets(item.reminderOffsetsMinutes)}'),
-              const SizedBox(height: 8),
-              Text('${AppStrings.recurrenceField}：${formatRecurrence(item.recurrence)}'),
-              const SizedBox(height: 8),
-              Text('${AppStrings.timeZoneField}：${item.start.timeZone}'),
-              const SizedBox(height: 8),
-              Text('${AppStrings.parseConfidenceField}：${(item.parseConfidence * 100).toStringAsFixed(0)}%'),
-              const SizedBox(height: 8),
-              Text('${AppStrings.sourceTextField}：${item.sourceText.trim().isEmpty ? AppStrings.noContent : item.sourceText}'),
-              const SizedBox(height: 8),
-              Text('${AppStrings.detailsField}：${item.details.trim().isEmpty ? AppStrings.noContent : item.details}'),
-            ],
-          ),
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text(AppStrings.confirmAction),
-          ),
-        ],
+  Future<void> _openDetails(ScheduleItem item) async {
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => ScheduleDetailPage(controller: widget.controller, item: item),
       ),
     );
-  }
-
-  Future<void> _showDeleteMenu(BuildContext context, ScheduleItem item) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      builder: (sheetContext) => SafeArea(
-        child: ListTile(
-          leading: const Icon(Icons.delete_outline),
-          title: const Text(AppStrings.delete),
-          onTap: () async {
-            Navigator.of(sheetContext).pop();
-            final confirmed = await showDialog<bool>(
-              context: context,
-              builder: (context) => AlertDialog(
-                title: const Text(AppStrings.deleteScheduleTitle),
-                content: const Text(AppStrings.deleteScheduleMessage),
-                actions: <Widget>[
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text(AppStrings.cancel),
-                  ),
-                  FilledButton(
-                    onPressed: () => Navigator.of(context).pop(true),
-                    child: const Text(AppStrings.delete),
-                  ),
-                ],
-              ),
-            );
-            if (confirmed == true) {
-              await widget.controller.deleteScheduleItem(item.id);
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text(AppStrings.deleteDone)),
-                );
-              }
-            }
-          },
-        ),
-      ),
-    );
+    if (changed == true && mounted) {
+      setState(() {});
+    }
   }
 
   @override
@@ -186,8 +118,7 @@ class _ScheduleListPageState extends State<ScheduleListPage> {
                         '${formatRecurrence(item.recurrence)}',
                       ),
                       isThreeLine: true,
-                      onTap: () => _showDetails(context, item),
-                      onLongPress: () => _showDeleteMenu(context, item),
+                      onTap: () => _openDetails(item),
                     ),
                   ),
                 ),
@@ -244,57 +175,52 @@ class _MonthCalendar extends StatelessWidget {
               )
               .toList(),
         ),
+        const SizedBox(height: 4),
         GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
+          itemCount: totalCells,
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 7,
-            childAspectRatio: 1,
+            childAspectRatio: 1.05,
           ),
-          itemCount: totalCells,
           itemBuilder: (context, index) {
             final dayNumber = index - startOffset + 1;
-            if (dayNumber <= 0 || dayNumber > daysInMonth) {
+            if (dayNumber < 1 || dayNumber > daysInMonth) {
               return const SizedBox.shrink();
             }
             final day = DateTime(visibleMonth.year, visibleMonth.month, dayNumber);
-            final isSelected = isSameDay(day, selectedDay);
-            final isToday = isSameDay(day, DateTime.now());
-            final hasSchedule = scheduleDays.contains(day);
-
-            return InkWell(
-              borderRadius: BorderRadius.circular(14),
-              onTap: () => onDaySelected(day),
-              child: Container(
-                margin: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: isSelected ? const Color(0xFF176B5A) : (isToday ? const Color(0xFFEAF5F1) : Colors.transparent),
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: <Widget>[
-                    Text(
-                      '$dayNumber',
-                      style: TextStyle(
-                        color: isSelected ? Colors.white : const Color(0xFF173C35),
-                        fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    AnimatedOpacity(
-                      opacity: hasSchedule ? 1 : 0,
-                      duration: const Duration(milliseconds: 160),
-                      child: Container(
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          color: isSelected ? Colors.white : const Color(0xFF176B5A),
-                          shape: BoxShape.circle,
+            final normalizedDay = DateTime(day.year, day.month, day.day);
+            final selected = isSameDay(day, selectedDay);
+            final hasSchedule = scheduleDays.contains(normalizedDay);
+            return Padding(
+              padding: const EdgeInsets.all(4),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(14),
+                onTap: () => onDaySelected(day),
+                child: Ink(
+                  decoration: BoxDecoration(
+                    color: selected ? Theme.of(context).colorScheme.primaryContainer : null,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: <Widget>[
+                      Text('$dayNumber'),
+                      if (hasSchedule)
+                        Positioned(
+                          bottom: 8,
+                          child: Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: Theme.of(context).colorScheme.primary,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             );
