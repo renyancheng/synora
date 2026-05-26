@@ -2,6 +2,15 @@
 
 enum ConversationTool { schedule, quickNote }
 
+enum VoiceInputState {
+  idle,
+  downloading,
+  initializing,
+  listening,
+  processing,
+  failed,
+}
+
 extension ConversationToolX on ConversationTool {
   String get apiValue {
     switch (this) {

@@ -1,11 +1,10 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synora/src/api_client.dart';
 import 'package:synora/src/app.dart';
 import 'package:synora/src/app_controller.dart';
 import 'package:synora/src/models.dart';
 import 'package:synora/src/strings.dart';
-
 
 class FakeApiClient extends ApiClient {
   FakeApiClient() : super(baseUrl: 'http://localhost:8000');
@@ -97,10 +96,7 @@ class FakeApiClient extends ApiClient {
   }
 
   @override
-  Future<ConversationThreadItem> renameConversation({
-    required int conversationId,
-    required String title,
-  }) async {
+  Future<ConversationThreadItem> renameConversation({required int conversationId, required String title}) async {
     return ConversationThreadItem(
       id: conversationId,
       title: title,
@@ -113,7 +109,6 @@ class FakeApiClient extends ApiClient {
   @override
   Future<void> deleteConversation(int conversationId) async {}
 }
-
 
 void main() {
   testWidgets('默认显示中文登录页', (tester) async {
@@ -194,5 +189,22 @@ void main() {
 
     expect(find.byTooltip(AppStrings.copy), findsOneWidget);
     expect(find.byTooltip(AppStrings.editResend), findsOneWidget);
+  });
+
+  testWidgets('点击会话菜单使用 context menu 而不是底部菜单', (tester) async {
+    final controller = AppController(apiClient: FakeApiClient());
+    await controller.login('han.teacher@example.com', 'SynoraMVP123!');
+
+    await tester.pumpWidget(SynoraApp(controller: controller));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('打开侧边栏'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip(AppStrings.conversationMenu));
+    await tester.pumpAndSettle();
+
+    expect(find.text(AppStrings.renameConversation), findsOneWidget);
+    expect(find.text(AppStrings.deleteConversation), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
   });
 }

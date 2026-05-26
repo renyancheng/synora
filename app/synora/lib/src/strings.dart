@@ -35,7 +35,19 @@
   static const sending = '发送中';
   static const streaming = '生成中…';
   static const sendFailed = '发送失败';
-  static const voiceComingSoon = '语音即将支持。';
+  static const voiceComingSoon = '语音输入首版仅支持 Android。';
+  static const voiceDownloading = '正在下载语音模型…';
+  static const voiceInitializing = '正在准备语音识别…';
+  static const voiceListening = '正在聆听…';
+  static const voiceProcessing = '正在整理语音内容…';
+  static const voiceStop = '结束录音';
+  static const voiceStart = '开始录音';
+  static const voiceEmptyResult = '没有识别到清晰的语音内容，请再试一次。';
+  static const voicePermissionDenied = '未获得麦克风权限，请先开启后再试。';
+  static const voiceModelDownloadFailed = '语音模型下载失败，请检查网络后重试。';
+  static const voiceInitializationFailed = '语音识别初始化失败，请稍后重试。';
+  static const voiceUnsupportedDevice = '当前设备暂不支持这组录音参数。';
+  static const voiceCancelled = '已取消语音输入。';
   static const loading = '处理中…';
   static const loadFailed = '加载失败，请稍后重试。';
   static const emptyConversation = '开始一段新对话吧。';
@@ -126,6 +138,23 @@
   static const retryCountField = '重试次数';
   static const generatingInterrupted = '生成中断';
   static const timeFormatHint = '请输入如 2026-05-23 14:30 的时间';
+
+  static String voiceErrorReason(String? code, [String? fallback]) {
+    switch (code) {
+      case 'permission_denied':
+        return voicePermissionDenied;
+      case 'download_failed':
+        return voiceModelDownloadFailed;
+      case 'init_failed':
+        return voiceInitializationFailed;
+      case 'unsupported_device':
+        return voiceUnsupportedDevice;
+      case 'empty_result':
+        return voiceEmptyResult;
+      default:
+        return fallback?.trim().isNotEmpty == true ? fallback!.trim() : '语音输入失败，请稍后重试。';
+    }
+  }
 
   static String toolLabel(String? tool) {
     switch (tool) {

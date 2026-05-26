@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_controller.dart';
@@ -6,6 +6,7 @@ import '../attachment_picker.dart';
 import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
+import '../voice_input_service.dart';
 import 'quick_note_list_page.dart';
 import 'schedule_list_page.dart';
 import 'settings_page.dart';
@@ -26,6 +27,37 @@ class _ChatHomePageState extends State<ChatHomePage> {
   int _lastMessageCount = 0;
   String? _lastShownError;
   bool _isSyncingComposer = false;
+  final VoiceInputService _voiceInputService = VoiceInputService();
+  VoiceInputState _voiceState = VoiceInputState.idle;
+  double? _voiceDownloadProgress;
+
+  bool get _isVoiceBusy =>
+      _voiceState == VoiceInputState.downloading ||
+      _voiceState == VoiceInputState.initializing ||
+      _voiceState == VoiceInputState.listening ||
+      _voiceState == VoiceInputState.processing;
+
+  bool get _isVoiceListening => _voiceState == VoiceInputState.listening;
+
+  String? get _voiceStatusLabel {
+    switch (_voiceState) {
+      case VoiceInputState.downloading:
+        if (_voiceDownloadProgress != null) {
+          final percent = (_voiceDownloadProgress! * 100).clamp(0, 100).toStringAsFixed(0);
+          return '${AppStrings.voiceDownloading} $percent%';
+        }
+        return AppStrings.voiceDownloading;
+      case VoiceInputState.initializing:
+        return AppStrings.voiceInitializing;
+      case VoiceInputState.listening:
+        return AppStrings.voiceListening;
+      case VoiceInputState.processing:
+        return AppStrings.voiceProcessing;
+      case VoiceInputState.failed:
+      case VoiceInputState.idle:
+        return null;
+    }
+  }
 
   @override
   void initState() {
@@ -41,6 +73,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
       ..removeListener(_handleComposerChanged)
       ..dispose();
     _scrollController.dispose();
+    _voiceInputService.dispose();
     super.dispose();
   }
 
@@ -129,26 +162,36 @@ class _ChatHomePageState extends State<ChatHomePage> {
     }
   }
 
-  Future<void> _showConversationMenu(ConversationThreadItem item) async {
-    final result = await showModalBottomSheet<String>(
+  Future<void> _showConversationMenu(BuildContext itemContext, ConversationThreadItem item) async {
+    final overlay = Overlay.of(itemContext).context.findRenderObject() as RenderBox;
+    final button = itemContext.findRenderObject() as RenderBox;
+    final result = await showMenu<String>(
       context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            ListTile(
-              leading: const Icon(Icons.edit_outlined),
-              title: const Text(AppStrings.renameConversation),
-              onTap: () => Navigator.of(context).pop('rename'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text(AppStrings.deleteConversation),
-              onTap: () => Navigator.of(context).pop('delete'),
-            ),
-          ],
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(
+          button.localToGlobal(Offset.zero, ancestor: overlay),
+          button.localToGlobal(button.size.bottomRight(Offset.zero), ancestor: overlay),
         ),
+        Offset.zero & overlay.size,
       ),
+      items: const <PopupMenuEntry<String>>[
+        PopupMenuItem<String>(
+          value: 'rename',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.edit_outlined),
+            title: Text(AppStrings.renameConversation),
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'delete',
+          child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.delete_outline),
+            title: Text(AppStrings.deleteConversation),
+          ),
+        ),
+      ],
     );
     if (!mounted || result == null) {
       return;
@@ -320,8 +363,84 @@ class _ChatHomePageState extends State<ChatHomePage> {
     });
   }
 
-  void _showVoiceComingSoon() {
-    _showMessage(AppStrings.voiceComingSoon);
+  Future<void> _toggleVoiceInput() async {
+    if (!await _voiceInputService.isSupported) {
+      _showMessage(AppStrings.voiceComingSoon);
+      return;
+    }
+    if (widget.controller.isMessageSending) {
+      return;
+    }
+    if (_isVoiceListening) {
+      await _stopVoiceInput();
+      return;
+    }
+    if (_isVoiceBusy) {
+      return;
+    }
+    await _startVoiceInput();
+  }
+
+  Future<void> _startVoiceInput() async {
+    try {
+      _setVoiceState(VoiceInputState.downloading, progress: 0);
+      await _voiceInputService.ensureReady(
+        onDownloadProgress: (value) => _setVoiceState(VoiceInputState.downloading, progress: value),
+      );
+      _setVoiceState(VoiceInputState.initializing, clearProgress: true);
+      await _voiceInputService.startListening();
+      _setVoiceState(VoiceInputState.listening, clearProgress: true);
+    } catch (error) {
+      _setVoiceFailure(error);
+    }
+  }
+
+  Future<void> _stopVoiceInput() async {
+    try {
+      _setVoiceState(VoiceInputState.processing, clearProgress: true);
+      final result = await _voiceInputService.stopListening();
+      final mergedText = _mergeVoiceText(widget.controller.draftText, result.text);
+      widget.controller.updateDraftText(mergedText);
+      _syncComposerFromController(force: true);
+      _setVoiceState(VoiceInputState.idle, clearProgress: true);
+    } catch (error) {
+      _setVoiceFailure(error);
+    }
+  }
+
+  String _mergeVoiceText(String current, String incoming) {
+    final base = current.trimRight();
+    final addition = incoming.trim();
+    if (addition.isEmpty) {
+      return current;
+    }
+    if (base.isEmpty) {
+      return addition;
+    }
+    return '$base\n$addition';
+  }
+
+  void _setVoiceFailure(Object error) {
+    final message = error is VoiceInputException
+        ? AppStrings.voiceErrorReason(error.code, error.message)
+        : AppStrings.voiceErrorReason(null, error.toString());
+    _setVoiceState(VoiceInputState.failed, clearProgress: true);
+    _showMessage(message);
+    _setVoiceState(VoiceInputState.idle, clearProgress: true);
+  }
+
+  void _setVoiceState(
+    VoiceInputState state, {
+    double? progress,
+    bool clearProgress = false,
+  }) {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _voiceState = state;
+      _voiceDownloadProgress = clearProgress ? null : (progress ?? _voiceDownloadProgress);
+    });
   }
 
   void _showMessage(String message) {
@@ -369,6 +488,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
         final selectedTool = widget.controller.draftTool;
         final hasInput = _textController.text.trim().isNotEmpty || attachments.isNotEmpty;
         final sending = widget.controller.isMessageSending;
+        final voiceBusy = _isVoiceBusy;
+        final voiceListening = _isVoiceListening;
+        final composerLocked = sending || voiceBusy;
+        final statusLabel = _voiceStatusLabel ?? widget.controller.streamStatusLabel;
 
         return Scaffold(
           appBar: AppBar(
@@ -459,10 +582,12 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                                trailing: IconButton(
-                                  icon: const Icon(Icons.more_horiz),
-                                  tooltip: AppStrings.conversationMenu,
-                                  onPressed: () => _showConversationMenu(item),
+                                trailing: Builder(
+                                  builder: (itemContext) => IconButton(
+                                    icon: const Icon(Icons.more_horiz),
+                                    tooltip: AppStrings.conversationMenu,
+                                    onPressed: () => _showConversationMenu(itemContext, item),
+                                  ),
                                 ),
                                 onTap: () => _selectConversation(item.id),
                               );
@@ -507,11 +632,11 @@ class _ChatHomePageState extends State<ChatHomePage> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      if (widget.controller.streamStatusLabel != null) ...<Widget>[
+                      if (statusLabel != null) ...<Widget>[
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: Text(
-                            widget.controller.streamStatusLabel!,
+                            statusLabel,
                             style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                   color: const Color(0xFF4A6C63),
                                 ),
@@ -523,7 +648,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
                           padding: const EdgeInsets.only(bottom: 8),
                           child: InputChip(
                             label: Text('${AppStrings.selectedToolPrefix}：${AppStrings.toolLabel(selectedTool.apiValue)}'),
-                            onDeleted: sending ? null : () => widget.controller.setDraftTool(null),
+                            onDeleted: composerLocked ? null : () => widget.controller.setDraftTool(null),
                           ),
                         ),
                       ],
@@ -534,7 +659,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
                           children: attachments.asMap().entries.map((entry) {
                             return InputChip(
                               label: Text(entry.value.fileName),
-                              onDeleted: sending ? null : () => widget.controller.removeDraftAttachmentAt(entry.key),
+                              onDeleted: composerLocked ? null : () => widget.controller.removeDraftAttachmentAt(entry.key),
                             );
                           }).toList(),
                         ),
@@ -547,33 +672,34 @@ class _ChatHomePageState extends State<ChatHomePage> {
                             width: 48,
                             height: 48,
                             child: IconButton(
-                              onPressed: sending ? null : _openComposerMenu,
+                              onPressed: composerLocked ? null : _openComposerMenu,
                               tooltip: AppStrings.attach,
                               icon: const Icon(Icons.add_circle_outline),
                             ),
                           ),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 8),
                           Expanded(
                             child: ConstrainedBox(
-                              constraints: const BoxConstraints(minHeight: 60),
+                              constraints: const BoxConstraints(minHeight: 76),
                               child: Align(
                                 alignment: Alignment.center,
                                 child: TextField(
                                   controller: _textController,
                                   minLines: 1,
-                                  maxLines: 4,
+                                  maxLines: 6,
+                                  readOnly: voiceBusy,
                                   textAlignVertical: TextAlignVertical.center,
                                   textInputAction: TextInputAction.newline,
                                   decoration: const InputDecoration(
                                     hintText: AppStrings.composerHint,
-                                    isDense: true,
-                                    contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                                    isDense: false,
+                                    contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 18),
                                   ),
                                 ),
                               ),
                             ),
                           ),
-                          const SizedBox(width: 4),
+                          const SizedBox(width: 8),
                           SizedBox(
                             width: 48,
                             height: 48,
@@ -602,10 +728,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                             tooltip: AppStrings.send,
                                           )
                                         : IconButton(
-                                            key: const ValueKey('voice'),
-                                            onPressed: _showVoiceComingSoon,
-                                            icon: const Icon(Icons.mic_none),
-                                            tooltip: AppStrings.voice,
+                                            key: ValueKey(voiceListening ? 'voice-stop' : 'voice-start'),
+                                            onPressed: _toggleVoiceInput,
+                                            icon: Icon(voiceListening ? Icons.stop_rounded : Icons.mic_none),
+                                            tooltip: voiceListening ? AppStrings.voiceStop : AppStrings.voiceStart,
                                           ),
                               ),
                             ),
