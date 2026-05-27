@@ -31,7 +31,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
   int _lastMessageCount = 0;
   String? _lastShownError;
   bool _isSyncingComposer = false;
-  final VoiceInputService _voiceInputService = VoiceInputService();
+  final VoiceInputService _voiceInputService = createVoiceInputService();
   VoiceInputState _voiceState = VoiceInputState.idle;
   double? _voiceDownloadProgress;
 
@@ -420,99 +420,13 @@ class _ChatHomePageState extends State<ChatHomePage> {
 
   Future<void> _startVoiceInput() async {
     try {
-      final hasModel = await _voiceInputService.hasModel();
-      if (!mounted) {
-        return;
-      }
-      if (!hasModel) {
-        final confirmed = await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text(AppStrings.voiceDownloadConfirmTitle),
-            content: const Text(AppStrings.voiceDownloadConfirmMessage),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text(AppStrings.cancel),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text(AppStrings.voiceDownloadAction),
-              ),
-            ],
-          ),
-        );
-        if (confirmed != true) {
-          return;
-        }
-      }
-      _setVoiceState(VoiceInputState.downloading, progress: 0);
-      if (!hasModel && mounted) {
-        unawaited(_showDownloadProgressDialog());
-      }
-      await _voiceInputService.ensureReady(
-        onDownloadProgress: (value) =>
-            _setVoiceState(VoiceInputState.downloading, progress: value),
-      );
-      if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
       _setVoiceState(VoiceInputState.initializing, clearProgress: true);
+      await _voiceInputService.ensureReady();
       await _voiceInputService.startListening();
       _setVoiceState(VoiceInputState.listening, clearProgress: true);
     } catch (error) {
-      if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
       _setVoiceFailure(error);
     }
-  }
-
-  Future<void> _showDownloadProgressDialog() async {
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => PopScope(
-        canPop: false,
-        child: AlertDialog(
-          title: const Text(AppStrings.voiceDownloadConfirmTitle),
-          content: StatefulBuilder(
-            builder: (context, setDialogState) {
-              Future<void>.delayed(const Duration(milliseconds: 180), () {
-                if (context.mounted) {
-                  setDialogState(() {});
-                }
-              });
-              final progress = _voiceDownloadProgress;
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    progress == null
-                        ? AppStrings.voiceDownloading
-                        : '${AppStrings.voiceDownloading} ${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%',
-                  ),
-                  const SizedBox(height: 16),
-                  LinearProgressIndicator(value: progress),
-                ],
-              );
-            },
-          ),
-          actions: <Widget>[
-            FilledButton.tonal(
-              onPressed: () async {
-                await _voiceInputService.cancelModelDownload();
-                if (context.mounted) {
-                  Navigator.of(context).pop();
-                }
-              },
-              child: const Text(AppStrings.voiceDownloadCancelAction),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Future<void> _stopVoiceInput() async {

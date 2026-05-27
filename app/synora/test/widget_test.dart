@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synora/src/api_client.dart';
 import 'package:synora/src/app.dart';
 import 'package:synora/src/app_controller.dart';
+import 'package:synora/src/local_session_store.dart';
 import 'package:synora/src/models.dart';
 import 'package:synora/src/strings.dart';
 
@@ -23,7 +24,8 @@ class FakeApiClient extends ApiClient {
   Future<List<ScheduleItem>> fetchSchedules() async => <ScheduleItem>[];
 
   @override
-  Future<List<QuickNoteItem>> fetchQuickNotes() async => <QuickNoteItem>[];
+  Future<List<QuickNoteItem>> fetchQuickNotes({String? tag}) async =>
+      <QuickNoteItem>[];
 
   @override
   Future<List<NotificationItem>> fetchNotifications() async =>
@@ -112,16 +114,59 @@ class FakeApiClient extends ApiClient {
   Future<void> deleteConversation(int conversationId) async {}
 }
 
+class FakeLocalSessionStore extends LocalSessionStore {
+  FakeLocalSessionStore();
+
+  SessionInfo? _session;
+  UserProfile? _lastKnownUser;
+
+  @override
+  Future<PersistedSessionSnapshot?> readSession() async {
+    final session = _session;
+    if (session == null) {
+      return null;
+    }
+    return PersistedSessionSnapshot(
+      accessToken: session.accessToken,
+      expiresAt: session.expiresAt,
+      user: session.user,
+    );
+  }
+
+  @override
+  Future<UserProfile?> readLastKnownUser() async => _lastKnownUser;
+
+  @override
+  Future<void> saveSession(SessionInfo session) async {
+    _session = session;
+    _lastKnownUser = session.user;
+  }
+
+  @override
+  Future<void> clearSessionToken() async {
+    _session = null;
+  }
+}
+
+AppController buildTestController() {
+  return AppController(
+    apiClient: FakeApiClient(),
+    sessionStore: FakeLocalSessionStore(),
+  );
+}
+
 void main() {
   testWidgets('默认显示中文登录页', (tester) async {
-    await tester.pumpWidget(const SynoraApp());
+    final controller = buildTestController();
+    await tester.pumpWidget(SynoraApp(controller: controller));
+    await tester.pumpAndSettle();
     expect(find.text(AppStrings.appTitle), findsOneWidget);
     expect(find.text(AppStrings.loginButton), findsOneWidget);
     expect(find.text(AppStrings.emailLabel), findsOneWidget);
   });
 
   testWidgets('登录后进入本地新对话草稿并可打开侧边栏', (tester) async {
-    final controller = AppController(apiClient: FakeApiClient());
+    final controller = buildTestController();
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
@@ -134,7 +179,7 @@ void main() {
   });
 
   testWidgets('空输入显示语音按钮，输入后切换为发送按钮', (tester) async {
-    final controller = AppController(apiClient: FakeApiClient());
+    final controller = buildTestController();
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
@@ -146,7 +191,7 @@ void main() {
   });
 
   testWidgets('设置页可进入记忆管理页面', (tester) async {
-    final controller = AppController(apiClient: FakeApiClient());
+    final controller = buildTestController();
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
@@ -159,7 +204,7 @@ void main() {
   });
 
   testWidgets('历史会话只允许最后一条用户消息显示编辑按钮', (tester) async {
-    final controller = AppController(apiClient: FakeApiClient());
+    final controller = buildTestController();
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
@@ -174,7 +219,7 @@ void main() {
   });
 
   testWidgets('点击会话菜单使用 context menu 而不是底部菜单', (tester) async {
-    final controller = AppController(apiClient: FakeApiClient());
+    final controller = buildTestController();
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
@@ -190,7 +235,7 @@ void main() {
   });
 
   testWidgets('assistant 消息支持 Markdown 渲染且复制无提示', (tester) async {
-    final controller = AppController(apiClient: FakeApiClient());
+    final controller = buildTestController();
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();

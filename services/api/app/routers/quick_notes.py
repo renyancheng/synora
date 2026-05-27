@@ -1,9 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.dependencies import get_current_user
-from app.domains.quick_note.service import create_quick_note_draft, delete_note, list_notes, save_note_after_approval, update_note
+from app.domains.quick_note.service import (
+    create_quick_note_draft,
+    delete_note,
+    list_note_tags,
+    list_notes,
+    save_note_after_approval,
+    update_note,
+)
 from app.models import User
 from app.runtime.errors import LLMServiceError
 from app.schemas.common import ApiEnvelope
@@ -13,6 +20,7 @@ from app.schemas.quick_note import (
     QuickNoteDraftResponse,
     QuickNoteItem,
     QuickNoteSavedResponse,
+    QuickNoteTagItem,
     QuickNoteUpdateRequest,
 )
 
@@ -69,10 +77,11 @@ def confirm_quick_note(
 
 @router.get("", response_model=list[QuickNoteItem])
 def get_quick_notes(
+    tag: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[QuickNoteItem]:
-    rows = list_notes(db, current_user.id)
+    rows = list_notes(db, current_user.id, tag=tag)
     return [
         QuickNoteItem(
             id=row.id,
@@ -83,6 +92,15 @@ def get_quick_notes(
         )
         for row in rows
     ]
+
+
+@router.get("/tags", response_model=list[QuickNoteTagItem])
+def get_quick_note_tags(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[QuickNoteTagItem]:
+    rows = list_note_tags(db, current_user.id)
+    return [QuickNoteTagItem(tag=str(row["tag"]), count=int(row["count"])) for row in rows]
 
 
 @router.patch("/{note_id}", response_model=QuickNoteItem)

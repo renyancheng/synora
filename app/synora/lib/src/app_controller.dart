@@ -1,6 +1,9 @@
-﻿import 'package:flutter/foundation.dart';
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 
 import 'api_client.dart';
+import 'local_session_store.dart';
 import 'models.dart';
 import 'strings.dart';
 
@@ -60,12 +63,21 @@ class ConversationViewState {
 }
 
 class AppController extends ChangeNotifier {
-  AppController({ApiClient? apiClient}) : _apiClient = apiClient ?? ApiClient();
+  AppController({
+    ApiClient? apiClient,
+    LocalSessionStore? sessionStore,
+  })  : _apiClient = apiClient ?? ApiClient(),
+        _sessionStore = sessionStore ?? LocalSessionStore() {
+    unawaited(_restorePersistedSession());
+  }
 
   final ApiClient _apiClient;
+  final LocalSessionStore _sessionStore;
 
   SessionInfo? _session;
+  UserProfile? _lastKnownUser;
   bool _loading = false;
+  bool _restoringSession = true;
   int _nextTempMessageId = -1;
   List<ScheduleItem> _schedules = <ScheduleItem>[];
   List<QuickNoteItem> _quickNotes = <QuickNoteItem>[];
@@ -77,8 +89,10 @@ class AppController extends ChangeNotifier {
   int _activeConversationId = draftConversationId;
 
   SessionInfo? get session => _session;
+  UserProfile? get lastKnownUser => _lastKnownUser;
   bool get isAuthenticated => _session != null;
   bool get isLoading => _loading;
+  bool get isRestoringSession => _restoringSession;
   List<ScheduleItem> get schedules => List<ScheduleItem>.unmodifiable(_schedules);
   List<QuickNoteItem> get quickNotes => List<QuickNoteItem>.unmodifiable(_quickNotes);
   List<NotificationItem> get notifications => List<NotificationItem>.unmodifiable(_notifications);
@@ -119,10 +133,66 @@ class AppController extends ChangeNotifier {
     return null;
   }
 
+  Future<void> _restorePersistedSession() async {
+    _restoringSession = true;
+    try {
+      _lastKnownUser = await _sessionStore.readLastKnownUser();
+      final persisted = await _sessionStore.readSession();
+      if (persisted == null) {
+        return;
+      }
+      _apiClient.setAccessToken(persisted.accessToken);
+      final restored = await _apiClient.fetchCurrentSession();
+      _session = SessionInfo(
+        accessToken: persisted.accessToken,
+        expiresAt: restored.expiresAt,
+        user: restored.user,
+      );
+      _lastKnownUser = restored.user;
+      await _sessionStore.saveSession(_session!);
+      await loadShellData();
+      beginDraftConversation(notify: false);
+    } catch (_) {
+      _session = null;
+      _apiClient.setAccessToken(null);
+      await _sessionStore.clearSessionToken();
+    } finally {
+      _restoringSession = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _persistSession(SessionInfo session) async {
+    _lastKnownUser = session.user;
+    await _sessionStore.saveSession(session);
+  }
+
   Future<void> login(String email, String password) async {
     _setLoading(true);
     try {
       _session = await _apiClient.login(email, password);
+      await _persistSession(_session!);
+      await loadShellData();
+      beginDraftConversation(notify: false);
+    } finally {
+      _setLoading(false);
+      notifyListeners();
+    }
+  }
+
+  Future<void> register({
+    required String email,
+    required String password,
+    required String displayName,
+  }) async {
+    _setLoading(true);
+    try {
+      _session = await _apiClient.register(
+        email: email,
+        password: password,
+        displayName: displayName,
+      );
+      await _persistSession(_session!);
       await loadShellData();
       beginDraftConversation(notify: false);
     } finally {
@@ -533,9 +603,23 @@ class AppController extends ChangeNotifier {
     await refreshMemory();
   }
 
-  void logout() {
+  Future<List<QuickNoteTagItem>> fetchQuickNoteTags() {
+    return _apiClient.fetchQuickNoteTags();
+  }
+
+  Future<List<QuickNoteItem>> fetchQuickNotesByTag(String? tag) {
+    return _apiClient.fetchQuickNotes(tag: tag);
+  }
+
+  Future<void> logout() async {
+    _lastKnownUser = _session?.user ?? _lastKnownUser;
+    try {
+      await _apiClient.logout();
+    } catch (_) {
+      _apiClient.setAccessToken(null);
+    }
+    await _sessionStore.clearSessionToken();
     _session = null;
-    _apiClient.setAccessToken(null);
     _schedules = <ScheduleItem>[];
     _quickNotes = <QuickNoteItem>[];
     _notifications = <NotificationItem>[];

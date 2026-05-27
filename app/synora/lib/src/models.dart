@@ -135,6 +135,23 @@ class UserProfile {
   }
 }
 
+class CurrentSessionInfo {
+  CurrentSessionInfo({
+    required this.expiresAt,
+    required this.user,
+  });
+
+  final DateTime expiresAt;
+  final UserProfile user;
+
+  factory CurrentSessionInfo.fromJson(Map<String, dynamic> json) {
+    return CurrentSessionInfo(
+      expiresAt: DateTime.parse(json['expires_at'] as String),
+      user: UserProfile.fromJson(json['user'] as Map<String, dynamic>),
+    );
+  }
+}
+
 class SessionInfo {
   SessionInfo({
     required this.accessToken,
@@ -620,6 +637,23 @@ class QuickNoteItem {
       tags: (json['tags'] as List<dynamic>).cast<String>(),
       createdAt: DateTime.parse(json['created_at'] as String),
       sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
+    );
+  }
+}
+
+class QuickNoteTagItem {
+  QuickNoteTagItem({
+    required this.tag,
+    required this.count,
+  });
+
+  final String tag;
+  final int count;
+
+  factory QuickNoteTagItem.fromJson(Map<String, dynamic> json) {
+    return QuickNoteTagItem(
+      tag: json['tag'] as String,
+      count: json['count'] as int,
     );
   }
 }

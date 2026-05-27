@@ -12,7 +12,7 @@ from app.domains.attachment.service import build_attachment_prompt_assets
 from app.domains.memory.service import MemoryService
 from app.domains.quick_note.service import save_note_after_approval
 from app.domains.schedule.service import build_draft_hash, create_schedule_after_approval, detect_conflicts
-from app.models import AgentRun, AgentToolCallAudit, Attachment, ConversationMessage, ConversationPendingState, ConversationThread
+from app.models import AgentRun, AgentToolCallAudit, ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, ConversationThread
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.errors import LLMServiceError
 from app.runtime.mcp_client import get_synora_tools, invoke_synora_tool
@@ -20,7 +20,7 @@ from app.runtime.model_adapter import ModelAdapter
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
 from app.schemas.quick_note import QuickNoteDraftRequest
 from app.schemas.schedule import ScheduleEventDraft
-from app.security import mint_token
+from app.security import mint_token, sha256_text
 from app.tasks.memory import write_user_memory
 
 
@@ -61,6 +61,12 @@ def _schedule_scope_from_action_group(action_group_id: str | None) -> str | None
     if not action_group_id:
         return None
     return f"conversation_schedule:{action_group_id}"
+
+
+def _quick_note_scope_from_action_group(action_group_id: str | None) -> str | None:
+    if not action_group_id:
+        return None
+    return f"conversation_quick_note:{action_group_id}"
 
 
 def _schedule_draft_summary(draft: ScheduleEventDraft) -> str:
@@ -145,6 +151,23 @@ def update_conversation_title(db: Session, user_id: int, conversation_id: int, t
 
 def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None:
     thread = get_conversation(db, user_id, conversation_id)
+    pending = _get_pending_state(db, conversation_id)
+    messages = db.scalars(select(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id)).all()
+    action_group_ids = {
+        str(message.action_group_id)
+        for message in messages
+        if message.action_group_id
+    }
+    if pending is not None:
+        pending_action_group_id = str(pending.meta_json.get("action_group_id") or "").strip()
+        if pending_action_group_id:
+            action_group_ids.add(pending_action_group_id)
+    _delete_approvals_for_action_groups(
+        db,
+        user_id=user_id,
+        action_group_ids=action_group_ids,
+        approval_token=pending.approval_token if pending is not None else None,
+    )
     agent_runs = db.scalars(select(AgentRun).where(AgentRun.conversation_id == conversation_id)).all()
     if agent_runs:
         run_ids = [item.id for item in agent_runs]
@@ -215,6 +238,19 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
 
     pending = _get_pending_state(db, conversation_id)
     if pending is not None:
+        _delete_approvals_for_action_groups(
+            db,
+            user_id=user_id,
+            action_group_ids={
+                str(value)
+                for value in (
+                    user_message.action_group_id,
+                    pending.meta_json.get("action_group_id"),
+                )
+                if str(value or "").strip()
+            },
+            approval_token=pending.approval_token,
+        )
         db.delete(pending)
 
     memory_service = MemoryService()
@@ -843,6 +879,8 @@ async def _process_quick_note_intake(
 ) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
     tool_events: list[dict[str, Any]] = []
     supersede_action_group_id = context.get("supersede_action_group_id")
+    action_group_id = action_group_id or mint_token()
+    quick_note_scope = _quick_note_scope_from_action_group(action_group_id)
     tool_audit = _start_tool_audit(
         db,
         agent_run_id=agent_run.id,
@@ -851,7 +889,10 @@ async def _process_quick_note_intake(
             "content": text_content,
             "tags": [],
             "attachment_ids": attachment_ids,
-            "context": context,
+            "context": {
+                **context,
+                "approval_scope": quick_note_scope,
+            },
         },
     )
     tool_events.append({"event": "tool_call_started", "data": {"tool_name": "prepare_quick_note_draft"}})
@@ -861,7 +902,10 @@ async def _process_quick_note_intake(
             "content": text_content,
             "tags": [],
             "attachment_ids": attachment_ids,
-            "context": context,
+            "context": {
+                **context,
+                "approval_scope": quick_note_scope,
+            },
         },
     )
     _finish_tool_audit(
@@ -881,7 +925,6 @@ async def _process_quick_note_intake(
     evidence_digest = list(parsed.get("evidence_digest") or [])
 
     final_text = "我已经整理好这条速记，确认后就会正式保存。"
-    action_group_id = action_group_id or mint_token()
     _mark_action_group_status(db, supersede_action_group_id, lifecycle_status="superseded", is_actionable=False)
     _upsert_pending_state(
         db,
@@ -1381,6 +1424,50 @@ def _upsert_pending_state(
 
 def _clear_pending_state(db: Session, pending: ConversationPendingState) -> None:
     db.delete(pending)
+    db.commit()
+
+
+def _delete_approvals_for_action_groups(
+    db: Session,
+    *,
+    user_id: int,
+    action_group_ids: set[str],
+    approval_token: str | None = None,
+) -> None:
+    scopes = {
+        scope
+        for action_group_id in action_group_ids
+        for scope in (
+            _schedule_scope_from_action_group(action_group_id),
+            _quick_note_scope_from_action_group(action_group_id),
+        )
+        if scope
+    }
+    approvals_by_scope: list[ApprovalRequest] = []
+    if scopes:
+        approvals_by_scope = db.scalars(
+            select(ApprovalRequest).where(
+                ApprovalRequest.user_id == user_id,
+                ApprovalRequest.approval_scope.in_(list(scopes)),
+            )
+        ).all()
+
+    approvals: dict[int, ApprovalRequest] = {item.id: item for item in approvals_by_scope}
+    normalized_token = str(approval_token or "").strip()
+    if normalized_token:
+        approval = db.scalar(
+            select(ApprovalRequest).where(
+                ApprovalRequest.user_id == user_id,
+                ApprovalRequest.token_hash == sha256_text(normalized_token),
+            )
+        )
+        if approval is not None:
+            approvals[approval.id] = approval
+
+    if not approvals:
+        return
+    for approval in approvals.values():
+        db.delete(approval)
     db.commit()
 
 

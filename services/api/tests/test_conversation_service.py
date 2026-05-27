@@ -10,7 +10,7 @@ from app.db import Base
 from app.domains.conversation.service import apply_action, consume_stream, create_conversation, delete_conversation, queue_message, rewind_last_turn, update_conversation_title
 from app.domains.quick_note.service import delete_note
 from app.domains.schedule.service import delete_schedule
-from app.models import Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
+from app.models import ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
 from app.runtime.model_adapter import ModelAdapter
 from app.schemas.common import EventDateTimeValue
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
@@ -525,6 +525,59 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         delete_conversation(self.db, self.user.id, thread.id)
         self.assertIsNone(self.db.get(type(thread), thread.id))
         self.assertIsNone(self.db.get(type(agent_run), agent_run.id))
+
+    def test_delete_conversation_removes_pending_and_related_approvals(self) -> None:
+        from app.domains.approval.service import create_approval_request
+
+        thread = create_conversation(self.db, self.user.id)
+        user_message = ConversationMessage(
+            conversation_id=thread.id,
+            role="user",
+            message_type="text",
+            status="sent",
+            text_content="帮我记一下下周汇报",
+            structured_payload_json={},
+            action_group_id="group-1",
+            revision=1,
+        )
+        self.db.add(user_message)
+        approval, token = create_approval_request(
+            self.db,
+            user_id=self.user.id,
+            action="create_quick_note",
+            payload={"content": "下周汇报"},
+            draft_hash="draft-quick-note",
+            normalized_payload={"content": "下周汇报"},
+            evidence_digest=[],
+            approval_scope="conversation_quick_note:group-1",
+        )
+        self.db.add(
+            ConversationPendingState(
+                conversation_id=thread.id,
+                user_id=self.user.id,
+                pending_type="quick_note",
+                stage="approval_pending",
+                draft_hash="draft-quick-note",
+                approval_token=token,
+                source_type="mixed",
+                attachment_ids_json=[],
+                payload_json={"content": "下周汇报"},
+                meta_json={"action_group_id": "group-1", "revision": 1},
+            )
+        )
+        self.db.commit()
+
+        delete_conversation(self.db, self.user.id, thread.id)
+
+        self.assertIsNone(self.db.get(type(thread), thread.id))
+        self.assertIsNone(
+            self.db.scalar(
+                select(ConversationPendingState).where(
+                    ConversationPendingState.conversation_id == thread.id
+                )
+            )
+        )
+        self.assertIsNone(self.db.get(ApprovalRequest, approval.id))
 
     def test_rewind_last_turn_restores_user_payload(self) -> None:
         thread = create_conversation(self.db, self.user.id)

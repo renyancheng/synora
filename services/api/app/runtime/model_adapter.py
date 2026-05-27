@@ -71,6 +71,23 @@ class ModelAdapter:
     def _is_qwen_model(self) -> bool:
         return "qwen" in self._settings.llm_model.lower()
 
+    def _current_time_prompt(
+        self,
+        *,
+        now: datetime | None = None,
+        timezone_name: str | None = None,
+    ) -> str:
+        resolved_timezone = (timezone_name or self._settings.default_timezone).strip() or self._settings.default_timezone
+        try:
+            zone = ZoneInfo(resolved_timezone)
+        except Exception:
+            resolved_timezone = self._settings.default_timezone
+            zone = ZoneInfo(resolved_timezone)
+        current = (now or datetime.now(zone)).astimezone(zone)
+        weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][current.weekday()]
+        readable = current.strftime("%Y年%m月%d日 %H:%M")
+        return f"当前时区：{resolved_timezone}。当前时间：{current.isoformat()}。当前本地时间：{readable} {weekday}。"
+
     def _create_chat_model(
         self,
         *,
@@ -105,6 +122,7 @@ class ModelAdapter:
                 "只有在确实需要时才调用工具；不要伪造工具执行结果。"
                 "如果用户只是聊天、提问或咨询，就直接回答。"
                 "如果用户请求创建日程或速记，而当前入口已经明确路由到其他流程，则不要在这里重复创建。"
+                f"{self._current_time_prompt()}"
             ),
             name="synora_conversation_agent",
         )
@@ -402,6 +420,7 @@ class ModelAdapter:
                 "只能在 schedule_intake 和 quick_note_intake 中二选一。"
                 "如果内容更像带时间地点的安排，就选 schedule_intake。"
                 "如果内容更像备忘、灵感、待办或资料整理，就选 quick_note_intake。"
+                f"{self._current_time_prompt()}"
             ),
             user_text=json.dumps(
                 {
@@ -429,6 +448,7 @@ class ModelAdapter:
                 "如果用户在闲聊、提问、咨询建议，就选 general_chat。"
                 "如果核心目标是创建可提醒的日程，就选 schedule_intake。"
                 "如果核心目标是保存速记、想法、待办或摘要，就选 quick_note_intake。"
+                f"{self._current_time_prompt()}"
             ),
             user_text=json.dumps(
                 {
@@ -457,6 +477,7 @@ class ModelAdapter:
                 "如果用户在闲聊、提问、咨询建议，就选 general_chat。"
                 "如果核心目标是创建可提醒的日程，就选 schedule_intake。"
                 "如果核心目标是保存速记、想法、待办或摘要，就选 quick_note_intake。"
+                f"{self._current_time_prompt()}"
             ),
             user_text=json.dumps(
                 {
@@ -491,7 +512,7 @@ class ModelAdapter:
                 "缺失字段只放入 missing_fields，不要猜测。"
                 "歧义只放入 ambiguity_flags。"
                 "evidence_digest 仅输出中文证据点。"
-                f"当前时区：{timezone_name}。参考时间：{reference_time.isoformat()}。"
+                f"{self._current_time_prompt(now=reference_time, timezone_name=timezone_name)}"
             ),
             user_text=merged_text,
             attachment_parts=attachment_parts,
@@ -514,6 +535,7 @@ class ModelAdapter:
                 "尽量保留用户原意，不要过度改写，不要扩展不存在的信息。"
                 "必须融合 manual_tags，不要遗漏用户手动指定的标签。"
                 "evidence_digest 只输出中文依据。"
+                f"{self._current_time_prompt()}"
             ),
             user_text=json.dumps(
                 {
@@ -537,6 +559,7 @@ class ModelAdapter:
                 system_prompt=(
                     "你是 Synora 的对话标题生成器。"
                     "请基于用户首条消息生成一个 8 到 18 个字以内的简短中文标题。"
+                    f"{self._current_time_prompt()}"
                 ),
                 user_text=first_message,
             )
@@ -557,6 +580,7 @@ class ModelAdapter:
             system_prompt=(
                 "你是 Synora 的中文助理。"
                 "在没有明确工具任务时，直接自然回答即可。"
+                f"{self._current_time_prompt()}"
             ),
             user_text=json.dumps(
                 {
@@ -582,6 +606,7 @@ class ModelAdapter:
                 system_prompt=(
                     "你是 Synora 的中文助理。"
                     "在没有明确工具任务时，直接自然回答即可。"
+                    f"{self._current_time_prompt()}"
                 ),
                 user_text=json.dumps(
                     {

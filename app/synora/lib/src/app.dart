@@ -75,11 +75,26 @@ class _SynoraAppState extends State<SynoraApp> {
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
               ),
             ),
-            home: _controller.isAuthenticated
+            home: _controller.isRestoringSession
+                ? const _SessionRestorePage()
+                : _controller.isAuthenticated
                 ? ChatHomePage(controller: _controller)
                 : LoginPage(controller: _controller),
           );
         },
+      ),
+    );
+  }
+}
+
+class _SessionRestorePage extends StatelessWidget {
+  const _SessionRestorePage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(
+        child: CircularProgressIndicator(),
       ),
     );
   }

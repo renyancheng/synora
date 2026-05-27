@@ -47,6 +47,39 @@ class ApiClient {
     return session;
   }
 
+  Future<SessionInfo> register({
+    required String email,
+    required String password,
+    required String displayName,
+  }) async {
+    final json = await _sendJson(
+      'POST',
+      '/auth/register',
+      body: {
+        'email': email,
+        'password': password,
+        'display_name': displayName,
+      },
+      authenticated: false,
+    );
+    final session = SessionInfo.fromJson(json as Map<String, dynamic>);
+    setAccessToken(session.accessToken);
+    return session;
+  }
+
+  Future<CurrentSessionInfo> fetchCurrentSession() async {
+    final json = await _sendJson('GET', '/auth/me');
+    return CurrentSessionInfo.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<void> logout() async {
+    try {
+      await _sendJson('POST', '/auth/logout');
+    } finally {
+      setAccessToken(null);
+    }
+  }
+
   Future<UploadedAttachment> uploadAttachment(LocalAttachmentData attachment) async {
     final request = http.MultipartRequest(
       'POST',
@@ -62,9 +95,9 @@ class ApiClient {
     );
     final response = await request.send();
     final body = await response.stream.bytesToString();
-    final decoded = body.isEmpty ? null : jsonDecode(body);
+    final decoded = _decodeJsonBody(body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw ApiException(_extractErrorMessage(decoded, response.statusCode));
+      throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
     }
     return UploadedAttachment.fromJson(decoded as Map<String, dynamic>);
   }
@@ -74,9 +107,17 @@ class ApiClient {
     return _asList(json).map(ScheduleItem.fromJson).toList();
   }
 
-  Future<List<QuickNoteItem>> fetchQuickNotes() async {
-    final json = await _sendJson('GET', '/quick-notes');
+  Future<List<QuickNoteItem>> fetchQuickNotes({String? tag}) async {
+    final path = tag == null || tag.trim().isEmpty
+        ? '/quick-notes'
+        : '/quick-notes?tag=${Uri.encodeQueryComponent(tag.trim())}';
+    final json = await _sendJson('GET', path);
     return _asList(json).map(QuickNoteItem.fromJson).toList();
+  }
+
+  Future<List<QuickNoteTagItem>> fetchQuickNoteTags() async {
+    final json = await _sendJson('GET', '/quick-notes/tags');
+    return _asList(json).map(QuickNoteTagItem.fromJson).toList();
   }
 
   Future<List<NotificationItem>> fetchNotifications() async {
@@ -177,8 +218,8 @@ class ApiClient {
     final response = await _httpClient.send(request);
     if (response.statusCode < 200 || response.statusCode >= 300) {
       final body = await response.stream.bytesToString();
-      final decoded = body.isEmpty ? null : jsonDecode(body);
-      throw ApiException(_extractErrorMessage(decoded, response.statusCode));
+      final decoded = _decodeJsonBody(body);
+      throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
     }
 
     String? currentEvent;
@@ -279,9 +320,9 @@ class ApiClient {
     request.body = body == null ? '' : jsonEncode(body);
     final response = await _httpClient.send(request);
     final responseBody = await response.stream.bytesToString();
-    final decoded = responseBody.isEmpty ? null : jsonDecode(responseBody);
+    final decoded = _decodeJsonBody(responseBody);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw ApiException(_extractErrorMessage(decoded, response.statusCode));
+      throw ApiException(_extractErrorMessage(decoded, response.statusCode, responseBody));
     }
     return decoded;
   }
@@ -308,12 +349,31 @@ class ApiClient {
     return _baseUrl.endsWith('/') ? _baseUrl.substring(0, _baseUrl.length - 1) : _baseUrl;
   }
 
-  String _extractErrorMessage(dynamic decoded, int statusCode) {
+  dynamic _decodeJsonBody(String body) {
+    final trimmed = body.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+      return null;
+    }
+    try {
+      return jsonDecode(trimmed);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  String _extractErrorMessage(dynamic decoded, int statusCode, [String rawBody = '']) {
     if (decoded is Map<String, dynamic> && decoded['detail'] is String) {
       final detail = (decoded['detail'] as String).trim();
       if (detail.isNotEmpty) {
         return detail;
       }
+    }
+    final trimmedBody = rawBody.trim();
+    if (trimmedBody.isNotEmpty && trimmedBody.toLowerCase() != 'internal server error') {
+      return trimmedBody;
     }
     switch (statusCode) {
       case 401:

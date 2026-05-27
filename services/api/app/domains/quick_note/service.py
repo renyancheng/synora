@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,15 @@ def build_note_hash(content: str, tags: list[str], attachment_ids: list[int]) ->
     return sha256_text(str(normalized))
 
 
+def normalize_tags(tags: list[str]) -> list[str]:
+    unique: list[str] = []
+    for raw in tags:
+        tag = raw.strip()
+        if tag and tag not in unique:
+            unique.append(tag)
+    return unique
+
+
 def create_quick_note_draft(
     db: Session,
     user_id: int,
@@ -35,9 +46,10 @@ def create_quick_note_draft(
         context=payload.context,
     )
     normalized_content = str(result["normalized_content"]).strip()
-    preview_tags = list(result["preview_tags"])
+    preview_tags = normalize_tags(list(result["preview_tags"]))
     evidence_digest = list(result.get("evidence_digest", []))
     draft_hash = build_note_hash(normalized_content, preview_tags, payload.attachment_ids)
+    approval_scope = str(payload.context.get("approval_scope") or "").strip() or None
     approval, token = ApprovalGate().create(
         db,
         user_id=user_id,
@@ -50,6 +62,7 @@ def create_quick_note_draft(
             "attachment_ids": payload.attachment_ids,
         },
         evidence_digest=evidence_digest,
+        approval_scope=approval_scope,
     )
     return normalized_content, preview_tags, token, evidence_digest, approval
 
@@ -63,7 +76,8 @@ def save_note_after_approval(
     attachment_ids: list[int],
     approval_token: str,
 ) -> QuickNote:
-    draft_hash = build_note_hash(content, tags, attachment_ids)
+    normalized_tags = normalize_tags(tags)
+    draft_hash = build_note_hash(content, normalized_tags, attachment_ids)
     ApprovalGate().consume(
         db,
         user_id=user_id,
@@ -74,11 +88,11 @@ def save_note_after_approval(
     note = QuickNote(
         user_id=user_id,
         content=content.strip(),
-        tags_csv=",".join(tags),
+        tags_csv=",".join(normalized_tags),
         source_text=content.strip(),
         source_type="mixed",
         source_attachment_ids=attachment_ids,
-        topic_tags_json=tags,
+        topic_tags_json=normalized_tags,
     )
     db.add(note)
     db.commit()
@@ -86,8 +100,23 @@ def save_note_after_approval(
     return note
 
 
-def list_notes(db: Session, user_id: int) -> list[QuickNote]:
-    return db.scalars(select(QuickNote).where(QuickNote.user_id == user_id).order_by(QuickNote.created_at.desc())).all()
+def list_notes(db: Session, user_id: int, *, tag: str | None = None) -> list[QuickNote]:
+    rows = db.scalars(select(QuickNote).where(QuickNote.user_id == user_id).order_by(QuickNote.created_at.desc())).all()
+    normalized_tag = (tag or "").strip()
+    if not normalized_tag:
+        return rows
+    return [row for row in rows if normalized_tag in list(row.topic_tags_json or [])]
+
+
+def list_note_tags(db: Session, user_id: int) -> list[dict[str, int | str]]:
+    rows = db.scalars(select(QuickNote).where(QuickNote.user_id == user_id)).all()
+    counter: Counter[str] = Counter()
+    for row in rows:
+        counter.update(normalize_tags(list(row.topic_tags_json or [])))
+    return [
+        {"tag": tag, "count": count}
+        for tag, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
 
 
 def update_note(
@@ -104,7 +133,7 @@ def update_note(
     normalized_content = content.strip()
     if not normalized_content:
         raise ValueError("速记内容不能为空。")
-    normalized_tags = [tag.strip() for tag in tags if tag.strip()]
+    normalized_tags = normalize_tags(tags)
     note.content = normalized_content
     note.tags_csv = ",".join(normalized_tags)
     note.topic_tags_json = normalized_tags

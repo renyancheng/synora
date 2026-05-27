@@ -16,18 +16,29 @@ class _LoginPageState extends State<LoginPage> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _emailController;
   late final TextEditingController _passwordController;
+  late final TextEditingController _displayNameController;
+  bool _registerMode = false;
 
   @override
   void initState() {
     super.initState();
-    _emailController = TextEditingController(text: 'han.teacher@example.com');
-    _passwordController = TextEditingController(text: 'SynoraMVP123!');
+    final lastUser = widget.controller.lastKnownUser;
+    _emailController = TextEditingController(
+      text: lastUser?.email ?? 'han.teacher@example.com',
+    );
+    _passwordController = TextEditingController(
+      text: lastUser == null ? 'SynoraMVP123!' : '',
+    );
+    _displayNameController = TextEditingController(
+      text: lastUser?.displayName ?? '',
+    );
   }
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _displayNameController.dispose();
     super.dispose();
   }
 
@@ -36,23 +47,44 @@ class _LoginPageState extends State<LoginPage> {
       return;
     }
     try {
-      await widget.controller.login(
-        _emailController.text.trim(),
-        _passwordController.text,
-      );
+      if (_registerMode) {
+        await widget.controller.register(
+          email: _emailController.text.trim(),
+          password: _passwordController.text,
+          displayName: _displayNameController.text.trim(),
+        );
+      } else {
+        await widget.controller.login(
+          _emailController.text.trim(),
+          _passwordController.text,
+        );
+      }
     } catch (error) {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
     }
+  }
+
+  void _toggleMode() {
+    setState(() {
+      _registerMode = !_registerMode;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final lastUser = widget.controller.lastKnownUser;
+    final busyText = _registerMode
+        ? AppStrings.registering
+        : AppStrings.loggingIn;
+    final submitText = _registerMode
+        ? AppStrings.registerButton
+        : AppStrings.loginButton;
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
@@ -85,31 +117,81 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                       const SizedBox(height: 10),
                       Text(
-                        AppStrings.loginSubtitle,
+                        _registerMode
+                            ? AppStrings.registerTitle
+                            : AppStrings.loginSubtitle,
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: const Color(0xFF275C52),
                           height: 1.5,
                         ),
                       ),
+                      if (lastUser != null) ...<Widget>[
+                        const SizedBox(height: 14),
+                        Text(
+                          '${AppStrings.lastSignedInAs}：${lastUser.displayName}（${lastUser.email}）',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: const Color(0xFF486B63),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 24),
+                      if (_registerMode) ...<Widget>[
+                        TextFormField(
+                          controller: _displayNameController,
+                          decoration: const InputDecoration(
+                            labelText: AppStrings.displayNameLabel,
+                          ),
+                          validator: (value) =>
+                              (value == null || value.trim().isEmpty)
+                              ? AppStrings.displayNameRequired
+                              : null,
+                        ),
+                        const SizedBox(height: 16),
+                      ],
                       TextFormField(
                         controller: _emailController,
-                        decoration: const InputDecoration(labelText: AppStrings.emailLabel),
-                        validator: (value) => (value == null || value.trim().isEmpty) ? AppStrings.emailRequired : null,
+                        decoration: const InputDecoration(
+                          labelText: AppStrings.emailLabel,
+                        ),
+                        validator: (value) =>
+                            (value == null || value.trim().isEmpty)
+                            ? AppStrings.emailRequired
+                            : null,
                       ),
                       const SizedBox(height: 16),
                       TextFormField(
                         controller: _passwordController,
-                        decoration: const InputDecoration(labelText: AppStrings.passwordLabel),
+                        decoration: const InputDecoration(
+                          labelText: AppStrings.passwordLabel,
+                        ),
                         obscureText: true,
-                        validator: (value) => (value == null || value.isEmpty) ? AppStrings.passwordRequired : null,
+                        validator: (value) =>
+                            (value == null || value.isEmpty)
+                            ? AppStrings.passwordRequired
+                            : null,
                       ),
                       const SizedBox(height: 24),
                       SizedBox(
                         width: double.infinity,
                         child: FilledButton(
                           onPressed: widget.controller.isLoading ? null : _submit,
-                          child: Text(widget.controller.isLoading ? AppStrings.loggingIn : AppStrings.loginButton),
+                          child: Text(
+                            widget.controller.isLoading ? busyText : submitText,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: widget.controller.isLoading
+                              ? null
+                              : _toggleMode,
+                          child: Text(
+                            _registerMode
+                                ? AppStrings.switchToLogin
+                                : AppStrings.switchToRegister,
+                          ),
                         ),
                       ),
                     ],

@@ -5,6 +5,7 @@ import '../app_controller.dart';
 import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
+import 'tag_input_field.dart';
 
 class QuickNoteDetailPage extends StatefulWidget {
   const QuickNoteDetailPage({
@@ -23,7 +24,7 @@ class QuickNoteDetailPage extends StatefulWidget {
 class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
   late QuickNoteItem _item;
   late TextEditingController _contentController;
-  late TextEditingController _tagsController;
+  late List<String> _tags;
   bool _editing = false;
   bool _saving = false;
 
@@ -32,13 +33,12 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
     super.initState();
     _item = widget.item;
     _contentController = TextEditingController(text: _item.content);
-    _tagsController = TextEditingController(text: _item.tags.join(' / '));
+    _tags = List<String>.from(_item.tags);
   }
 
   @override
   void dispose() {
     _contentController.dispose();
-    _tagsController.dispose();
     super.dispose();
   }
 
@@ -81,15 +81,10 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
     }
     setState(() => _saving = true);
     try {
-      final tags = _tagsController.text
-          .split(RegExp(r'[/,，\s]+'))
-          .map((item) => item.trim())
-          .where((item) => item.isNotEmpty)
-          .toList();
       final updated = await widget.controller.updateQuickNote(
         noteId: _item.id,
         content: content,
-        tags: tags,
+        tags: _tags,
       );
       if (!mounted) {
         return;
@@ -98,7 +93,7 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
         _item = updated;
         _editing = false;
         _contentController.text = updated.content;
-        _tagsController.text = updated.tags.join(' / ');
+        _tags = List<String>.from(updated.tags);
       });
       _showMessage(AppStrings.saveSuccess);
     } catch (error) {
@@ -169,11 +164,9 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
               ),
             ),
             const SizedBox(height: 16),
-            TextField(
-              controller: _tagsController,
-              decoration: const InputDecoration(
-                labelText: AppStrings.tagsField,
-              ),
+            TagInputField(
+              initialTags: _tags,
+              onChanged: (value) => _tags = value,
             ),
             const SizedBox(height: 16),
           ] else ...<Widget>[
@@ -185,27 +178,33 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
             const SizedBox(height: 20),
             _DetailLine(
               label: AppStrings.tagsField,
-              value: _item.tags.isEmpty
-                  ? AppStrings.noContent
-                  : _item.tags.join(' / '),
+              child: _item.tags.isEmpty
+                  ? const Text(AppStrings.noContent)
+                  : Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _item.tags
+                          .map((tag) => Chip(label: Text(tag)))
+                          .toList(),
+                    ),
             ),
             _DetailLine(
               label: AppStrings.selectedAttachments,
-              value: '${_item.sourceAttachmentIds.length}',
+              child: Text('${_item.sourceAttachmentIds.length}'),
             ),
             _DetailLine(
               label: AppStrings.createTimeField,
-              value: formatDateTime(_item.createdAt),
+              child: Text(formatDateTime(_item.createdAt)),
             ),
           ],
           if (_editing) ...<Widget>[
             _DetailLine(
               label: AppStrings.selectedAttachments,
-              value: '${_item.sourceAttachmentIds.length}',
+              child: Text('${_item.sourceAttachmentIds.length}'),
             ),
             _DetailLine(
               label: AppStrings.createTimeField,
-              value: formatDateTime(_item.createdAt),
+              child: Text(formatDateTime(_item.createdAt)),
             ),
           ],
         ],
@@ -215,10 +214,10 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
 }
 
 class _DetailLine extends StatelessWidget {
-  const _DetailLine({required this.label, required this.value});
+  const _DetailLine({required this.label, required this.child});
 
   final String label;
-  final String value;
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
@@ -229,7 +228,7 @@ class _DetailLine extends StatelessWidget {
         children: <Widget>[
           Text(label, style: Theme.of(context).textTheme.labelMedium),
           const SizedBox(height: 6),
-          Text(value),
+          child,
         ],
       ),
     );

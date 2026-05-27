@@ -45,7 +45,7 @@ class SettingsPage extends StatelessWidget {
       ),
     );
     if (shouldLogout == true) {
-      controller.logout();
+      await controller.logout();
       if (context.mounted) {
         Navigator.of(context).popUntil((route) => route.isFirst);
       }

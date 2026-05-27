@@ -2,11 +2,20 @@
   static const appTitle = 'Synora';
   static const loginSubtitle = '登录后，直接把事情交给 Synora。';
   static const loginButton = '登录';
+  static const registerButton = '注册并进入';
+  static const registerTitle = '创建账户';
+  static const switchToRegister = '没有账号？去注册';
+  static const switchToLogin = '已有账号？去登录';
   static const emailLabel = '邮箱';
+  static const displayNameLabel = '显示名称';
   static const passwordLabel = '密码';
   static const emailRequired = '请输入邮箱';
+  static const displayNameRequired = '请输入显示名称';
   static const passwordRequired = '请输入密码';
   static const loggingIn = '登录中…';
+  static const registering = '注册中…';
+  static const restoringSession = '正在恢复上次登录…';
+  static const lastSignedInAs = '上次登录';
 
   static const settings = '设置';
   static const userInfo = '用户信息';
@@ -133,6 +142,11 @@
 
   static const scheduleListTitle = '我的日程';
   static const quickNoteListTitle = '我的速记';
+  static const quickNoteTagsTitle = '标签云';
+  static const emptyQuickNoteTags = '还没有可用标签。';
+  static const filterByTag = '按标签筛选';
+  static const clearTagFilter = '清除筛选';
+  static const addTagHint = '输入标签后回车';
   static const delete = '删除';
   static const deleteScheduleTitle = '删除日程';
   static const deleteQuickNoteTitle = '删除速记';

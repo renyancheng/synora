@@ -47,3 +47,8 @@ class QuickNoteItem(BaseModel):
     tags: list[str]
     created_at: datetime
     source_attachment_ids: list[int] = Field(default_factory=list)
+
+
+class QuickNoteTagItem(BaseModel):
+    tag: str
+    count: int

@@ -52,6 +52,18 @@ class ModelAdapterTests(unittest.TestCase):
 
         self.assertEqual(ModelAdapter._extract_message_text(_CommandLike()), "")
 
+    def test_current_time_prompt_contains_timezone_and_readable_time(self) -> None:
+        settings = Settings(
+            llm_api_key="test-key",
+            default_timezone="Asia/Shanghai",
+        )
+
+        prompt = ModelAdapter(settings)._current_time_prompt()
+
+        self.assertIn("当前时区：Asia/Shanghai", prompt)
+        self.assertIn("当前时间：", prompt)
+        self.assertIn("当前本地时间：", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()
