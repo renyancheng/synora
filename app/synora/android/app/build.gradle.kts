@@ -4,6 +4,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val splitPerAbi = (project.findProperty("split-per-abi") as? String)?.toBoolean() == true
+
 android {
     namespace = "com.example.synora"
     compileSdk = flutter.compileSdkVersion
@@ -23,8 +25,10 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
-        ndk {
-            abiFilters += "arm64-v8a"
+        if (!splitPerAbi) {
+            ndk {
+                abiFilters += "arm64-v8a"
+            }
         }
     }
 
