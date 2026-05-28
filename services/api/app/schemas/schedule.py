@@ -25,6 +25,7 @@ class ScheduleEventDraft(BaseModel):
     start: EventDateTimeValue
     end: EventDateTimeValue
     recurrence: list[str] = Field(default_factory=list)
+    reminder_preset: str = "previous_day_1700"
     source_attachment_ids: list[int] = Field(default_factory=list)
     parse_confidence: float = 0.0
     evidence_digest: list[str] = Field(default_factory=list)
@@ -123,6 +124,7 @@ class ScheduleItem(BaseModel):
     end: EventDateTimeValue
     recurrence: list[str] = Field(default_factory=list)
     source_attachment_ids: list[int] = Field(default_factory=list)
+    reminder_preset: str = "previous_day_1700"
     reminder_offsets_minutes: list[int]
     status: str
     created_at: datetime

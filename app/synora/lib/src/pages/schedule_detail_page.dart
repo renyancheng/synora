@@ -30,6 +30,7 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
   late DateTime _startAt;
   late DateTime _endAt;
   late Duration _defaultDuration;
+  late String _reminderPreset;
   bool _editing = false;
   bool _saving = false;
 
@@ -62,6 +63,7 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
     _defaultDuration = duration.isNegative || duration.inMinutes < 1
         ? const Duration(hours: 1)
         : duration;
+    _reminderPreset = _item.reminderPreset;
   }
 
   void _toggleEdit() {
@@ -136,6 +138,7 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
         timeZone: _item.end.timeZone,
       ),
       recurrence: List<String>.from(_item.recurrence),
+      reminderPreset: _reminderPreset,
       sourceAttachmentIds: List<int>.from(_item.sourceAttachmentIds),
       parseConfidence: _item.parseConfidence,
       evidenceDigest: const <String>[],
@@ -278,7 +281,7 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
         ),
         _DetailLine(
           label: AppStrings.reminderField,
-          value: formatReminderOffsets(_item.reminderOffsetsMinutes),
+          value: formatReminderPreset(_item.reminderPreset),
         ),
         _DetailLine(
           label: AppStrings.recurrenceField,
@@ -361,6 +364,27 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
           decoration: const InputDecoration(labelText: AppStrings.detailsField),
         ),
         const SizedBox(height: 16),
+        DropdownButtonFormField<String>(
+          initialValue: _reminderPreset,
+          decoration: const InputDecoration(labelText: AppStrings.reminderField),
+          items: reminderPresetOptions
+              .map(
+                (item) => DropdownMenuItem<String>(
+                  value: item,
+                  child: Text(formatReminderPreset(item)),
+                ),
+              )
+              .toList(),
+          onChanged: _saving
+              ? null
+              : (value) {
+                  if (value == null) {
+                    return;
+                  }
+                  setState(() => _reminderPreset = value);
+                },
+        ),
+        const SizedBox(height: 16),
         _DetailLine(
           label: AppStrings.sourceTextField,
           value: _item.sourceText.trim().isEmpty
@@ -371,7 +395,7 @@ class _ScheduleDetailPageState extends State<ScheduleDetailPage> {
         ),
         _DetailLine(
           label: AppStrings.reminderField,
-          value: formatReminderOffsets(_item.reminderOffsetsMinutes),
+          value: formatReminderPreset(_item.reminderPreset),
         ),
         _DetailLine(
           label: AppStrings.recurrenceField,

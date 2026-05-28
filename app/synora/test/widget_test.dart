@@ -32,6 +32,27 @@ class FakeApiClient extends ApiClient {
       <NotificationItem>[];
 
   @override
+  Future<CurrentSessionInfo> fetchCurrentSession() async {
+    return CurrentSessionInfo(
+      expiresAt: DateTime.parse('2026-05-24T00:00:00Z'),
+      user: UserProfile(
+        id: 1,
+        email: 'han.teacher@example.com',
+        displayName: '韩老师',
+      ),
+    );
+  }
+
+  @override
+  Future<UserPreferences> fetchUserPreferences() async =>
+      UserPreferences(wecomRobotWebhook: null);
+
+  @override
+  Future<UserPreferences> updateUserPreferences({
+    required String? wecomRobotWebhook,
+  }) async => UserPreferences(wecomRobotWebhook: wecomRobotWebhook);
+
+  @override
   Future<MemoryListResult> fetchMemory() async {
     return MemoryListResult(
       summary: '韩老师通常希望提前一天提醒，晚上十点后不要再安排会议。',

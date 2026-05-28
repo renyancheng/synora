@@ -4,6 +4,7 @@ import '../app_controller.dart';
 import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
+import '../tag_palette.dart';
 import 'quick_note_detail_page.dart';
 import 'quick_note_tag_cloud_page.dart';
 
@@ -105,6 +106,9 @@ class _QuickNoteListPageState extends State<QuickNoteListPage> {
                     children: <Widget>[
                       Chip(
                         label: Text('${AppStrings.filterByTag}：$_activeTag'),
+                        backgroundColor: TagPalette.resolve(_activeTag!).background,
+                        side: BorderSide(color: TagPalette.resolve(_activeTag!).border),
+                        labelStyle: TextStyle(color: TagPalette.resolve(_activeTag!).foreground),
                       ),
                       ActionChip(
                         label: const Text(AppStrings.clearTagFilter),
@@ -126,9 +130,34 @@ class _QuickNoteListPageState extends State<QuickNoteListPage> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       subtitle: Text(
-                        '${item.tags.isEmpty ? AppStrings.noContent : item.tags.join(' / ')}\n${formatDateTime(item.createdAt)}',
+                        formatDateTime(item.createdAt),
                       ),
-                      isThreeLine: true,
+                      isThreeLine: item.tags.isNotEmpty,
+                      trailing: item.tags.isEmpty
+                          ? null
+                          : Wrap(
+                              spacing: 6,
+                              runSpacing: 6,
+                              children: item.tags.take(2).map((tag) {
+                                final colors = TagPalette.resolve(tag);
+                                return Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: colors.background,
+                                    borderRadius: BorderRadius.circular(999),
+                                    border: Border.all(color: colors.border),
+                                  ),
+                                  child: Text(
+                                    tag,
+                                    style: TextStyle(
+                                      color: colors.foreground,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
                       onTap: () => _openDetails(item),
                     ),
                   ),

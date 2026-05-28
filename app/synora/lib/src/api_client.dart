@@ -73,6 +73,22 @@ class ApiClient {
     return CurrentSessionInfo.fromJson(json as Map<String, dynamic>);
   }
 
+  Future<UserPreferences> fetchUserPreferences() async {
+    final json = await _sendJson('GET', '/users/me/preferences');
+    return UserPreferences.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<UserPreferences> updateUserPreferences({
+    required String? wecomRobotWebhook,
+  }) async {
+    final json = await _sendJson(
+      'PATCH',
+      '/users/me/preferences',
+      body: <String, dynamic>{'wecom_robot_webhook': wecomRobotWebhook},
+    );
+    return UserPreferences.fromJson(json as Map<String, dynamic>);
+  }
+
   Future<void> logout() async {
     try {
       await _sendJson('POST', '/auth/logout');

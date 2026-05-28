@@ -219,7 +219,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
     @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
-    async def test_confirm_schedule_action_returns_result_card(
+    async def test_confirm_schedule_action_updates_existing_cards_in_place(
         self,
         _intent_mock,
         _title_mock,
@@ -285,7 +285,14 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             ConversationActionRequest(action="confirm_schedule_draft"),
         )
 
-        self.assertEqual(assistant_messages[0].message_type, "result_card")
+        self.assertEqual(assistant_messages, [])
+        cards = self.db.scalars(
+            select(ConversationMessage)
+            .where(ConversationMessage.conversation_id == thread.id, ConversationMessage.action_group_id.is_not(None))
+        ).all()
+        self.assertTrue(cards)
+        self.assertTrue(all((item.structured_payload_json or {}).get("lifecycle_status") == "confirmed" for item in cards))
+        self.assertTrue(all((item.structured_payload_json or {}).get("is_actionable") is False for item in cards))
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNone(pending)
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
@@ -342,7 +349,13 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             thread.id,
             ConversationActionRequest(action="confirm_quick_note"),
         )
-        self.assertEqual(confirm_messages[0].message_type, "result_card")
+        self.assertEqual(confirm_messages, [])
+        cards = self.db.scalars(
+            select(ConversationMessage)
+            .where(ConversationMessage.conversation_id == thread.id, ConversationMessage.message_type == "quick_note_preview_card")
+        ).all()
+        self.assertTrue(cards)
+        self.assertTrue(all((item.structured_payload_json or {}).get("lifecycle_status") == "confirmed" for item in cards))
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
     @patch("app.domains.conversation.service.write_user_memory.delay")

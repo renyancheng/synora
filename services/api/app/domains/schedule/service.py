@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.domains.memory.service import MemoryService
-from app.models import NotificationAudit, ReminderJob, Schedule
+from app.models import NotificationAudit, ReminderJob, Schedule, User
 from app.runtime.approval_gate import ApprovalGate
-from app.runtime.model_adapter import ModelAdapter
 from app.runtime.tool_impls import parse_schedule_draft
 from app.schemas.schedule import (
     ConflictCheckResponse,
@@ -19,6 +18,18 @@ from app.schemas.schedule import (
     ScheduleEventDraft,
 )
 from app.security import sha256_text
+
+REMINDER_PRESET_DEFAULT = "previous_day_1700"
+REMINDER_PRESET_OPTIONS = {
+    "immediate",
+    "30m_before",
+    "1h_before",
+    "2h_before",
+    "same_day_0900",
+    "previous_day_1700",
+    "previous_day_0900",
+    "two_days_before_0900",
+}
 
 
 def build_draft_hash(draft: ScheduleEventDraft) -> str:
@@ -107,24 +118,77 @@ def _expand_occurrences(
     return occurrences
 
 
-def _build_reminder_jobs(schedule: Schedule) -> list[ReminderJob]:
-    now = datetime.now(timezone.utc)
-    offsets = schedule.reminder_offsets_minutes_json or [-1440]
-    scheduled_times: list[datetime] = []
-    for offset in offsets:
-        reminder_time = schedule.start_at + timedelta(minutes=int(offset))
-        if reminder_time <= now:
-            fallback_minutes = -30 if schedule.start_at - timedelta(minutes=30) > now else 5
-            reminder_time = schedule.start_at + timedelta(minutes=fallback_minutes)
-            if reminder_time <= now:
-                reminder_time = now + timedelta(minutes=5)
-        scheduled_times.append(reminder_time)
+def normalize_reminder_preset(value: str | None) -> str:
+    candidate = str(value or "").strip()
+    if candidate in REMINDER_PRESET_OPTIONS:
+        return candidate
+    return REMINDER_PRESET_DEFAULT
 
-    earliest = min(scheduled_times)
-    return [
-        ReminderJob(schedule_id=schedule.id, channel="email", scheduled_for=earliest),
-        ReminderJob(schedule_id=schedule.id, channel="wecom_robot", scheduled_for=earliest),
-    ]
+
+def _preset_anchor_time(preset: str) -> tuple[int, int] | None:
+    if preset == "same_day_0900":
+        return (0, 9)
+    if preset == "previous_day_1700":
+        return (1, 17)
+    if preset == "previous_day_0900":
+        return (1, 9)
+    if preset == "two_days_before_0900":
+        return (2, 9)
+    return None
+
+
+def compute_schedule_reminder(
+    *,
+    start_at: datetime,
+    reminder_preset: str,
+    time_zone_name: str,
+    now: datetime | None = None,
+) -> tuple[list[int], datetime]:
+    preset = normalize_reminder_preset(reminder_preset)
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    zone = ZoneInfo(time_zone_name)
+    local_start = start_at.astimezone(zone)
+
+    if preset == "immediate":
+        reminder_at = current
+    elif preset == "30m_before":
+        reminder_at = start_at - timedelta(minutes=30)
+    elif preset == "1h_before":
+        reminder_at = start_at - timedelta(hours=1)
+    elif preset == "2h_before":
+        reminder_at = start_at - timedelta(hours=2)
+    else:
+        anchor = _preset_anchor_time(preset)
+        if anchor is None:
+            anchor = _preset_anchor_time(REMINDER_PRESET_DEFAULT)
+        days_before, hour = anchor or (1, 17)
+        local_day = local_start.date() - timedelta(days=days_before)
+        reminder_local = datetime.combine(local_day, time(hour=hour, minute=0), tzinfo=zone)
+        reminder_at = reminder_local.astimezone(timezone.utc)
+
+    if reminder_at <= current and start_at > current:
+        reminder_at = current
+        preset = "immediate"
+
+    offset_minutes = int((reminder_at - start_at).total_seconds() // 60)
+    return [offset_minutes], reminder_at
+
+
+def resolve_schedule_webhook(db: Session, *, user_id: int) -> str | None:
+    user = db.scalar(select(User).where(User.id == user_id))
+    if user and (user.wecom_robot_webhook or "").strip():
+        return user.wecom_robot_webhook.strip()
+    return None
+
+
+def _build_reminder_jobs(db: Session, schedule: Schedule) -> list[ReminderJob]:
+    earliest = schedule.reminder_at or schedule.start_at
+    jobs = [ReminderJob(schedule_id=schedule.id, channel="email", scheduled_for=earliest)]
+    settings = get_settings()
+    webhook = resolve_schedule_webhook(db, user_id=schedule.user_id) or settings.wecom_robot_webhook.strip()
+    if webhook:
+        jobs.append(ReminderJob(schedule_id=schedule.id, channel="wecom_robot", scheduled_for=earliest))
+    return jobs
 
 
 def create_schedule_draft(db: Session, user_id: int, payload: ScheduleDraftInput) -> tuple[ScheduleEventDraft, str, list[str], list[str], list[str], float]:
@@ -261,8 +325,12 @@ def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_t
     )
 
     start_at, end_at = _event_bounds(schedule_draft)
-    reminder_offsets = ModelAdapter.compute_reminder_offsets(start_at)
-    primary_reminder_at = min(start_at + timedelta(minutes=offset) for offset in reminder_offsets)
+    reminder_preset = normalize_reminder_preset(schedule_draft.reminder_preset)
+    reminder_offsets, primary_reminder_at = compute_schedule_reminder(
+        start_at=start_at,
+        reminder_preset=reminder_preset,
+        time_zone_name=schedule_draft.start.time_zone,
+    )
     schedule = Schedule(
         user_id=user_id,
         title=schedule_draft.title,
@@ -275,6 +343,7 @@ def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_t
         is_all_day=schedule_draft.is_all_day,
         recurrence_rules_json=schedule_draft.recurrence,
         reminder_offsets_minutes_json=reminder_offsets,
+        reminder_preset=reminder_preset,
         source_attachment_ids=schedule_draft.source_attachment_ids,
         parse_confidence=schedule_draft.parse_confidence,
         scheduled_at=start_at,
@@ -286,7 +355,7 @@ def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_t
     db.commit()
     db.refresh(schedule)
 
-    jobs = _build_reminder_jobs(schedule)
+    jobs = _build_reminder_jobs(db, schedule)
     db.add_all(jobs)
     db.commit()
     for job in jobs:
@@ -364,8 +433,12 @@ def confirm_schedule_edit(
     )
 
     start_at, end_at = _event_bounds(draft)
-    reminder_offsets = ModelAdapter.compute_reminder_offsets(start_at)
-    primary_reminder_at = min(start_at + timedelta(minutes=offset) for offset in reminder_offsets)
+    reminder_preset = normalize_reminder_preset(draft.reminder_preset)
+    reminder_offsets, primary_reminder_at = compute_schedule_reminder(
+        start_at=start_at,
+        reminder_preset=reminder_preset,
+        time_zone_name=draft.start.time_zone,
+    )
 
     schedule.title = draft.title
     schedule.location = draft.location
@@ -377,6 +450,7 @@ def confirm_schedule_edit(
     schedule.is_all_day = draft.is_all_day
     schedule.recurrence_rules_json = list(draft.recurrence)
     schedule.reminder_offsets_minutes_json = reminder_offsets
+    schedule.reminder_preset = reminder_preset
     schedule.source_attachment_ids = list(draft.source_attachment_ids)
     schedule.parse_confidence = draft.parse_confidence
     schedule.scheduled_at = start_at
@@ -391,7 +465,7 @@ def confirm_schedule_edit(
     db.commit()
     db.refresh(schedule)
 
-    jobs = _build_reminder_jobs(schedule)
+    jobs = _build_reminder_jobs(db, schedule)
     db.add_all(jobs)
     db.commit()
     for job in jobs:

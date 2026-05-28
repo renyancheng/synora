@@ -51,6 +51,7 @@ def _schedule_item(row: Schedule) -> ScheduleItem:
         end=_event_value(row.end_at, row.time_zone),
         recurrence=list(row.recurrence_rules_json or []),
         source_attachment_ids=list(row.source_attachment_ids or []),
+        reminder_preset=row.reminder_preset or "previous_day_1700",
         reminder_offsets_minutes=[int(item) for item in (row.reminder_offsets_minutes_json or [])],
         status=row.status,
         created_at=row.created_at,

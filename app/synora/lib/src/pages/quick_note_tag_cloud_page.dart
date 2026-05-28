@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../models.dart';
 import '../strings.dart';
+import '../tag_palette.dart';
 import 'quick_note_list_page.dart';
 
 class QuickNoteTagCloudPage extends StatefulWidget {
@@ -57,23 +58,44 @@ class _QuickNoteTagCloudPageState extends State<QuickNoteTagCloudPage> {
           if (tags.isEmpty) {
             return const Center(child: Text(AppStrings.emptyQuickNoteTags));
           }
-          return SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: tags
-                  .map(
-                    (item) => ActionChip(
-                      avatar: CircleAvatar(
-                        radius: 12,
-                        child: Text('${item.count}'),
-                      ),
-                      label: Text(item.tag),
-                      onPressed: () => _openTag(item.tag),
-                    ),
-                  )
-                  .toList(),
+          return LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: Center(
+                  child: Wrap(
+                    alignment: WrapAlignment.center,
+                    runAlignment: WrapAlignment.center,
+                    spacing: 12,
+                    runSpacing: 14,
+                    children: tags.map((item) {
+                      final colors = TagPalette.resolve(item.tag);
+                      final fontSize = item.count >= 6 ? 18.0 : item.count >= 3 ? 15.0 : 13.0;
+                      return InkWell(
+                        borderRadius: BorderRadius.circular(999),
+                        onTap: () => _openTag(item.tag),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: colors.background,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(color: colors.border),
+                          ),
+                          child: Text(
+                            '${item.tag} · ${item.count}',
+                            style: TextStyle(
+                              color: colors.foreground,
+                              fontSize: fontSize,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ),
             ),
           );
         },

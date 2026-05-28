@@ -205,6 +205,8 @@
         return '待确认';
       case 'conflict_review':
         return '待检查';
+      case 'confirmed':
+        return '已确认';
       case 'completed':
         return '已完成';
       case 'cancelled':

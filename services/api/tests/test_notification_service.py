@@ -69,6 +69,23 @@ class NotificationServiceTests(unittest.TestCase):
         self.assertEqual(updated.retry_count, 0)
         self.assertIsNotNone(updated.delivered_at)
         self.assertEqual(updated.external_id, f"wecom-{audit.id}")
+        self.assertEqual(post_mock.call_args.args[0], "https://example.com/webhook")
+
+    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://global.example.com/webhook"))
+    @patch("app.domains.notification.service.httpx.post")
+    def test_wecom_notification_prefers_user_webhook(self, post_mock: Mock, _settings_mock) -> None:
+        self.user.wecom_robot_webhook = "https://user.example.com/webhook"
+        self.db.commit()
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"errcode": 0, "errmsg": "ok"}
+        post_mock.return_value = response
+        audit = self._create_audit()
+
+        updated = send_wecom_robot_notification(self.db, audit.id)
+
+        self.assertEqual(updated.status, "delivered")
+        self.assertEqual(post_mock.call_args.args[0], "https://user.example.com/webhook")
 
     @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://example.com/webhook"))
     @patch("app.domains.notification.service.httpx.post")

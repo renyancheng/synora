@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../strings.dart';
+import '../tag_palette.dart';
 
 class TagInputField extends StatefulWidget {
   const TagInputField({
@@ -88,6 +89,9 @@ class _TagInputFieldState extends State<TagInputField> {
               .map(
                 (tag) => InputChip(
                   label: Text(tag),
+                  backgroundColor: TagPalette.resolve(tag).background,
+                  side: BorderSide(color: TagPalette.resolve(tag).border),
+                  labelStyle: TextStyle(color: TagPalette.resolve(tag).foreground),
                   onDeleted: () => _removeTag(tag),
                 ),
               )

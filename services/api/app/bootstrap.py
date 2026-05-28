@@ -41,6 +41,7 @@ def _reconcile_legacy_schema() -> None:
     _ensure_column("quick_notes", "source_attachment_ids", "JSON NOT NULL DEFAULT '[]'")
     _ensure_column("quick_notes", "topic_tags_json", "JSON NOT NULL DEFAULT '[]'")
     _ensure_column("quick_notes", "source_type", "VARCHAR(40) NOT NULL DEFAULT 'attachment'")
+    _ensure_column("users", "wecom_robot_webhook", "TEXT")
 
     _ensure_column("approval_requests", "normalized_payload_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column("approval_requests", "evidence_digest_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -52,6 +53,7 @@ def _reconcile_legacy_schema() -> None:
     _ensure_column("conversation_messages", "status", "VARCHAR(30) NOT NULL DEFAULT 'completed'")
     _ensure_column("conversation_messages", "action_group_id", "VARCHAR(64)")
     _ensure_column("conversation_messages", "revision", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column("schedules", "reminder_preset", "VARCHAR(40) NOT NULL DEFAULT 'previous_day_1700'")
 
     _ensure_column("agent_runs", "conversation_id", "INTEGER")
     _ensure_column("agent_runs", "user_message_id", "INTEGER")
@@ -75,6 +77,8 @@ def _reconcile_legacy_schema() -> None:
             if not offsets:
                 offsets = [-1440]
             row.reminder_offsets_minutes_json = offsets
+            if not getattr(row, "reminder_preset", None):
+                row.reminder_preset = "previous_day_1700"
         db.commit()
     finally:
         db.close()

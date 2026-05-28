@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import NotificationAudit, ReminderJob, Schedule
+from app.models import NotificationAudit, ReminderJob, Schedule, User
 
 
 def _finalize_notification_audit(db: Session, audit: NotificationAudit) -> NotificationAudit:
@@ -92,12 +92,19 @@ def send_wecom_robot_notification(db: Session, audit_id: int) -> NotificationAud
         raise ValueError("通知审计记录不存在。")
 
     payload = json.loads(audit.payload_json)
-    if not settings.wecom_robot_webhook:
+    webhook = None
+    if audit.user_id:
+        user = db.scalar(select(User).where(User.id == audit.user_id))
+        if user and (user.wecom_robot_webhook or "").strip():
+            webhook = user.wecom_robot_webhook.strip()
+    if not webhook:
+        webhook = settings.wecom_robot_webhook.strip()
+    if not webhook:
         return _fail_notification_audit(db, audit, "未配置企业微信群机器人 Webhook。")
 
     try:
         response = httpx.post(
-            settings.wecom_robot_webhook,
+            webhook,
             json={
                 "msgtype": "markdown",
                 "markdown": {"content": payload.get("markdown", payload.get("body", ""))},

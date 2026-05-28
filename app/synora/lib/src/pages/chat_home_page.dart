@@ -9,6 +9,7 @@ import '../attachment_picker.dart';
 import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
+import '../tag_palette.dart';
 import '../voice_input_service.dart';
 import 'event_date_time_field.dart';
 import 'quick_note_list_page.dart';
@@ -1261,8 +1262,6 @@ class _StructuredMessageCard extends StatelessWidget {
         return _ConflictCard(message: message);
       case 'quick_note_preview_card':
         return _QuickNotePreviewCard(message: message, onAction: onAction);
-      case 'result_card':
-        return _ResultCard(message: message);
       default:
         return const SizedBox.shrink();
     }
@@ -1286,6 +1285,7 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
   late final TextEditingController _detailsController;
   late DateTime? _startValue;
   late DateTime? _endValue;
+  late String _reminderPreset;
   bool _busy = false;
 
   Map<String, dynamic> get _payload => widget.message.structuredPayload;
@@ -1312,6 +1312,7 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
     _endValue = end == null
         ? null
         : DateTime.tryParse(end['dateTime'] as String? ?? '')?.toLocal();
+    _reminderPreset = _draft['reminder_preset'] as String? ?? 'previous_day_1700';
   }
 
   @override
@@ -1335,6 +1336,7 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
           'end_at': parsedEnd?.toLocal().toIso8601String(),
           'location': _locationController.text.trim(),
           'details': _detailsController.text.trim(),
+          'reminder_preset': _reminderPreset,
         },
       );
     } finally {
@@ -1347,7 +1349,10 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
   Future<void> _confirm() async {
     setState(() => _busy = true);
     try {
-      await widget.onAction('confirm_schedule_draft');
+      await widget.onAction(
+        'confirm_schedule_draft',
+        payload: <String, dynamic>{'reminder_preset': _reminderPreset},
+      );
     } finally {
       if (mounted) {
         setState(() => _busy = false);
@@ -1385,6 +1390,7 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
     final recurrence = (_draft['recurrence'] as List<dynamic>? ?? <dynamic>[])
         .cast<String>();
     final isEditing = stage == 'needs_input' && isActionable;
+    final terminalSummary = _payload['terminal_summary'] as String?;
 
     return _CardShell(
       title: AppStrings.scheduleDraft,
@@ -1451,6 +1457,27 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
             ),
           ),
           const SizedBox(height: 12),
+          DropdownButtonFormField<String>(
+            initialValue: _reminderPreset,
+            decoration: const InputDecoration(labelText: AppStrings.reminderField),
+            items: reminderPresetOptions
+                .map(
+                  (item) => DropdownMenuItem<String>(
+                    value: item,
+                    child: Text(formatReminderPreset(item)),
+                  ),
+                )
+                .toList(),
+            onChanged: isActionable && !_busy
+                ? (value) {
+                    if (value == null) {
+                      return;
+                    }
+                    setState(() => _reminderPreset = value);
+                  }
+                : null,
+          ),
+          const SizedBox(height: 12),
           _SectionChips(
             title: AppStrings.missingFieldsField,
             values: missingFields.map(AppStrings.missingFieldLabel).toList(),
@@ -1464,6 +1491,12 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
             title: AppStrings.recurrenceField,
             values: <String>[formatRecurrence(recurrence)],
           ),
+          if (terminalSummary != null && terminalSummary.trim().isNotEmpty) ...<Widget>[
+            Text(terminalSummary),
+            const SizedBox(height: 8),
+          ],
+          Text('${AppStrings.reminderField}：${formatReminderPreset(_reminderPreset)}'),
+          const SizedBox(height: 8),
           Text(
             '${AppStrings.parseConfidenceField}：${(parseConfidence * 100).toStringAsFixed(0)}%',
           ),
@@ -1612,6 +1645,7 @@ class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
     final lifecycle =
         payload['lifecycle_status'] as String? ?? 'approval_pending';
     final isActionable = payload['is_actionable'] as bool? ?? false;
+    final terminalSummary = payload['terminal_summary'] as String?;
 
     return _CardShell(
       title: AppStrings.quickNotePreview,
@@ -1621,7 +1655,11 @@ class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
         children: <Widget>[
           Text(payload['normalized_content'] as String? ?? ''),
           const SizedBox(height: 12),
-          _SectionChips(title: AppStrings.tagsField, values: tags),
+          if (terminalSummary != null && terminalSummary.trim().isNotEmpty) ...<Widget>[
+            Text(terminalSummary),
+            const SizedBox(height: 12),
+          ],
+          _SectionChips(title: AppStrings.tagsField, values: tags, colored: true),
           _SectionList(title: AppStrings.evidenceField, values: evidenceDigest),
           if (isActionable) ...<Widget>[
             const SizedBox(height: 16),
@@ -1651,102 +1689,6 @@ class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
   }
 }
 
-class _ResultCard extends StatelessWidget {
-  const _ResultCard({required this.message});
-
-  final ConversationMessageItem message;
-
-  @override
-  Widget build(BuildContext context) {
-    final payload = message.structuredPayload;
-    final resultKind = payload['result_kind'] as String? ?? '';
-    final summary =
-        payload['summary'] as String? ??
-        AppStrings.chatActionSummary(resultKind);
-    final channels = (payload['channels'] as List<dynamic>? ?? <dynamic>[])
-        .cast<String>();
-    final details = payload['details'] as String?;
-    final content = payload['content'] as String?;
-    final sourceText = payload['source_text'] as String?;
-
-    return _CardShell(
-      title: AppStrings.resultCard,
-      lifecycle: 'completed',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          MarkdownBody(
-            data: summary,
-            selectable: true,
-            styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
-          ),
-          if (payload['title'] is String) ...<Widget>[
-            const SizedBox(height: 8),
-            Text('${AppStrings.titleField}：${payload['title']}'),
-          ],
-          if (payload['start'] is Map<String, dynamic> &&
-              payload['end'] is Map<String, dynamic>) ...<Widget>[
-            const SizedBox(height: 8),
-            Text(
-              '${AppStrings.startField}：${formatEventRange(start: EventDateTimeValue.fromJson(payload['start'] as Map<String, dynamic>), end: EventDateTimeValue.fromJson(payload['end'] as Map<String, dynamic>), isAllDay: false)}',
-            ),
-          ],
-          if (sourceText != null && sourceText.trim().isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            Text(
-              AppStrings.sourceTextField,
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 6),
-            SelectableText(sourceText),
-          ],
-          if (details != null && details.trim().isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            Text(
-              AppStrings.detailsField,
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 6),
-            MarkdownBody(
-              data: details,
-              selectable: true,
-              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
-            ),
-          ],
-          if (content != null && content.trim().isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            Text(
-              AppStrings.detailsField,
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 6),
-            MarkdownBody(
-              data: content,
-              selectable: true,
-              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)),
-            ),
-          ],
-          if ((payload['tags'] as List<dynamic>? ?? <dynamic>[])
-              .isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            _SectionChips(
-              title: AppStrings.tagsField,
-              values: (payload['tags'] as List<dynamic>).cast<String>(),
-            ),
-          ],
-          if (channels.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            _SectionChips(
-              title: AppStrings.notificationHistory,
-              values: channels.map(AppStrings.channelLabel).toList(),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
 class _CardShell extends StatelessWidget {
   const _CardShell({
     required this.title,
@@ -1761,6 +1703,12 @@ class _CardShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
+      color: switch (lifecycle) {
+        'confirmed' => const Color(0xFFF0FAF3),
+        'cancelled' => const Color(0xFFFFF6EF),
+        'superseded' => const Color(0xFFF4F6F8),
+        _ => null,
+      },
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -1787,10 +1735,11 @@ class _CardShell extends StatelessWidget {
 }
 
 class _SectionChips extends StatelessWidget {
-  const _SectionChips({required this.title, required this.values});
+  const _SectionChips({required this.title, required this.values, this.colored = false});
 
   final String title;
   final List<String> values;
+  final bool colored;
 
   @override
   Widget build(BuildContext context) {
@@ -1807,7 +1756,17 @@ class _SectionChips extends StatelessWidget {
           Wrap(
             spacing: 8,
             runSpacing: 8,
-            children: values.map((item) => Chip(label: Text(item))).toList(),
+            children: values.map((item) {
+              if (!colored) {
+                return Chip(label: Text(item));
+              }
+              final colors = TagPalette.resolve(item);
+              return Chip(
+                label: Text(item, style: TextStyle(color: colors.foreground)),
+                backgroundColor: colors.background,
+                side: BorderSide(color: colors.border),
+              );
+            }).toList(),
           ),
         ],
       ),

@@ -152,6 +152,24 @@ class CurrentSessionInfo {
   }
 }
 
+class UserPreferences {
+  UserPreferences({required this.wecomRobotWebhook});
+
+  final String? wecomRobotWebhook;
+
+  factory UserPreferences.fromJson(Map<String, dynamic> json) {
+    return UserPreferences(
+      wecomRobotWebhook: (json['wecom_robot_webhook'] as String?)?.trim().isEmpty == true
+          ? null
+          : json['wecom_robot_webhook'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'wecom_robot_webhook': wecomRobotWebhook,
+      };
+}
+
 class SessionInfo {
   SessionInfo({
     required this.accessToken,
@@ -238,6 +256,7 @@ class ScheduleDraft {
     required this.start,
     required this.end,
     required this.recurrence,
+    required this.reminderPreset,
     required this.sourceAttachmentIds,
     required this.parseConfidence,
     required this.evidenceDigest,
@@ -252,6 +271,7 @@ class ScheduleDraft {
   final EventDateTimeValue start;
   final EventDateTimeValue end;
   final List<String> recurrence;
+  final String reminderPreset;
   final List<int> sourceAttachmentIds;
   final double parseConfidence;
   final List<String> evidenceDigest;
@@ -266,6 +286,7 @@ class ScheduleDraft {
       start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
       end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
       recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      reminderPreset: json['reminder_preset'] as String? ?? 'previous_day_1700',
       sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
       parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
       evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
@@ -282,6 +303,7 @@ class ScheduleDraft {
       'start': start.toJson(),
       'end': end.toJson(),
       'recurrence': recurrence,
+      'reminder_preset': reminderPreset,
       'source_attachment_ids': sourceAttachmentIds,
       'parse_confidence': parseConfidence,
       'evidence_digest': evidenceDigest,
@@ -495,6 +517,7 @@ class ScheduleItem {
     required this.start,
     required this.end,
     required this.recurrence,
+    required this.reminderPreset,
     required this.sourceAttachmentIds,
     required this.reminderOffsetsMinutes,
     required this.status,
@@ -512,6 +535,7 @@ class ScheduleItem {
   final EventDateTimeValue start;
   final EventDateTimeValue end;
   final List<String> recurrence;
+  final String reminderPreset;
   final List<int> sourceAttachmentIds;
   final List<int> reminderOffsetsMinutes;
   final String status;
@@ -529,6 +553,7 @@ class ScheduleItem {
       start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
       end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
       recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      reminderPreset: json['reminder_preset'] as String? ?? 'previous_day_1700',
       sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
       reminderOffsetsMinutes: (json['reminder_offsets_minutes'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
       status: json['status'] as String,
@@ -547,6 +572,7 @@ class ScheduleItem {
     EventDateTimeValue? start,
     EventDateTimeValue? end,
     List<String>? recurrence,
+    String? reminderPreset,
     List<int>? sourceAttachmentIds,
     List<int>? reminderOffsetsMinutes,
     String? status,
@@ -563,6 +589,7 @@ class ScheduleItem {
       start: start ?? this.start,
       end: end ?? this.end,
       recurrence: recurrence ?? this.recurrence,
+      reminderPreset: reminderPreset ?? this.reminderPreset,
       sourceAttachmentIds: sourceAttachmentIds ?? this.sourceAttachmentIds,
       reminderOffsetsMinutes: reminderOffsetsMinutes ?? this.reminderOffsetsMinutes,
       status: status ?? this.status,

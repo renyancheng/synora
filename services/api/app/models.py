@@ -19,6 +19,7 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    wecom_robot_webhook: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     sessions: Mapped[list["SessionState"]] = relationship(back_populates="user")
@@ -70,6 +71,7 @@ class Schedule(Base):
     is_all_day: Mapped[bool] = mapped_column(Boolean, default=False)
     recurrence_rules_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     reminder_offsets_minutes_json: Mapped[list[int]] = mapped_column(JSON, default=list)
+    reminder_preset: Mapped[str] = mapped_column(String(40), default="previous_day_1700")
 
     status: Mapped[str] = mapped_column(String(40), default="scheduled", index=True)
     source_attachment_ids: Mapped[list[int]] = mapped_column(JSON, default=list)

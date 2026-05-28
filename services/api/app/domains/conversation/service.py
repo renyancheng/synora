@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.domains.attachment.service import build_attachment_prompt_assets
 from app.domains.memory.service import MemoryService
 from app.domains.quick_note.service import save_note_after_approval
-from app.domains.schedule.service import build_draft_hash, create_schedule_after_approval, detect_conflicts
+from app.domains.schedule.service import build_draft_hash, create_schedule_after_approval, detect_conflicts, normalize_reminder_preset
 from app.models import AgentRun, AgentToolCallAudit, ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, ConversationThread
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.errors import LLMServiceError
@@ -537,22 +537,15 @@ def apply_action(
 
     action = payload.action
     if action == "dismiss_pending_action":
-        _mark_action_group_status(db, pending.meta_json.get("action_group_id"), lifecycle_status="cancelled", is_actionable=False)
-        _clear_pending_state(db, pending)
-        message = _append_message(
+        _mark_action_group_status(
             db,
-            thread,
-            role="assistant",
-            message_type="result_card",
-            status="completed",
-            text_content="已取消本次待确认操作。",
-            structured_payload={
-                "card_type": "result",
-                "result_kind": "action_cancelled",
-                "summary": "已取消本次待确认操作。",
-            },
+            pending.meta_json.get("action_group_id"),
+            lifecycle_status="cancelled",
+            is_actionable=False,
+            terminal_summary="已取消本次待确认操作。",
         )
-        return thread, [message]
+        _clear_pending_state(db, pending)
+        return thread, []
 
     if action == "submit_missing_fields":
         if pending.pending_type != "schedule":
@@ -562,6 +555,12 @@ def apply_action(
     if action == "confirm_schedule_draft":
         if pending.pending_type != "schedule" or pending.stage != "approval_pending":
             raise ValueError("当前没有可确认的日程草稿。")
+        reminder_preset = payload.payload.get("reminder_preset")
+        if reminder_preset:
+            draft_payload = dict(pending.payload_json or {})
+            draft_payload["reminder_preset"] = normalize_reminder_preset(reminder_preset)
+            pending.payload_json = draft_payload
+            db.commit()
         return thread, _confirm_schedule_pending(db, user_id, thread, pending)
 
     if action == "confirm_quick_note":
@@ -1029,6 +1028,8 @@ def _submit_schedule_missing_fields(
         merged_payload["start"] = {"dateTime": payload["start_at"], "timeZone": existing_draft.start.time_zone}
     if payload.get("end_at"):
         merged_payload["end"] = {"dateTime": payload["end_at"], "timeZone": existing_draft.end.time_zone}
+    if "reminder_preset" in payload:
+        merged_payload["reminder_preset"] = normalize_reminder_preset(payload.get("reminder_preset"))
 
     updated_draft = ScheduleEventDraft.model_validate(merged_payload)
     missing_fields: list[str] = []
@@ -1176,28 +1177,26 @@ def _confirm_schedule_pending(
 ) -> list[ConversationMessage]:
     draft = ScheduleEventDraft.model_validate(pending.payload_json)
     schedule, jobs = create_schedule_after_approval(db, user_id, pending.approval_token or "", draft)
-    _mark_action_group_status(db, pending.meta_json.get("action_group_id"), lifecycle_status="completed", is_actionable=False)
-    _clear_pending_state(db, pending)
-    schedule_source_text = getattr(schedule, "source_text", draft.source_text)
-    message = _append_message(
+    _mark_action_group_status(
         db,
-        thread,
-        role="assistant",
-        message_type="result_card",
-        status="completed",
-        text_content="日程已创建并安排提醒。",
-        structured_payload={
-            "card_type": "result",
-            "result_kind": "schedule_saved",
-            "summary": "日程已创建并安排提醒。",
-            "title": schedule.title,
-            "source_text": schedule_source_text,
-            "details": schedule.details,
-            "start": {"dateTime": schedule.start_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
-            "end": {"dateTime": schedule.end_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
-            "channels": [job.channel for job in jobs],
+        pending.meta_json.get("action_group_id"),
+        lifecycle_status="confirmed",
+        is_actionable=False,
+        terminal_summary="已确认保存日程。",
+        extra_updates={
+            "confirmed_schedule": {
+                "schedule_id": schedule.id,
+                "title": schedule.title,
+                "source_text": getattr(schedule, "source_text", draft.source_text),
+                "details": schedule.details,
+                "start": {"dateTime": schedule.start_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
+                "end": {"dateTime": schedule.end_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
+                "channels": [job.channel for job in jobs],
+                "reminder_preset": getattr(schedule, "reminder_preset", draft.reminder_preset),
+            },
         },
     )
+    _clear_pending_state(db, pending)
     write_user_memory.delay(
         user_id=user_id,
         source_kind="confirmed_schedule",
@@ -1205,7 +1204,7 @@ def _confirm_schedule_pending(
         text=f"{schedule.title} {schedule.details}".strip(),
         summary="已确认日程",
     )
-    return [message]
+    return []
 
 
 
@@ -1263,23 +1262,21 @@ def _confirm_quick_note_pending(
         attachment_ids=list(payload.get("attachment_ids") or []),
         approval_token=pending.approval_token or "",
     )
-    _mark_action_group_status(db, pending.meta_json.get("action_group_id"), lifecycle_status="completed", is_actionable=False)
-    _clear_pending_state(db, pending)
-    message = _append_message(
+    _mark_action_group_status(
         db,
-        thread,
-        role="assistant",
-        message_type="result_card",
-        status="completed",
-        text_content="速记已保存。",
-        structured_payload={
-            "card_type": "result",
-            "result_kind": "quick_note_saved",
-            "summary": "速记已保存。",
-            "content": note.content,
-            "tags": list(note.topic_tags_json),
+        pending.meta_json.get("action_group_id"),
+        lifecycle_status="confirmed",
+        is_actionable=False,
+        terminal_summary="已确认保存速记。",
+        extra_updates={
+            "confirmed_quick_note": {
+                "note_id": note.id,
+                "content": note.content,
+                "tags": list(note.topic_tags_json),
+            },
         },
     )
+    _clear_pending_state(db, pending)
     write_user_memory.delay(
         user_id=user_id,
         source_kind="confirmed_quick_note",
@@ -1287,7 +1284,7 @@ def _confirm_quick_note_pending(
         text=note.content,
         summary="已确认速记",
     )
-    return [message]
+    return []
 
 
 async def _emit_text_stream(db: Session, assistant_message: ConversationMessage, text: str) -> AsyncGenerator[dict, None]:
@@ -1362,6 +1359,8 @@ def _mark_action_group_status(
     *,
     lifecycle_status: str,
     is_actionable: bool,
+    terminal_summary: str | None = None,
+    extra_updates: dict[str, Any] | None = None,
 ) -> None:
     if not action_group_id:
         return
@@ -1371,6 +1370,10 @@ def _mark_action_group_status(
         payload["lifecycle_status"] = lifecycle_status
         payload["is_actionable"] = is_actionable
         payload["actions"] = []
+        if terminal_summary:
+            payload["terminal_summary"] = terminal_summary
+        if extra_updates:
+            payload.update(extra_updates)
         message.structured_payload_json = payload
         message.status = "completed"
     db.commit()

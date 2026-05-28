@@ -84,6 +84,7 @@ class AppController extends ChangeNotifier {
   List<NotificationItem> _notifications = <NotificationItem>[];
   String _memorySummary = '';
   List<MemoryItem> _memoryItems = <MemoryItem>[];
+  UserPreferences _userPreferences = UserPreferences(wecomRobotWebhook: null);
   List<ConversationThreadItem> _conversations = <ConversationThreadItem>[];
   final Map<int, ConversationViewState> _conversationStates = <int, ConversationViewState>{draftConversationId: ConversationViewState.draft()};
   int _activeConversationId = draftConversationId;
@@ -98,6 +99,7 @@ class AppController extends ChangeNotifier {
   List<NotificationItem> get notifications => List<NotificationItem>.unmodifiable(_notifications);
   String get memorySummary => _memorySummary;
   List<MemoryItem> get memoryItems => List<MemoryItem>.unmodifiable(_memoryItems);
+  UserPreferences get userPreferences => _userPreferences;
   List<ConversationThreadItem> get conversations => List<ConversationThreadItem>.unmodifiable(_conversations);
   int get activeConversationId => _activeConversationId;
   bool get isDraftConversation => _activeConversationId == draftConversationId;
@@ -212,12 +214,14 @@ class AppController extends ChangeNotifier {
         _apiClient.fetchQuickNotes(),
         _apiClient.fetchNotifications(),
         _apiClient.fetchConversations(),
+        _apiClient.fetchUserPreferences(),
       ]);
       _schedules = results[0] as List<ScheduleItem>;
       _quickNotes = results[1] as List<QuickNoteItem>;
       _notifications = results[2] as List<NotificationItem>;
       _conversations = (results[3] as List<ConversationThreadItem>)
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      _userPreferences = results[4] as UserPreferences;
       if (!isDraftConversation && !_conversations.any((item) => item.id == _activeConversationId)) {
         beginDraftConversation(notify: false);
       }
@@ -327,7 +331,30 @@ class AppController extends ChangeNotifier {
     if (!message.isUser) {
       return false;
     }
-    return latestUserMessageId == message.id;
+    if (latestUserMessageId != message.id) {
+      return false;
+    }
+    if (message.status == 'failed') {
+      return true;
+    }
+    final messages = activeState.messages;
+    final index = messages.indexWhere((item) => item.id == message.id);
+    if (index < 0) {
+      return false;
+    }
+    final actionGroupId = message.actionGroupId;
+    if (actionGroupId == null || actionGroupId.isEmpty) {
+      return true;
+    }
+    for (final item in messages.skip(index + 1)) {
+      if (item.actionGroupId == actionGroupId &&
+          (item.messageType == 'schedule_draft_card' ||
+              item.messageType == 'quick_note_preview_card' ||
+              item.messageType == 'conflict_card')) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<void> sendChatMessage() async {
@@ -611,6 +638,13 @@ class AppController extends ChangeNotifier {
     return _apiClient.fetchQuickNotes(tag: tag);
   }
 
+  Future<void> updateUserPreferences({required String? wecomRobotWebhook}) async {
+    _userPreferences = await _apiClient.updateUserPreferences(
+      wecomRobotWebhook: wecomRobotWebhook,
+    );
+    notifyListeners();
+  }
+
   Future<void> logout() async {
     _lastKnownUser = _session?.user ?? _lastKnownUser;
     try {
@@ -626,10 +660,11 @@ class AppController extends ChangeNotifier {
     _memorySummary = '';
     _memoryItems = <MemoryItem>[];
     _conversations = <ConversationThreadItem>[];
-    _conversationStates
+      _conversationStates
       ..clear()
       ..[draftConversationId] = ConversationViewState.draft();
     _activeConversationId = draftConversationId;
+    _userPreferences = UserPreferences(wecomRobotWebhook: null);
     notifyListeners();
   }
 
@@ -731,11 +766,13 @@ class AppController extends ChangeNotifier {
       _apiClient.fetchQuickNotes(),
       _apiClient.fetchNotifications(),
       _apiClient.fetchConversations(),
+      _apiClient.fetchUserPreferences(),
     ]);
     _schedules = results[0] as List<ScheduleItem>;
     _quickNotes = results[1] as List<QuickNoteItem>;
     _notifications = results[2] as List<NotificationItem>;
     _conversations = (results[3] as List<ConversationThreadItem>)..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _userPreferences = results[4] as UserPreferences;
   }
 
   void _replaceMessage(int conversationId, int targetId, ConversationMessageItem replacement) {

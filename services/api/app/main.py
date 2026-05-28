@@ -8,7 +8,7 @@ from app.bootstrap import init_db
 from app.config import get_settings
 from app.mcp import create_mcp_exact_route, create_mcp_http_app, get_mcp_server
 from app.mcp.server import get_mcp_mount_path
-from app.routers import agent_sessions, approvals, attachments, auth, conversations, health, memory, notifications, quick_notes, schedule
+from app.routers import agent_sessions, approvals, attachments, auth, conversations, health, memory, notifications, quick_notes, schedule, users
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(users.router)
 app.include_router(attachments.router)
 app.include_router(agent_sessions.router)
 app.include_router(conversations.router)

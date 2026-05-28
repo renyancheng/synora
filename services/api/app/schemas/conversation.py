@@ -80,7 +80,7 @@ class ConversationActionRequest(BaseModel):
 class ConversationActionResponse(BaseModel):
     status: str = "ok"
     conversation: ConversationThreadItem
-    assistant_messages: list[ConversationMessageItem]
+    assistant_messages: list[ConversationMessageItem] = Field(default_factory=list)
 
 
 class ConversationDeleteResponse(BaseModel):

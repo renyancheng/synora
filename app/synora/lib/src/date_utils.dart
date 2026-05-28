@@ -72,6 +72,32 @@ String formatReminderOffsets(List<int> offsets) {
   }).join(' / ');
 }
 
+const Map<String, String> reminderPresetLabels = <String, String>{
+  'immediate': '立刻提醒',
+  '30m_before': '提前 30 分钟',
+  '1h_before': '提前 1 小时',
+  '2h_before': '提前 2 小时',
+  'same_day_0900': '当天 09:00',
+  'previous_day_1700': '前一天 17:00',
+  'previous_day_0900': '前一天 09:00',
+  'two_days_before_0900': '前 2 天 09:00',
+};
+
+const List<String> reminderPresetOptions = <String>[
+  'immediate',
+  '30m_before',
+  '1h_before',
+  '2h_before',
+  'same_day_0900',
+  'previous_day_1700',
+  'previous_day_0900',
+  'two_days_before_0900',
+];
+
+String formatReminderPreset(String preset) {
+  return reminderPresetLabels[preset] ?? reminderPresetLabels['previous_day_1700']!;
+}
+
 String formatRecurrence(List<String> rules) {
   if (rules.isEmpty) {
     return '不重复';

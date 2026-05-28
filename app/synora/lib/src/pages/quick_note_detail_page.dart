@@ -5,6 +5,8 @@ import '../app_controller.dart';
 import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
+import '../tag_palette.dart';
+import 'quick_note_list_page.dart';
 import 'tag_input_field.dart';
 
 class QuickNoteDetailPage extends StatefulWidget {
@@ -111,6 +113,17 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  Future<void> _openTag(String tag) async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => QuickNoteListPage(
+          controller: widget.controller,
+          initialTag: tag,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -183,9 +196,18 @@ class _QuickNoteDetailPageState extends State<QuickNoteDetailPage> {
                   : Wrap(
                       spacing: 8,
                       runSpacing: 8,
-                      children: _item.tags
-                          .map((tag) => Chip(label: Text(tag)))
-                          .toList(),
+                      children: _item.tags.map((tag) {
+                        final colors = TagPalette.resolve(tag);
+                        return ActionChip(
+                          label: Text(
+                            tag,
+                            style: TextStyle(color: colors.foreground),
+                          ),
+                          backgroundColor: colors.background,
+                          side: BorderSide(color: colors.border),
+                          onPressed: () => _openTag(tag),
+                        );
+                      }).toList(),
                     ),
             ),
             _DetailLine(
