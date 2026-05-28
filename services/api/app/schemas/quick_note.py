@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -11,7 +12,7 @@ class QuickNoteDraftRequest(BaseModel):
     content: str | None = None
     tags: list[str] = Field(default_factory=list)
     attachment_ids: list[int] = Field(default_factory=list)
-    context: dict[str, str] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class QuickNoteConfirmRequest(BaseModel):

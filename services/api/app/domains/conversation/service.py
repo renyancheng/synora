@@ -80,6 +80,37 @@ def _schedule_draft_summary(draft: ScheduleEventDraft) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _tool_context(
+    context: dict[str, Any],
+    *,
+    user_id: int,
+    approval_scope: str | None = None,
+) -> dict[str, Any]:
+    tool_context: dict[str, Any] = {}
+    for key, value in context.items():
+        if value is None:
+            continue
+        if isinstance(value, list):
+            tool_context[str(key)] = [str(item) for item in value if item is not None]
+            continue
+        if isinstance(value, dict):
+            tool_context[str(key)] = {str(child_key): value[child_key] for child_key in value}
+            continue
+        tool_context[str(key)] = str(value)
+    tool_context["user_id"] = str(user_id)
+    if approval_scope:
+        tool_context["approval_scope"] = approval_scope
+    return tool_context
+
+
+def _tool_selection_reminder(intent: str) -> str:
+    if intent == "schedule_intake":
+        return "看起来你是想创建日程。请先选择“日程”工具后再发送，我再帮你生成待确认卡片。"
+    if intent == "quick_note_intake":
+        return "看起来你是想保存速记。请先选择“速记”工具后再发送，我再帮你生成待确认卡片。"
+    return "如果你要创建日程或速记，请先选择对应工具后再发送。"
+
+
 
 def _error_payload(exc: Exception, *, assistant_message_id: int) -> dict[str, object]:
     if isinstance(exc, LLMServiceError):
@@ -409,6 +440,8 @@ async def consume_stream(
                 },
                 attachment_parts=attachment_parts,
             )
+            if not selected_tool and intent in {"schedule_intake", "quick_note_intake"}:
+                intent = f"needs_tool_selection:{intent}"
         agent_run.workflow = intent
         agent_run.output_json = {
             **dict(agent_run.output_json or {}),
@@ -429,6 +462,15 @@ async def consume_stream(
             ):
                 yield item
             final_text = assistant_message.text_content or ""
+            _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
+            yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
+            yield {"event": "run_completed", "data": {"stream_id": stream_id}}
+            return
+
+        if intent.startswith("needs_tool_selection:"):
+            final_text = _tool_selection_reminder(intent.split(":", 1)[1])
+            async for item in _emit_text_stream(db, assistant_message, final_text):
+                yield item
             _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
             yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
             yield {"event": "run_completed", "data": {"stream_id": stream_id}}
@@ -650,7 +692,7 @@ async def _process_schedule_intake(
     *,
     text_content: str,
     attachment_ids: list[int],
-    context: dict[str, str],
+    context: dict[str, Any],
     action_group_id: str | None = None,
     revision: int = 1,
 ) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
@@ -673,7 +715,7 @@ async def _process_schedule_intake(
         {
             "text_content": text_content,
             "attachment_ids": attachment_ids,
-            "context": context,
+            "context": _tool_context(context, user_id=user_id),
         },
     )
     _finish_tool_audit(
@@ -759,30 +801,21 @@ async def _process_schedule_intake(
         },
     )
     tool_events.append({"event": "tool_call_started", "data": {"tool_name": "detect_schedule_conflicts"}})
-    conflict_result_model = detect_conflicts(
-        db,
-        user_id,
-        draft,
-        draft_hash,
-        approval_scope=schedule_scope,
-    )
-    conflict_result = {
-        "status": conflict_result_model.status,
-        "conflict_items": [item.model_dump(mode="json", by_alias=True) for item in conflict_result_model.conflict_items],
-        "suggestions": [item.model_dump(mode="json", by_alias=True) for item in conflict_result_model.suggestions],
-        "risk_level": conflict_result_model.risk_level,
-        "approval": {
-            "approval_token": conflict_result_model.approval.approval_token,
-            "action": conflict_result_model.approval.action,
-            "expires_at": conflict_result_model.approval.expires_at.isoformat(),
-            "draft_hash": conflict_result_model.approval.draft_hash,
+    conflict_message, conflict_result = await invoke_synora_tool(
+        "detect_schedule_conflicts",
+        {
+            "draft": draft.model_dump(mode="json", by_alias=True),
+            "draft_hash": draft_hash,
+            "context": _tool_context(context, user_id=user_id, approval_scope=schedule_scope),
         },
-    }
+    )
+    if conflict_result.get("status") == "error":
+        raise ValueError(str(conflict_result.get("message") or "日程冲突检查失败。"))
     _finish_tool_audit(
         db,
         conflict_audit,
         status="ok",
-        response_json={"content": "detect_conflicts", "structured": conflict_result},
+        response_json={"content": str(conflict_message.content), "structured": conflict_result},
     )
     tool_events.append({"event": "tool_call_completed", "data": {"tool_name": "detect_schedule_conflicts"}})
 
@@ -873,7 +906,7 @@ async def _process_quick_note_intake(
     *,
     text_content: str,
     attachment_ids: list[int],
-    context: dict[str, str],
+    context: dict[str, Any],
     action_group_id: str | None = None,
     revision: int = 1,
 ) -> tuple[str, list[int], dict[str, Any] | None, list[dict[str, Any]]]:
@@ -902,10 +935,7 @@ async def _process_quick_note_intake(
             "content": text_content,
             "tags": [],
             "attachment_ids": attachment_ids,
-            "context": {
-                **context,
-                "approval_scope": quick_note_scope,
-            },
+            "context": _tool_context(context, user_id=user_id, approval_scope=quick_note_scope),
         },
     )
     _finish_tool_audit(
@@ -1593,8 +1623,8 @@ def _prepare_pending_regeneration(
     text_content: str,
     attachment_ids: list[int],
     attachment_parts: list[dict[str, Any]],
-    context: dict[str, str],
-) -> tuple[str, str, list[int], list[dict[str, Any]], dict[str, str]]:
+    context: dict[str, Any],
+) -> tuple[str, str, list[int], list[dict[str, Any]], dict[str, Any]]:
     previous_attachment_ids = list(pending.attachment_ids_json or [])
     merged_attachment_ids: list[int] = []
     for attachment_id in previous_attachment_ids + list(attachment_ids):

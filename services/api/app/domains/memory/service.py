@@ -82,7 +82,6 @@ class MemoryService:
                 filters=MetadataFilters(
                     filters=[
                         MetadataFilter(key="user_id", value=user_id),
-                        MetadataFilter(key="is_active", value=True),
                     ]
                 ),
             )
@@ -90,6 +89,8 @@ class MemoryService:
             items: list[dict[str, Any]] = []
             for node in nodes:
                 metadata = dict(getattr(node, "metadata", {}) or {})
+                if metadata.get("is_active") is False:
+                    continue
                 content = getattr(node, "text", None) or getattr(node, "get_content", lambda: "")()
                 memory_id = metadata.get("memory_record_id")
                 if memory_id is None:

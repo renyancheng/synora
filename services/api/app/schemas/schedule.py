@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,7 +11,7 @@ from app.schemas.common import ApprovalInfo, EventDateTimeValue
 class ScheduleDraftInput(BaseModel):
     text_content: str | None = None
     attachment_ids: list[int] = Field(default_factory=list)
-    context: dict[str, str] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ScheduleEventDraft(BaseModel):

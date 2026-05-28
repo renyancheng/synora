@@ -12,12 +12,36 @@ from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, RateLimitError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.config import Settings, get_settings
 from app.runtime.errors import LLMServiceError
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return []
+        items = [
+            re.sub(r"^[\-\*\d\.\)\s]+", "", part).strip()
+            for part in re.split(r"[\r\n]+", cleaned)
+        ]
+        normalized = [item for item in items if item]
+        return normalized or [cleaned]
+    if isinstance(value, (list, tuple, set)):
+        normalized: list[str] = []
+        for item in value:
+            normalized.extend(_coerce_string_list(item))
+        return normalized
+    text = str(value).strip()
+    return [text] if text else []
 
 
 class WorkflowSelection(BaseModel):
@@ -41,11 +65,21 @@ class ScheduleExtractionResult(BaseModel):
     parse_confidence: float = 0.0
     evidence_digest: list[str] = Field(default_factory=list)
 
+    @field_validator("recurrence", "missing_fields", "ambiguity_flags", "evidence_digest", mode="before")
+    @classmethod
+    def _normalize_string_lists(cls, value: object) -> list[str]:
+        return _coerce_string_list(value)
+
 
 class QuickNotePreparationResult(BaseModel):
     normalized_content: str = ""
     preview_tags: list[str] = Field(default_factory=list)
     evidence_digest: list[str] = Field(default_factory=list)
+
+    @field_validator("preview_tags", "evidence_digest", mode="before")
+    @classmethod
+    def _normalize_string_lists(cls, value: object) -> list[str]:
+        return _coerce_string_list(value)
 
 
 class ConversationTitleResult(BaseModel):

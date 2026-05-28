@@ -190,6 +190,38 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(structured["preview_tags"], ["科研", "待办"])
         self.assertEqual(structured["approval"]["approval_token"], "approval-token")
 
+    async def test_prepare_quick_note_draft_tool_uses_context_user_id(self) -> None:
+        approval = SimpleNamespace(
+            action="create_quick_note",
+            expires_at=datetime(2026, 5, 25, 8, 0, tzinfo=timezone.utc),
+            draft_hash="note-hash",
+        )
+        with patch(
+            "app.mcp.tools.create_quick_note_draft",
+            return_value=("整理论文实验记录", ["科研", "待办"], "approval-token", ["实验记录"], approval),
+        ) as create_mock:
+            async with self.app.router.lifespan_context(self.app):
+                async with await self._http_client({"Authorization": "Bearer test-token"}) as client:
+                    async with streamable_http_client("http://localhost/mcp", http_client=client) as streams:
+                        read_stream, write_stream, _ = streams
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            result = await session.call_tool(
+                                "prepare_quick_note_draft",
+                                {
+                                    "content": "记一下：整理论文实验记录",
+                                    "tags": [],
+                                    "attachment_ids": [],
+                                    "context": {"user_id": "123", "approval_scope": "conversation_quick_note:test"},
+                                },
+                            )
+
+        structured = result.structuredContent or {}
+        self.assertFalse(result.isError)
+        self.assertEqual(structured["status"], "pending_approval")
+        _, user_id_arg, _ = create_mock.call_args.args
+        self.assertEqual(user_id_arg, 123)
+
     async def test_create_schedule_after_approval_returns_structured_business_error(self) -> None:
         with patch(
             "app.mcp.tools.create_schedule_after_approval",

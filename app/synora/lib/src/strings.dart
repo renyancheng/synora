@@ -64,6 +64,8 @@
   static const voiceCancelled = '已取消语音输入。';
   static const loading = '处理中…';
   static const loadFailed = '加载失败，请稍后重试。';
+  static const networkRequestFailed = '当前无法连接服务端，请检查网络后重试。';
+  static const webConnectionFailed = '当前无法连接服务端，请检查浏览器调试地址、CORS 配置或网络。';
   static const emptyConversation = '开始一段新对话吧。';
   static const emptyConversationHistory = '还没有历史对话。';
   static const emptySchedules = '还没有日程，先和 Synora 说一句吧。';

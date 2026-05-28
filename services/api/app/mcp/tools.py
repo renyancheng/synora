@@ -20,27 +20,60 @@ from app.schemas.quick_note import QuickNoteDraftRequest
 from app.schemas.schedule import ReminderJobInfo, ScheduleDraftInput, ScheduleEventDraft
 
 
-def _with_db() -> tuple[Session, int]:
-    db = SessionLocal()
-    user_id = ensure_bootstrap_user(db).id
-    return db, user_id
+def _with_db() -> Session:
+    return SessionLocal()
+
+
+def _normalize_context(context: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(context, dict):
+        return {}
+    normalized: dict[str, object] = {}
+    for key, value in context.items():
+        if value is None:
+            continue
+        if isinstance(value, list):
+            normalized[str(key)] = [str(item) for item in value if item is not None]
+            continue
+        if isinstance(value, dict):
+            normalized[str(key)] = {str(child_key): value[child_key] for child_key in value}
+            continue
+        normalized[str(key)] = str(value)
+    return normalized
+
+
+def _resolve_user_id(db: Session, context: dict[str, object] | None) -> int:
+    normalized = _normalize_context(context)
+    raw_user_id = normalized.get("user_id")
+    if raw_user_id is None:
+        return ensure_bootstrap_user(db).id
+    raw_user_id_text = str(raw_user_id).strip()
+    if not raw_user_id_text:
+        return ensure_bootstrap_user(db).id
+    try:
+        user_id = int(raw_user_id_text)
+    except ValueError as exc:
+        raise ValueError("context.user_id 无效。") from exc
+    if user_id <= 0:
+        raise ValueError("context.user_id 无效。")
+    return user_id
 
 
 def parse_schedule_draft_tool(
     text_content: str | None = None,
     attachment_ids: list[int] | None = None,
-    context: dict[str, str] | None = None,
+    context: dict[str, object] | None = None,
 ) -> McpParseScheduleDraftResult:
     """Parse text or attachments into a schedule draft that still needs confirmation."""
-    db, user_id = _with_db()
+    db = _with_db()
     try:
+        user_id = _resolve_user_id(db, context)
         draft, draft_hash, missing_fields, ambiguity_flags, evidence_digest, parse_confidence = create_schedule_draft(
             db,
             user_id,
             ScheduleDraftInput(
                 text_content=text_content,
                 attachment_ids=attachment_ids or [],
-                context=context or {},
+                context=_normalize_context(context),
             ),
         )
         return McpParseScheduleDraftResult(
@@ -61,11 +94,15 @@ def parse_schedule_draft_tool(
 def detect_schedule_conflicts_tool(
     draft: ScheduleEventDraft,
     draft_hash: str | None = None,
+    context: dict[str, object] | None = None,
 ) -> McpDetectScheduleConflictsResult:
     """Check a candidate schedule against existing events and suggest alternatives."""
-    db, user_id = _with_db()
+    db = _with_db()
     try:
-        result = detect_conflicts(db, user_id, draft, draft_hash or "")
+        user_id = _resolve_user_id(db, context)
+        normalized_context = _normalize_context(context)
+        approval_scope = normalized_context.get("approval_scope") or None
+        result = detect_conflicts(db, user_id, draft, draft_hash or "", approval_scope=approval_scope)
         return McpDetectScheduleConflictsResult(
             status=result.status,
             conflict_items=result.conflict_items,
@@ -82,10 +119,12 @@ def detect_schedule_conflicts_tool(
 def create_schedule_after_approval_tool(
     approval_token: str,
     normalized_draft: ScheduleEventDraft,
+    context: dict[str, object] | None = None,
 ) -> McpCreateScheduleAfterApprovalResult:
     """Create the final schedule and reminder jobs after approval_token validation."""
-    db, user_id = _with_db()
+    db = _with_db()
     try:
+        user_id = _resolve_user_id(db, context)
         schedule, jobs = create_schedule_after_approval(db, user_id, approval_token, normalized_draft)
         return McpCreateScheduleAfterApprovalResult(
             status="ok",
@@ -105,13 +144,14 @@ def prepare_quick_note_draft_tool(
     content: str,
     tags: list[str] | None = None,
     attachment_ids: list[int] | None = None,
-    context: dict[str, str] | None = None,
+    context: dict[str, object] | None = None,
 ) -> McpPrepareQuickNoteDraftResult:
     """Prepare a quick note draft and return approval metadata without writing final data."""
-    db, user_id = _with_db()
+    db = _with_db()
     note_tags = tags or []
     note_attachment_ids = attachment_ids or []
     try:
+        user_id = _resolve_user_id(db, context)
         normalized_content, preview_tags, token, evidence_digest, approval = create_quick_note_draft(
             db,
             user_id,
@@ -119,7 +159,7 @@ def prepare_quick_note_draft_tool(
                 content=content,
                 tags=note_tags,
                 attachment_ids=note_attachment_ids,
-                context=context or {},
+                context=_normalize_context(context),
             ),
         )
         return McpPrepareQuickNoteDraftResult(
@@ -146,12 +186,14 @@ def create_quick_note_after_approval_tool(
     tags: list[str] | None = None,
     attachment_ids: list[int] | None = None,
     approval_token: str = "",
+    context: dict[str, object] | None = None,
 ) -> McpCreateQuickNoteAfterApprovalResult:
     """Create the final quick note after approval_token validation."""
-    db, user_id = _with_db()
+    db = _with_db()
     note_tags = tags or []
     note_attachment_ids = attachment_ids or []
     try:
+        user_id = _resolve_user_id(db, context)
         note = save_note_after_approval(
             db,
             user_id,
@@ -175,7 +217,7 @@ def create_quick_note_after_approval_tool(
 
 def dispatch_notification_tool(reminder_job_id: int) -> McpDispatchNotificationResult:
     """Send a reminder notification for a reminder job and persist audit data."""
-    db, _ = _with_db()
+    db = _with_db()
     try:
         result = dispatch_notification_core(db=db, reminder_job_id=reminder_job_id)
         return McpDispatchNotificationResult(
@@ -192,7 +234,7 @@ def dispatch_notification_tool(reminder_job_id: int) -> McpDispatchNotificationR
 
 def get_notification_status_tool(delivery_id: int) -> McpGetNotificationStatusResult:
     """Get delivery status and retry information for a notification audit record."""
-    db, _ = _with_db()
+    db = _with_db()
     try:
         result = get_notification_status_core(db=db, delivery_id=delivery_id)
         return McpGetNotificationStatusResult(

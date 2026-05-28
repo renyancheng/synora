@@ -203,7 +203,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会", selected_tool="schedule"),
         )
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
@@ -274,7 +274,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会", selected_tool="schedule"),
         )
         _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
@@ -329,7 +329,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录"),
+            ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录", selected_tool="quick_note"),
         )
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
         card_events = [item for item in events if item["event"] == "card_snapshot"]
@@ -395,7 +395,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录"),
+            ConversationSendMessageRequest(text_content="记一下：下周整理论文实验记录", selected_tool="quick_note"),
         )
         _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
 
@@ -670,6 +670,21 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
             (
+                SimpleNamespace(content="conflicts-1"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token-1",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash-1",
+                    },
+                },
+            ),
+            (
                 SimpleNamespace(content="draft-2"),
                 {
                     "status": "ok",
@@ -681,6 +696,21 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                     "parse_confidence": 0.96,
                 },
             ),
+            (
+                SimpleNamespace(content="conflicts-2"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token-2",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash-2",
+                    },
+                },
+            ),
         ]
         thread = create_conversation(self.db, self.user.id)
         _, _, _, first_run = queue_message(
@@ -688,7 +718,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             self.user.id,
             thread.id,
             ConversationSendMessageRequest(
-                text_content="我下下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛了，比赛时间是9:00-13:00"
+                text_content="我下下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛了，比赛时间是9:00-13:00",
+                selected_tool="schedule",
             ),
         )
         _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
@@ -751,6 +782,21 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
             (
+                SimpleNamespace(content="conflicts-1"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token-1",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash-1",
+                    },
+                },
+            ),
+            (
                 SimpleNamespace(content="draft-2"),
                 {
                     "status": "ok",
@@ -762,13 +808,28 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                     "parse_confidence": 0.96,
                 },
             ),
+            (
+                SimpleNamespace(content="conflicts-2"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token-2",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash-2",
+                    },
+                },
+            ),
         ]
         thread = create_conversation(self.db, self.user.id)
         _, _, _, first_run = queue_message(
             self.db,
             self.user.id,
             thread.id,
-            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会"),
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会", selected_tool="schedule"),
         )
         _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
 
@@ -836,6 +897,33 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             approval_token=token2,
             draft_hash="draft-2",
         )
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="创建提醒")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_conversation_without_selected_tool_returns_tool_selection_reminder(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="明天下午我去剪头发"),
+        )
+
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(invoke_tool_mock.await_count, 0)
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertIn("请先选择“日程”工具", self.db.get(type(assistant_message), assistant_message.id).text_content or "")
+        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
+        self.assertIsNone(pending)
 
 
 if __name__ == "__main__":

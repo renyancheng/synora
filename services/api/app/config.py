@@ -1,3 +1,4 @@
+import json
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,6 +54,21 @@ class Settings(BaseSettings):
 
     mcp_bearer_token: str = ""
     mcp_mount_path: str = "/mcp"
+    cors_allowed_origins: str = (
+        "http://localhost,"
+        "http://localhost:3000,"
+        "http://localhost:5000,"
+        "http://localhost:8000,"
+        "http://127.0.0.1,"
+        "http://127.0.0.1:3000,"
+        "http://127.0.0.1:5000,"
+        "http://127.0.0.1:8000"
+    )
+    cors_allow_origin_regex: str = (
+        r"https?://"
+        r"(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)"
+        r"(:\d+)?$"
+    )
 
     minio_endpoint: str = "minio:9000"
     minio_access_key: str = "synora"
@@ -62,6 +78,19 @@ class Settings(BaseSettings):
     minio_region: str = "us-east-1"
 
     attachment_max_size_bytes: int = 8_000_000
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        raw = self.cors_allowed_origins.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+        return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 @lru_cache

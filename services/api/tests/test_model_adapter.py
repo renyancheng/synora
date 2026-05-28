@@ -2,7 +2,7 @@ from unittest.mock import patch
 import unittest
 
 from app.config import Settings
-from app.runtime.model_adapter import ModelAdapter
+from app.runtime.model_adapter import ModelAdapter, QuickNotePreparationResult, ScheduleExtractionResult
 
 
 class ModelAdapterTests(unittest.TestCase):
@@ -63,6 +63,36 @@ class ModelAdapterTests(unittest.TestCase):
         self.assertIn("当前时区：Asia/Shanghai", prompt)
         self.assertIn("当前时间：", prompt)
         self.assertIn("当前本地时间：", prompt)
+
+    def test_schedule_extraction_result_coerces_string_list_fields(self) -> None:
+        result = ScheduleExtractionResult.model_validate(
+            {
+                "title": "理发",
+                "details": "明天下午去剪头发。",
+                "isAllDay": False,
+                "recurrence": "每周一次",
+                "missing_fields": "",
+                "ambiguity_flags": None,
+                "evidence_digest": "\n用户原话“明天下午我去剪头发”\n",
+            }
+        )
+
+        self.assertEqual(result.recurrence, ["每周一次"])
+        self.assertEqual(result.missing_fields, [])
+        self.assertEqual(result.ambiguity_flags, [])
+        self.assertEqual(result.evidence_digest, ["用户原话“明天下午我去剪头发”"])
+
+    def test_quick_note_preparation_result_coerces_string_list_fields(self) -> None:
+        result = QuickNotePreparationResult.model_validate(
+            {
+                "normalized_content": "整理实验记录",
+                "preview_tags": "科研\n待办",
+                "evidence_digest": "实验记录",
+            }
+        )
+
+        self.assertEqual(result.preview_tags, ["科研", "待办"])
+        self.assertEqual(result.evidence_digest, ["实验记录"])
 
 
 if __name__ == "__main__":

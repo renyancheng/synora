@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
+import 'strings.dart';
 
 class ApiException implements Exception {
   ApiException(this.message);
@@ -81,25 +82,29 @@ class ApiClient {
   }
 
   Future<UploadedAttachment> uploadAttachment(LocalAttachmentData attachment) async {
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('${_normalizedBase()}/attachments/upload'),
-    );
-    request.headers.addAll(_authHeaders(includeJson: false));
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'file',
-        attachment.bytes,
-        filename: attachment.fileName,
-      ),
-    );
-    final response = await request.send();
-    final body = await response.stream.bytesToString();
-    final decoded = _decodeJsonBody(body);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
+    try {
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('${_normalizedBase()}/attachments/upload'),
+      );
+      request.headers.addAll(_authHeaders(includeJson: false));
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'file',
+          attachment.bytes,
+          filename: attachment.fileName,
+        ),
+      );
+      final response = await request.send();
+      final body = await response.stream.bytesToString();
+      final decoded = _decodeJsonBody(body);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
+      }
+      return UploadedAttachment.fromJson(decoded as Map<String, dynamic>);
+    } on http.ClientException catch (error) {
+      throw _mapClientException(error);
     }
-    return UploadedAttachment.fromJson(decoded as Map<String, dynamic>);
   }
 
   Future<List<ScheduleItem>> fetchSchedules() async {
@@ -209,37 +214,41 @@ class ApiClient {
     required int conversationId,
     required String streamId,
   }) async* {
-    final request = http.Request(
-      'GET',
-      Uri.parse('${_normalizedBase()}/agent/conversations/$conversationId/streams/$streamId'),
-    );
-    request.headers.addAll(_authHeaders(includeJson: false));
-    request.headers['Accept'] = 'text/event-stream';
-    final response = await _httpClient.send(request);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      final body = await response.stream.bytesToString();
-      final decoded = _decodeJsonBody(body);
-      throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
-    }
+    try {
+      final request = http.Request(
+        'GET',
+        Uri.parse('${_normalizedBase()}/agent/conversations/$conversationId/streams/$streamId'),
+      );
+      request.headers.addAll(_authHeaders(includeJson: false));
+      request.headers['Accept'] = 'text/event-stream';
+      final response = await _httpClient.send(request);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final body = await response.stream.bytesToString();
+        final decoded = _decodeJsonBody(body);
+        throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
+      }
 
-    String? currentEvent;
-    final dataLines = <String>[];
-    await for (final line in response.stream.transform(utf8.decoder).transform(const LineSplitter())) {
-      if (line.isEmpty) {
-        if (currentEvent != null) {
-          final dataText = dataLines.join('\n').trim();
-          final decoded = dataText.isEmpty ? <String, dynamic>{} : jsonDecode(dataText) as Map<String, dynamic>;
-          yield ConversationStreamEvent(event: currentEvent, data: decoded);
+      String? currentEvent;
+      final dataLines = <String>[];
+      await for (final line in response.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+        if (line.isEmpty) {
+          if (currentEvent != null) {
+            final dataText = dataLines.join('\n').trim();
+            final decoded = dataText.isEmpty ? <String, dynamic>{} : jsonDecode(dataText) as Map<String, dynamic>;
+            yield ConversationStreamEvent(event: currentEvent, data: decoded);
+          }
+          currentEvent = null;
+          dataLines.clear();
+          continue;
         }
-        currentEvent = null;
-        dataLines.clear();
-        continue;
+        if (line.startsWith('event:')) {
+          currentEvent = line.substring(6).trim();
+        } else if (line.startsWith('data:')) {
+          dataLines.add(line.substring(5).trim());
+        }
       }
-      if (line.startsWith('event:')) {
-        currentEvent = line.substring(6).trim();
-      } else if (line.startsWith('data:')) {
-        dataLines.add(line.substring(5).trim());
-      }
+    } on http.ClientException catch (error) {
+      throw _mapClientException(error);
     }
   }
 
@@ -314,17 +323,21 @@ class ApiClient {
     Map<String, dynamic>? body,
     bool authenticated = true,
   }) async {
-    final uri = Uri.parse('${_normalizedBase()}$path');
-    final request = http.Request(method, uri);
-    request.headers.addAll(_authHeaders(includeJson: true, authenticated: authenticated));
-    request.body = body == null ? '' : jsonEncode(body);
-    final response = await _httpClient.send(request);
-    final responseBody = await response.stream.bytesToString();
-    final decoded = _decodeJsonBody(responseBody);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw ApiException(_extractErrorMessage(decoded, response.statusCode, responseBody));
+    try {
+      final uri = Uri.parse('${_normalizedBase()}$path');
+      final request = http.Request(method, uri);
+      request.headers.addAll(_authHeaders(includeJson: true, authenticated: authenticated));
+      request.body = body == null ? '' : jsonEncode(body);
+      final response = await _httpClient.send(request);
+      final responseBody = await response.stream.bytesToString();
+      final decoded = _decodeJsonBody(responseBody);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw ApiException(_extractErrorMessage(decoded, response.statusCode, responseBody));
+      }
+      return decoded;
+    } on http.ClientException catch (error) {
+      throw _mapClientException(error);
     }
-    return decoded;
   }
 
   Map<String, String> _authHeaders({
@@ -385,6 +398,15 @@ class ApiClient {
       default:
         return '请求失败（$statusCode），请稍后重试。';
     }
+  }
+
+  ApiException _mapClientException(http.ClientException error) {
+    final message = error.message.trim();
+    final lowered = message.toLowerCase();
+    if (kIsWeb && (lowered.contains('failed to fetch') || lowered.contains('xmlhttprequest error'))) {
+      return ApiException(AppStrings.webConnectionFailed);
+    }
+    return ApiException(message.isNotEmpty ? message : AppStrings.networkRequestFailed);
   }
 
   List<Map<String, dynamic>> _asList(dynamic json) {
