@@ -316,7 +316,7 @@ def detect_conflicts(
 def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_token: str, draft: dict | ScheduleEventDraft) -> dict:
     schedule_draft = draft if isinstance(draft, ScheduleEventDraft) else ScheduleEventDraft.model_validate(draft)
     draft_hash = build_draft_hash(schedule_draft)
-    ApprovalGate().consume(
+    approval = ApprovalGate().validate(
         db,
         user_id=user_id,
         action="create_schedule",
@@ -352,12 +352,13 @@ def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_t
         source_type="mixed",
     )
     db.add(schedule)
-    db.commit()
-    db.refresh(schedule)
+    db.flush()
 
     jobs = _build_reminder_jobs(db, schedule)
     db.add_all(jobs)
+    ApprovalGate().finalize(db, approval)
     db.commit()
+    db.refresh(schedule)
     for job in jobs:
         db.refresh(job)
     return {

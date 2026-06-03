@@ -54,7 +54,7 @@ def create_approval_request(
     return approval, token
 
 
-def consume_approval_request(db: Session, *, user_id: int, action: str, approval_token: str, draft_hash: str) -> ApprovalRequest:
+def validate_approval_request(db: Session, *, user_id: int, action: str, approval_token: str, draft_hash: str) -> ApprovalRequest:
     approval = db.scalar(
         select(ApprovalRequest).where(
             ApprovalRequest.user_id == user_id,
@@ -77,9 +77,25 @@ def consume_approval_request(db: Session, *, user_id: int, action: str, approval
         raise ValueError("审批令牌已过期，请重新生成。")
     if approval.draft_hash != draft_hash:
         raise ValueError("审批草稿校验失败，请重新确认。")
+    return approval
 
+
+def finalize_approval_request(db: Session, approval: ApprovalRequest) -> ApprovalRequest:
     approval.status = "confirmed"
     approval.confirmed_at = datetime.now(timezone.utc)
+    db.flush()
+    return approval
+
+
+def consume_approval_request(db: Session, *, user_id: int, action: str, approval_token: str, draft_hash: str) -> ApprovalRequest:
+    approval = validate_approval_request(
+        db,
+        user_id=user_id,
+        action=action,
+        approval_token=approval_token,
+        draft_hash=draft_hash,
+    )
+    finalize_approval_request(db, approval)
     db.commit()
     db.refresh(approval)
     return approval

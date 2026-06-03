@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncGenerator, Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -22,6 +23,8 @@ from app.schemas.quick_note import QuickNoteDraftRequest
 from app.schemas.schedule import ScheduleEventDraft
 from app.security import mint_token, sha256_text
 from app.tasks.memory import write_user_memory
+
+logger = logging.getLogger(__name__)
 
 
 def _enqueue_memory_writeback(*, user_id: int, source_kind: str, source_ref_id: str | None, text: str, summary: str = '') -> None:
@@ -1176,28 +1179,43 @@ def _confirm_schedule_pending(
     pending: ConversationPendingState,
 ) -> list[ConversationMessage]:
     draft = ScheduleEventDraft.model_validate(pending.payload_json)
+    action_group_id = pending.meta_json.get("action_group_id")
     schedule, jobs = create_schedule_after_approval(db, user_id, pending.approval_token or "", draft)
-    _mark_action_group_status(
-        db,
-        pending.meta_json.get("action_group_id"),
-        lifecycle_status="confirmed",
-        is_actionable=False,
-        terminal_summary="已确认保存日程。",
-        extra_updates={
-            "confirmed_schedule": {
-                "schedule_id": schedule.id,
-                "title": schedule.title,
-                "source_text": getattr(schedule, "source_text", draft.source_text),
-                "details": schedule.details,
-                "start": {"dateTime": schedule.start_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
-                "end": {"dateTime": schedule.end_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
-                "channels": [job.channel for job in jobs],
-                "reminder_preset": getattr(schedule, "reminder_preset", draft.reminder_preset),
+    try:
+        _mark_action_group_status(
+            db,
+            action_group_id,
+            lifecycle_status="confirmed",
+            is_actionable=False,
+            terminal_summary="已确认保存日程。",
+            extra_updates={
+                "confirmed_schedule": {
+                    "schedule_id": schedule.id,
+                    "title": schedule.title,
+                    "source_text": getattr(schedule, "source_text", draft.source_text),
+                    "details": schedule.details,
+                    "start": {"dateTime": schedule.start_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
+                    "end": {"dateTime": schedule.end_at.astimezone(ZoneInfo(schedule.time_zone)).isoformat(), "timeZone": schedule.time_zone},
+                    "channels": [job.channel for job in jobs],
+                    "reminder_preset": getattr(schedule, "reminder_preset", draft.reminder_preset),
+                },
             },
-        },
-    )
-    _clear_pending_state(db, pending)
-    write_user_memory.delay(
+        )
+        _clear_pending_state(db, pending)
+    except Exception:
+        logger.exception(
+            "schedule_confirm_finalize_failed user_id=%s conversation_id=%s pending_id=%s action_group_id=%s schedule_id=%s stage=card_finalize",
+            user_id,
+            thread.id,
+            pending.id,
+            action_group_id,
+            schedule.id,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    _enqueue_memory_writeback(
         user_id=user_id,
         source_kind="confirmed_schedule",
         source_ref_id=str(schedule.id),
@@ -1205,7 +1223,6 @@ def _confirm_schedule_pending(
         summary="已确认日程",
     )
     return []
-
 
 
 def _build_user_message_payload(

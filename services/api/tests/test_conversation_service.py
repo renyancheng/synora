@@ -298,6 +298,84 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.create_schedule_after_approval")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_confirm_schedule_action_succeeds_when_card_finalize_fails(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        create_after_mock,
+        write_memory_mock,
+    ) -> None:
+        draft = self._draft()
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["明天下午三点"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash",
+                    },
+                },
+            ),
+        ]
+        create_after_mock.return_value = (
+            SimpleNamespace(
+                id=11,
+                title="教学例会",
+                details="讨论课程安排",
+                source_text="明天下午三点在学院会议室开教学例会",
+                start_at=datetime.fromisoformat("2026-05-24T07:00:00+00:00"),
+                end_at=datetime.fromisoformat("2026-05-24T08:00:00+00:00"),
+                time_zone="Asia/Shanghai",
+                reminder_preset="previous_day_1700",
+            ),
+            [SimpleNamespace(channel="email")],
+        )
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会", selected_tool="schedule"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        with patch("app.domains.conversation.service._mark_action_group_status", side_effect=RuntimeError("card finalize failed")):
+            _, assistant_messages = apply_action(
+                self.db,
+                self.user.id,
+                thread.id,
+                ConversationActionRequest(action="confirm_schedule_draft"),
+            )
+
+        self.assertEqual(assistant_messages, [])
+        self.assertGreaterEqual(write_memory_mock.call_count, 1)
+        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
+        self.assertIsNotNone(pending)
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.save_note_after_approval")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="实验记录")
@@ -941,4 +1019,3 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
