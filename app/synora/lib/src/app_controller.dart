@@ -8,6 +8,11 @@ import 'models.dart';
 import 'strings.dart';
 
 const int draftConversationId = 0;
+const Set<String> _nonEditableCardMessageTypes = <String>{
+  'schedule_draft_card',
+  'quick_note_preview_card',
+  'conflict_card',
+};
 
 class ConversationViewState {
   ConversationViewState({
@@ -342,15 +347,8 @@ class AppController extends ChangeNotifier {
     if (index < 0) {
       return false;
     }
-    final actionGroupId = message.actionGroupId;
-    if (actionGroupId == null || actionGroupId.isEmpty) {
-      return true;
-    }
     for (final item in messages.skip(index + 1)) {
-      if (item.actionGroupId == actionGroupId &&
-          (item.messageType == 'schedule_draft_card' ||
-              item.messageType == 'quick_note_preview_card' ||
-              item.messageType == 'conflict_card')) {
+      if (_nonEditableCardMessageTypes.contains(item.messageType)) {
         return false;
       }
     }

@@ -26,6 +26,12 @@ from app.tasks.memory import write_user_memory
 
 logger = logging.getLogger(__name__)
 
+NON_EDITABLE_CARD_MESSAGE_TYPES = {
+    "schedule_draft_card",
+    "quick_note_preview_card",
+    "conflict_card",
+}
+
 
 def _enqueue_memory_writeback(*, user_id: int, source_kind: str, source_ref_id: str | None, text: str, summary: str = '') -> None:
     try:
@@ -216,6 +222,11 @@ def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None
 
 def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[ConversationThread, ConversationMessage]:
     thread = get_conversation(db, user_id, conversation_id)
+    messages = db.scalars(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == conversation_id)
+        .order_by(ConversationMessage.created_at.asc(), ConversationMessage.id.asc())
+    ).all()
     user_message = db.scalar(
         select(ConversationMessage)
         .where(
@@ -227,6 +238,11 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
     )
     if user_message is None:
         raise ValueError("当前没有可撤回的消息。")
+    message_index = next((index for index, item in enumerate(messages) if item.id == user_message.id), -1)
+    if message_index < 0:
+        raise ValueError("当前没有可撤回的消息。")
+    if any(item.message_type in NON_EDITABLE_CARD_MESSAGE_TYPES for item in messages[message_index + 1:]):
+        raise ValueError("当前消息下方已有卡片，不能编辑重发。")
 
     restored_message = ConversationMessage(
         id=user_message.id,
@@ -1674,14 +1690,11 @@ def _prepare_pending_regeneration(
         return "schedule_intake", merged_text, merged_attachment_ids, attachment_parts, previous_context
 
     previous_content = str(previous_payload.get("content") or "").strip()
-    base_text_parts = [
-        "你正在修改同一条待确认速记。",
-        f"上一版速记：{previous_content}",
-        f"本轮补充或修正：{text_content}",
-    ]
-    merged_text = "\n".join(part for part in base_text_parts if part.strip())
+    merged_text = text_content.strip()
     previous_context["pending_regeneration"] = "quick_note"
     previous_context["pending_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
     previous_context["pending_revision"] = str(int(pending.meta_json.get("revision") or 1) + 1)
     previous_context["supersede_action_group_id"] = str(pending.meta_json.get("action_group_id") or "")
+    previous_context["previous_note_content"] = previous_content
+    previous_context["latest_user_text"] = text_content.strip()
     return "quick_note_intake", merged_text, merged_attachment_ids, attachment_parts, previous_context

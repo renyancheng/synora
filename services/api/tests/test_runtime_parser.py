@@ -79,6 +79,72 @@ class RuntimeParserTests(unittest.TestCase):
         self.assertEqual(result["normalized_content"], "整理论文实验图表并准备投稿清单")
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
+    @patch("app.runtime.tool_impls.MemoryService.retrieve_context")
+    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    def test_quick_note_draft_does_not_read_long_term_memory(
+        self,
+        suggest_tags_mock,
+        retrieve_context_mock,
+        _attachment_mock,
+    ) -> None:
+        suggest_tags_mock.return_value = {
+            "normalized_content": "我更喜欢深色主题，图标尽量简洁，设置页别放太多说明文字。",
+            "preview_tags": ["主题偏好", "界面偏好"],
+            "evidence_digest": ["深色主题", "图标简洁", "设置页少说明文字"],
+        }
+
+        result = record_quick_note(
+            db=None,
+            user_id=1,
+            content="记一下：我更喜欢深色主题，图标尽量简洁，设置页别放太多说明文字。",
+            tags=[],
+            attachment_ids=[],
+            context={},
+        )
+
+        retrieve_context_mock.assert_not_called()
+        merged_text = suggest_tags_mock.call_args.kwargs["merged_text"]
+        self.assertNotIn("长期记忆", merged_text)
+        self.assertNotIn("记忆提示", merged_text)
+        self.assertEqual(
+            result["normalized_content"],
+            "我更喜欢深色主题，图标尽量简洁，设置页别放太多说明文字。",
+        )
+
+    @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
+    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    def test_quick_note_regeneration_prompt_uses_structured_sections(
+        self,
+        suggest_tags_mock,
+        _attachment_mock,
+    ) -> None:
+        suggest_tags_mock.return_value = {
+            "normalized_content": "下周三整理论文实验记录并补充图表",
+            "preview_tags": ["科研", "待办", "图表"],
+            "evidence_digest": ["下周三", "图表"],
+        }
+
+        result = record_quick_note(
+            db=None,
+            user_id=1,
+            content="改成下周三，并补充图表",
+            tags=[],
+            attachment_ids=[],
+            context={
+                "pending_regeneration": "quick_note",
+                "previous_note_content": "下周整理论文实验记录",
+                "latest_user_text": "改成下周三，并补充图表",
+            },
+        )
+
+        merged_text = suggest_tags_mock.call_args.kwargs["merged_text"]
+        self.assertIn("上一版待确认速记：\n下周整理论文实验记录", merged_text)
+        self.assertIn("本轮补充或修正：\n改成下周三，并补充图表", merged_text)
+        self.assertNotIn("你正在修改同一条待确认速记", merged_text)
+        self.assertNotIn("上一版速记：", merged_text)
+        self.assertEqual(result["preview_tags"], ["科研", "待办", "图表"])
+
+    @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
     @patch(
         "app.runtime.tool_impls.ModelAdapter.extract_schedule",
         side_effect=LLMServiceError(

@@ -139,24 +139,19 @@ def prepare_quick_note_draft(
     attachment_ids: list[int] | None = None,
     context: dict | None = None,
 ) -> dict:
-    del context
+    context = context or {}
     attachment_ids = attachment_ids or []
     tags = tags or []
 
     assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
     attachment_parts = _flatten_attachment_parts(assets)
     attachment_texts = _extract_attachment_texts(assets)
-    memory_context = MemoryService().retrieve_context(
-        db,
-        user_id=user_id,
-        query_text=(content or text_content or "").strip() or "\n".join(attachment_texts),
-    )
     assembled = ContextAssembler().build_quick_note_context(
         text_content=content or text_content or "",
         attachment_texts=attachment_texts,
         manual_tags=tags,
-        memory_summary=memory_context.summary,
-        memory_items=memory_context.items,
+        previous_note_content=str(context.get("previous_note_content") or ""),
+        latest_user_text=str(context.get("latest_user_text") or ""),
     )
     parsed = ModelAdapter().suggest_quick_note_tags(
         merged_text=str(assembled["prompt_text"]),

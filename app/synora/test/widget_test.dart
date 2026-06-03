@@ -9,7 +9,34 @@ import 'package:synora/src/models.dart';
 import 'package:synora/src/strings.dart';
 
 class FakeApiClient extends ApiClient {
-  FakeApiClient() : super(baseUrl: 'http://localhost:8000');
+  FakeApiClient({
+    List<ConversationMessageItem>? conversationMessages,
+  })  : _conversationMessages = conversationMessages ?? _defaultConversationMessages(),
+        super(baseUrl: 'http://localhost:8000');
+
+  final List<ConversationMessageItem> _conversationMessages;
+
+  static List<ConversationMessageItem> _defaultConversationMessages() =>
+      <ConversationMessageItem>[
+        ConversationMessageItem(
+          id: 1,
+          role: 'user',
+          messageType: 'text',
+          status: 'completed',
+          textContent: '帮我看一下明天下午安排',
+          structuredPayload: const <String, dynamic>{},
+          createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
+        ),
+        ConversationMessageItem(
+          id: 2,
+          role: 'assistant',
+          messageType: 'text',
+          status: 'completed',
+          textContent: '# 安排建议\n\n- 先确认开会时间\n- 再补充地点',
+          structuredPayload: const <String, dynamic>{},
+          createdAt: DateTime.parse('2026-05-23T10:00:01Z'),
+        ),
+      ];
 
   @override
   Future<SessionInfo> login(String email, String password) async {
@@ -94,26 +121,7 @@ class FakeApiClient extends ApiClient {
         updatedAt: DateTime.parse('2026-05-23T10:00:00Z'),
         lastMessageAt: DateTime.parse('2026-05-23T10:00:00Z'),
       ),
-      <ConversationMessageItem>[
-        ConversationMessageItem(
-          id: 1,
-          role: 'user',
-          messageType: 'text',
-          status: 'completed',
-          textContent: '帮我看一下明天下午安排',
-          structuredPayload: const <String, dynamic>{},
-          createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
-        ),
-        ConversationMessageItem(
-          id: 2,
-          role: 'assistant',
-          messageType: 'text',
-          status: 'completed',
-          textContent: '# 安排建议\n\n- 先确认开会时间\n- 再补充地点',
-          structuredPayload: const <String, dynamic>{},
-          createdAt: DateTime.parse('2026-05-23T10:00:01Z'),
-        ),
-      ],
+      List<ConversationMessageItem>.from(_conversationMessages),
     );
   }
 
@@ -169,9 +177,11 @@ class FakeLocalSessionStore extends LocalSessionStore {
   }
 }
 
-AppController buildTestController() {
+AppController buildTestController({
+  List<ConversationMessageItem>? conversationMessages,
+}) {
   return AppController(
-    apiClient: FakeApiClient(),
+    apiClient: FakeApiClient(conversationMessages: conversationMessages),
     sessionStore: FakeLocalSessionStore(),
   );
 }
@@ -237,6 +247,46 @@ void main() {
 
     expect(find.byTooltip(AppStrings.copy), findsOneWidget);
     expect(find.byTooltip(AppStrings.editResend), findsOneWidget);
+  });
+
+  testWidgets('下方有卡片的最后一条用户消息不显示编辑按钮', (tester) async {
+    final controller = buildTestController(
+      conversationMessages: <ConversationMessageItem>[
+        ConversationMessageItem(
+          id: 1,
+          role: 'user',
+          messageType: 'text',
+          status: 'completed',
+          textContent: '帮我创建明天下午的理发日程',
+          structuredPayload: const <String, dynamic>{},
+          createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
+        ),
+        ConversationMessageItem(
+          id: 2,
+          role: 'assistant',
+          messageType: 'quick_note_preview_card',
+          status: 'completed',
+          textContent: null,
+          structuredPayload: const <String, dynamic>{
+            'lifecycle_status': 'approval_pending',
+            'normalized_content': '记录明天下午理发安排',
+            'preview_tags': <String>['生活'],
+            'evidence_digest': <String>['明天下午理发'],
+          },
+          createdAt: DateTime.parse('2026-05-23T10:00:01Z'),
+        ),
+      ],
+    );
+    await controller.login('han.teacher@example.com', 'SynoraMVP123!');
+    await tester.pumpWidget(SynoraApp(controller: controller));
+    await tester.pumpAndSettle();
+    await controller.selectConversation(1);
+    await tester.pumpAndSettle();
+
+    expect(controller.messages, hasLength(2));
+    expect(controller.messages.first.isUser, isTrue);
+    expect(controller.canEditMessage(controller.messages.first), isFalse);
+    expect(find.byTooltip(AppStrings.editResend), findsNothing);
   });
 
   testWidgets('点击会话菜单使用 context menu 而不是底部菜单', (tester) async {

@@ -64,25 +64,36 @@ class ContextAssembler:
         text_content: str,
         attachment_texts: list[str],
         manual_tags: list[str],
-        memory_summary: str = "",
-        memory_items: list[dict] | None = None,
+        previous_note_content: str = "",
+        latest_user_text: str = "",
     ) -> dict[str, str | list[str]]:
-        merged_parts = [text_content.strip()] if text_content.strip() else []
+        current_input = text_content.strip()
+        previous_note = previous_note_content.strip()
+        latest_correction = latest_user_text.strip() or current_input
+
+        merged_parts: list[str] = []
+        if previous_note:
+            merged_parts.append(previous_note)
+        if latest_correction and latest_correction not in merged_parts:
+            merged_parts.append(latest_correction)
         merged_parts.extend(item.strip() for item in attachment_texts if item.strip())
         base_text = "\n\n".join(merged_parts).strip()
-        memory_context = self.build_memory_context(memory_summary=memory_summary, memory_items=memory_items)
 
         prompt_sections: list[str] = []
-        if base_text:
-            prompt_sections.append(f"当前输入：\n{base_text}")
+        if current_input and not previous_note:
+            prompt_sections.append(f"当前输入：\n{current_input}")
+        if previous_note:
+            prompt_sections.append(f"上一版待确认速记：\n{previous_note}")
+        if latest_correction and previous_note:
+            prompt_sections.append(f"本轮补充或修正：\n{latest_correction}")
+        attachment_section = "\n\n".join(item.strip() for item in attachment_texts if item.strip()).strip()
+        if attachment_section:
+            prompt_sections.append(f"附件证据：\n{attachment_section}")
         if manual_tags:
             prompt_sections.append("手动标签：\n" + "、".join(manual_tags))
-        if memory_context:
-            prompt_sections.append(f"记忆提示（仅供参考）：\n{memory_context}")
 
         return {
             "merged_text": base_text,
-            "memory_context": memory_context,
             "prompt_text": "\n\n".join(prompt_sections).strip(),
             "manual_tags": manual_tags,
         }

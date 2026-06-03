@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.domains.memory.service import MemoryService
 from app.models import NotificationAudit, ReminderJob, Schedule, User
 from app.runtime.approval_gate import ApprovalGate
