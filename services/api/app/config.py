@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     memory_vector_schema: str = "public"
     memory_vector_table: str = "synora_memory_vectors"
     memory_embedding_dimensions: int = 1536
+    semantic_search_enabled: bool = True
+    quick_note_vector_schema: str = "public"
+    quick_note_vector_table: str = "synora_quick_note_vectors"
+    schedule_vector_schema: str = "public"
+    schedule_vector_table: str = "synora_schedule_vectors"
 
     mcp_bearer_token: str = ""
     mcp_mount_path: str = "/mcp"

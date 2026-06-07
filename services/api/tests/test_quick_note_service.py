@@ -88,6 +88,35 @@ class QuickNoteServiceTests(unittest.TestCase):
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0].content, "准备答辩提纲")
 
+    def test_list_notes_supports_query_and_tag_fallback(self) -> None:
+        self.db.add_all(
+            [
+                QuickNote(
+                    user_id=self.user.id,
+                    content="下周去医院复查血常规",
+                    tags_csv="健康,提醒",
+                    source_text="下周去医院复查血常规",
+                    source_type="text",
+                    source_attachment_ids=[],
+                    topic_tags_json=["健康", "提醒"],
+                ),
+                QuickNote(
+                    user_id=self.user.id,
+                    content="给导师发实验周报",
+                    tags_csv="科研",
+                    source_text="给导师发实验周报",
+                    source_type="text",
+                    source_attachment_ids=[],
+                    topic_tags_json=["科研"],
+                ),
+            ]
+        )
+        self.db.commit()
+
+        items = list_notes(self.db, self.user.id, query="医院", tag="健康")
+
+        self.assertEqual([item.content for item in items], ["下周去医院复查血常规"])
+
     def test_list_note_tags_aggregates_current_user_only(self) -> None:
         self.db.add_all(
             [

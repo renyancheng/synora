@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.domains.memory.service import MemoryService
+from app.domains.search.service import SemanticSearchService
 from app.models import NotificationAudit, ReminderJob, Schedule, User
 from app.runtime.approval_gate import ApprovalGate
 from app.runtime.tool_impls import parse_schedule_draft
@@ -36,6 +38,12 @@ REMINDER_PRESET_OPTIONS = {
 def build_draft_hash(draft: ScheduleEventDraft) -> str:
     payload = draft.model_dump_json(exclude_none=False, by_alias=True)
     return sha256_text(payload)
+
+
+def build_approval_draft_hash(draft: ScheduleEventDraft) -> str:
+    payload = draft.model_dump(mode="json", by_alias=True)
+    payload.pop("reminder_preset", None)
+    return sha256_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def _event_bounds(draft: ScheduleEventDraft) -> tuple[datetime, datetime]:
@@ -285,7 +293,7 @@ def detect_conflicts(
     *,
     approval_scope: str | None = None,
 ) -> ConflictCheckResponse:
-    canonical_hash = build_draft_hash(draft)
+    canonical_hash = build_approval_draft_hash(draft)
     result = detect_conflicts_core(db=db, user_id=user_id, draft=draft)
     approval_payload = {
         "draft": draft.model_dump(mode="json", by_alias=True),
@@ -316,7 +324,7 @@ def detect_conflicts(
 
 def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_token: str, draft: dict | ScheduleEventDraft) -> dict:
     schedule_draft = draft if isinstance(draft, ScheduleEventDraft) else ScheduleEventDraft.model_validate(draft)
-    draft_hash = build_draft_hash(schedule_draft)
+    draft_hash = build_approval_draft_hash(schedule_draft)
     approval = ApprovalGate().validate(
         db,
         user_id=user_id,
@@ -362,6 +370,7 @@ def create_schedule_after_approval_core(*, db: Session, user_id: int, approval_t
     db.refresh(schedule)
     for job in jobs:
         db.refresh(job)
+    SemanticSearchService().upsert_schedule(schedule)
     return {
         "schedule_id": schedule.id,
         "reminder_jobs": [
@@ -388,7 +397,7 @@ def preview_schedule_edit(
     schedule = db.scalar(select(Schedule).where(Schedule.id == schedule_id, Schedule.user_id == user_id))
     if not schedule:
         raise ValueError("日程不存在或已被删除。")
-    canonical_hash = build_draft_hash(draft)
+    canonical_hash = build_approval_draft_hash(draft)
     conflict_result = detect_conflicts_core(
         db=db,
         user_id=user_id,
@@ -425,7 +434,7 @@ def confirm_schedule_edit(
     if not schedule:
         raise ValueError("日程不存在或已被删除。")
 
-    draft_hash = build_draft_hash(draft)
+    draft_hash = build_approval_draft_hash(draft)
     ApprovalGate().consume(
         db,
         user_id=user_id,
@@ -470,6 +479,7 @@ def confirm_schedule_edit(
     jobs = _build_reminder_jobs(db, schedule)
     db.add_all(jobs)
     db.commit()
+    SemanticSearchService().upsert_schedule(schedule)
     for job in jobs:
         db.refresh(job)
 
@@ -507,3 +517,71 @@ def delete_schedule(db: Session, user_id: int, schedule_id: int) -> None:
     db.execute(delete(ReminderJob).where(ReminderJob.schedule_id == schedule.id))
     db.delete(schedule)
     db.commit()
+    SemanticSearchService().delete_schedule(user_id=user_id, schedule_id=schedule_id)
+
+
+def list_schedules(db: Session, user_id: int, *, query: str | None = None) -> list[Schedule]:
+    cleaned_query = (query or "").strip()
+    if not cleaned_query:
+        return db.scalars(select(Schedule).where(Schedule.user_id == user_id).order_by(Schedule.start_at.asc())).all()
+
+    rows = _search_schedules_semantic(db, user_id=user_id, query=cleaned_query)
+    if rows:
+        return rows
+    return _search_schedules_fallback(db, user_id=user_id, query=cleaned_query)
+
+
+def _search_schedules_semantic(db: Session, *, user_id: int, query: str) -> list[Schedule]:
+    schedule_ids = SemanticSearchService().search_schedule_ids(user_id=user_id, query_text=query)
+    if not schedule_ids:
+        return []
+    rows = db.scalars(select(Schedule).where(Schedule.user_id == user_id, Schedule.id.in_(schedule_ids))).all()
+    by_id = {row.id: row for row in rows}
+    ordered_rows = [by_id[schedule_id] for schedule_id in schedule_ids if schedule_id in by_id]
+    return sorted(ordered_rows, key=lambda row: (_schedule_rank_hint(row, query), row.start_at, row.id), reverse=False)
+
+
+def _search_schedules_fallback(db: Session, *, user_id: int, query: str) -> list[Schedule]:
+    rows = db.scalars(select(Schedule).where(Schedule.user_id == user_id)).all()
+    ranked: list[tuple[int, Schedule]] = []
+    for row in rows:
+        score = _schedule_keyword_score(row, query)
+        if score > 0:
+            ranked.append((score, row))
+    ranked.sort(key=lambda item: (-item[0], item[1].start_at, item[1].id))
+    return [item[1] for item in ranked]
+
+
+def _schedule_rank_hint(schedule: Schedule, query: str) -> int:
+    score = _schedule_keyword_score(schedule, query)
+    return -score
+
+
+def _schedule_keyword_score(schedule: Schedule, query: str) -> int:
+    terms = _query_terms(query)
+    if not terms:
+        return 0
+    score = 0
+    fields = [
+        (schedule.title or "", 6),
+        (schedule.location or "", 4),
+        (schedule.details or "", 3),
+        (schedule.source_text or "", 2),
+    ]
+    for term in terms:
+        for raw_value, weight in fields:
+            value = raw_value.lower()
+            if term in value:
+                score += max(1, value.count(term)) * weight
+    return score
+
+
+def _query_terms(query: str) -> list[str]:
+    cleaned = query.strip().lower()
+    if not cleaned:
+        return []
+    terms = [cleaned]
+    for part in cleaned.split():
+        if part and part not in terms:
+            terms.append(part)
+    return terms

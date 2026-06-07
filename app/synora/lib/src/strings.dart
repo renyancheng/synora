@@ -1,4 +1,4 @@
-﻿class AppStrings {
+class AppStrings {
   static const appTitle = 'Synora';
   static const loginSubtitle = '登录后，直接把事情交给 Synora。';
   static const loginButton = '登录';
@@ -46,7 +46,8 @@
   static const sendFailed = '发送失败';
   static const voiceComingSoon = '语音输入首版仅支持 Android。';
   static const voiceDownloadConfirmTitle = '下载语音模型';
-  static const voiceDownloadConfirmMessage = '首次使用语音输入需要下载本地语音模型，下载完成后才可开始识别。是否继续？';
+  static const voiceDownloadConfirmMessage =
+      '首次使用语音输入需要下载本地语音模型，下载完成后才可开始识别。是否继续？';
   static const voiceDownloadAction = '下载';
   static const voiceDownloadCancelAction = '取消下载';
   static const voiceDownloading = '正在下载语音模型…';
@@ -148,6 +149,8 @@
   static const emptyQuickNoteTags = '还没有可用标签。';
   static const filterByTag = '按标签筛选';
   static const clearTagFilter = '清除筛选';
+  static const searchQuickNotesHint = '搜索速记';
+  static const searchSchedulesHint = '搜索日程';
   static const addTagHint = '输入标签后回车';
   static const delete = '删除';
   static const deleteScheduleTitle = '删除日程';
@@ -182,7 +185,9 @@
       case 'empty_result':
         return voiceEmptyResult;
       default:
-        return fallback?.trim().isNotEmpty == true ? fallback!.trim() : '语音输入失败，请稍后重试。';
+        return fallback?.trim().isNotEmpty == true
+            ? fallback!.trim()
+            : '语音输入失败，请稍后重试。';
     }
   }
 
@@ -306,7 +311,10 @@
     }
   }
 
-  static String? notificationFailureReason(String channel, String? errorMessage) {
+  static String? notificationFailureReason(
+    String channel,
+    String? errorMessage,
+  ) {
     if (errorMessage == null || errorMessage.trim().isEmpty) {
       return null;
     }
@@ -320,7 +328,9 @@
       if (message.contains('超时') || lower.contains('timed out')) {
         return '企业微信推送超时，请稍后重试。';
       }
-      if (message.contains('网络') || lower.contains('connection') || lower.contains('network')) {
+      if (message.contains('网络') ||
+          lower.contains('connection') ||
+          lower.contains('network')) {
         return '企业微信网络请求失败，请检查服务端网络。';
       }
       if (message.contains('无法解析') || lower.contains('json')) {
@@ -329,7 +339,9 @@
       final match = RegExp(r'(\d{4,6})').firstMatch(message);
       if (message.contains('错误码') || message.contains('errcode')) {
         final code = match?.group(1);
-        return code == null ? '企业微信群机器人拒绝了本次消息。' : '企业微信群机器人拒绝了本次消息（错误码 $code）。';
+        return code == null
+            ? '企业微信群机器人拒绝了本次消息。'
+            : '企业微信群机器人拒绝了本次消息（错误码 $code）。';
       }
       return '企业微信推送失败，请稍后重试。';
     }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
@@ -25,6 +27,9 @@ class QuickNoteListPage extends StatefulWidget {
 class _QuickNoteListPageState extends State<QuickNoteListPage> {
   late Future<List<QuickNoteItem>> _future;
   late String? _activeTag;
+  final TextEditingController _searchController = TextEditingController();
+  Timer? _searchDebounce;
+  String _searchQuery = '';
 
   @override
   void initState() {
@@ -32,19 +37,28 @@ class _QuickNoteListPageState extends State<QuickNoteListPage> {
     _activeTag = widget.initialTag?.trim().isEmpty == true
         ? null
         : widget.initialTag?.trim();
-    _future = widget.controller.fetchQuickNotesByTag(_activeTag);
+    _future = widget.controller.fetchQuickNotesByTag(
+      _activeTag,
+      query: _searchQuery,
+    );
   }
 
   Future<void> _reload() async {
     setState(() {
-      _future = widget.controller.fetchQuickNotesByTag(_activeTag);
+      _future = widget.controller.fetchQuickNotesByTag(
+        _activeTag,
+        query: _searchQuery,
+      );
     });
   }
 
   Future<void> _clearFilter() async {
     setState(() {
       _activeTag = null;
-      _future = widget.controller.fetchQuickNotesByTag(null);
+      _future = widget.controller.fetchQuickNotesByTag(
+        null,
+        query: _searchQuery,
+      );
     });
   }
 
@@ -63,12 +77,46 @@ class _QuickNoteListPageState extends State<QuickNoteListPage> {
   Future<void> _openDetails(QuickNoteItem item) async {
     final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
-        builder: (_) => QuickNoteDetailPage(controller: widget.controller, item: item),
+        builder: (_) =>
+            QuickNoteDetailPage(controller: widget.controller, item: item),
       ),
     );
     if (changed == true && mounted) {
       await _reload();
     }
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _handleSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _searchQuery = value.trim();
+        _future = widget.controller.fetchQuickNotesByTag(
+          _activeTag,
+          query: _searchQuery,
+        );
+      });
+    });
+  }
+
+  String _noteTitle(String content) {
+    final lines = content
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty);
+    final firstLine = lines.isNotEmpty ? lines.first : content.trim();
+    final normalized = firstLine.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return normalized.isEmpty ? AppStrings.noContent : normalized;
   }
 
   @override
@@ -97,6 +145,29 @@ class _QuickNoteListPageState extends State<QuickNoteListPage> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: <Widget>[
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: _handleSearchChanged,
+                  decoration: InputDecoration(
+                    hintText: AppStrings.searchQuickNotesHint,
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _searchQuery.isEmpty
+                        ? null
+                        : IconButton(
+                            onPressed: () {
+                              _searchController.clear();
+                              _handleSearchChanged('');
+                            },
+                            icon: const Icon(Icons.close),
+                          ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+              ),
               if (_activeTag != null)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),
@@ -106,9 +177,15 @@ class _QuickNoteListPageState extends State<QuickNoteListPage> {
                     children: <Widget>[
                       Chip(
                         label: Text('${AppStrings.filterByTag}：$_activeTag'),
-                        backgroundColor: TagPalette.resolve(_activeTag!).background,
-                        side: BorderSide(color: TagPalette.resolve(_activeTag!).border),
-                        labelStyle: TextStyle(color: TagPalette.resolve(_activeTag!).foreground),
+                        backgroundColor: TagPalette.resolve(
+                          _activeTag!,
+                        ).background,
+                        side: BorderSide(
+                          color: TagPalette.resolve(_activeTag!).border,
+                        ),
+                        labelStyle: TextStyle(
+                          color: TagPalette.resolve(_activeTag!).foreground,
+                        ),
                       ),
                       ActionChip(
                         label: const Text(AppStrings.clearTagFilter),
@@ -123,42 +200,62 @@ class _QuickNoteListPageState extends State<QuickNoteListPage> {
                 ...items.map(
                   (item) => Card(
                     margin: const EdgeInsets.only(bottom: 12),
-                    child: ListTile(
-                      title: Text(
-                        item.content,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: Text(
-                        formatDateTime(item.createdAt),
-                      ),
-                      isThreeLine: item.tags.isNotEmpty,
-                      trailing: item.tags.isEmpty
-                          ? null
-                          : Wrap(
-                              spacing: 6,
-                              runSpacing: 6,
-                              children: item.tags.take(2).map((tag) {
-                                final colors = TagPalette.resolve(tag);
-                                return Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: colors.background,
-                                    borderRadius: BorderRadius.circular(999),
-                                    border: Border.all(color: colors.border),
-                                  ),
-                                  child: Text(
-                                    tag,
-                                    style: TextStyle(
-                                      color: colors.foreground,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
-                            ),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(12),
                       onTap: () => _openDetails(item),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(
+                              _noteTitle(item.content),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            if (item.tags.isNotEmpty) ...<Widget>[
+                              const SizedBox(height: 10),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 6,
+                                children: item.tags.map((tag) {
+                                  final colors = TagPalette.resolve(tag);
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: colors.background,
+                                      borderRadius: BorderRadius.circular(999),
+                                      border: Border.all(color: colors.border),
+                                    ),
+                                    child: Text(
+                                      tag,
+                                      style: TextStyle(
+                                        color: colors.foreground,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ],
+                            const SizedBox(height: 10),
+                            Text(
+                              formatDateTime(item.createdAt),
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),

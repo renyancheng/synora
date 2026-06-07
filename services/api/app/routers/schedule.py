@@ -1,5 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
@@ -11,6 +10,7 @@ from app.domains.schedule.service import (
     create_schedule_draft,
     delete_schedule,
     detect_conflicts,
+    list_schedules as list_schedule_rows,
     preview_schedule_edit,
 )
 from app.models import Schedule, User
@@ -180,10 +180,11 @@ def confirm_schedule_edit_endpoint(
 
 @router.get("", response_model=list[ScheduleItem])
 def list_schedules(
+    q: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ScheduleItem]:
-    rows = db.scalars(select(Schedule).where(Schedule.user_id == current_user.id).order_by(Schedule.start_at.asc())).all()
+    rows = list_schedule_rows(db, current_user.id, query=q)
     return [_schedule_item(row) for row in rows]
 
 

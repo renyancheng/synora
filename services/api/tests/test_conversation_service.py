@@ -10,7 +10,7 @@ from app.db import Base
 from app.domains.approval.service import create_approval_request
 from app.domains.conversation.service import apply_action, consume_stream, create_conversation, delete_conversation, queue_message, rewind_last_turn, update_conversation_title
 from app.domains.quick_note.service import delete_note
-from app.domains.schedule.service import build_draft_hash, delete_schedule
+from app.domains.schedule.service import build_approval_draft_hash, build_draft_hash, delete_schedule
 from app.models import ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
 from app.runtime.model_adapter import ModelAdapter
 from app.schemas.common import EventDateTimeValue
@@ -310,7 +310,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         write_memory_mock,
     ) -> None:
         draft = self._draft()
-        draft_hash = build_draft_hash(draft)
+        draft_hash = build_approval_draft_hash(draft)
         approval, approval_token = create_approval_request(
             self.db,
             user_id=self.user.id,
@@ -380,6 +380,89 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed_approval.status, "confirmed")
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNone(pending)
+        self.assertGreaterEqual(write_memory_mock.call_count, 1)
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_confirm_schedule_action_accepts_non_default_reminder_preset(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        write_memory_mock,
+    ) -> None:
+        draft = self._draft()
+        approval_hash = build_approval_draft_hash(draft)
+        approval, approval_token = create_approval_request(
+            self.db,
+            user_id=self.user.id,
+            action="create_schedule",
+            payload={
+                "draft": draft.model_dump(mode="json", by_alias=True),
+                "conflicts": [],
+            },
+            draft_hash=approval_hash,
+            normalized_payload=draft.model_dump(mode="json", by_alias=True),
+            evidence_digest=draft.evidence_digest,
+            approval_scope=f"schedule:create:{approval_hash}",
+        )
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                    "draft_hash": build_draft_hash(draft),
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": list(draft.evidence_digest),
+                    "parse_confidence": draft.parse_confidence,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": approval_token,
+                        "action": "create_schedule",
+                        "expires_at": approval.expires_at.isoformat(),
+                        "draft_hash": approval_hash,
+                    },
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="明天下午三点在学院会议室开教学例会", selected_tool="schedule"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        _, assistant_messages = apply_action(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationActionRequest(
+                action="confirm_schedule_draft",
+                payload={"reminder_preset": "30m_before"},
+            ),
+        )
+
+        self.assertEqual(assistant_messages, [])
+        schedule = self.db.scalar(select(Schedule).where(Schedule.user_id == self.user.id))
+        self.assertIsNotNone(schedule)
+        self.assertEqual(schedule.reminder_preset, "30m_before")
+        self.assertLessEqual(abs(int((schedule.start_at - schedule.reminder_at).total_seconds() // 60)), 30)
+        refreshed_approval = self.db.get(ApprovalRequest, approval.id)
+        self.assertEqual(refreshed_approval.status, "confirmed")
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
     @patch("app.domains.conversation.service.write_user_memory.delay")

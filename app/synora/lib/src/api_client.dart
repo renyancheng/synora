@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -56,11 +56,7 @@ class ApiClient {
     final json = await _sendJson(
       'POST',
       '/auth/register',
-      body: {
-        'email': email,
-        'password': password,
-        'display_name': displayName,
-      },
+      body: {'email': email, 'password': password, 'display_name': displayName},
       authenticated: false,
     );
     final session = SessionInfo.fromJson(json as Map<String, dynamic>);
@@ -97,7 +93,9 @@ class ApiClient {
     }
   }
 
-  Future<UploadedAttachment> uploadAttachment(LocalAttachmentData attachment) async {
+  Future<UploadedAttachment> uploadAttachment(
+    LocalAttachmentData attachment,
+  ) async {
     try {
       final request = http.MultipartRequest(
         'POST',
@@ -115,7 +113,9 @@ class ApiClient {
       final body = await response.stream.bytesToString();
       final decoded = _decodeJsonBody(body);
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
+        throw ApiException(
+          _extractErrorMessage(decoded, response.statusCode, body),
+        );
       }
       return UploadedAttachment.fromJson(decoded as Map<String, dynamic>);
     } on http.ClientException catch (error) {
@@ -123,15 +123,35 @@ class ApiClient {
     }
   }
 
-  Future<List<ScheduleItem>> fetchSchedules() async {
-    final json = await _sendJson('GET', '/schedule');
+  Future<List<ScheduleItem>> fetchSchedules({String? query}) async {
+    final params = <String, String>{};
+    final cleanedQuery = query?.trim() ?? '';
+    if (cleanedQuery.isNotEmpty) {
+      params['q'] = cleanedQuery;
+    }
+    final path = params.isEmpty
+        ? '/schedule'
+        : '/schedule?${Uri(queryParameters: params).query}';
+    final json = await _sendJson('GET', path);
     return _asList(json).map(ScheduleItem.fromJson).toList();
   }
 
-  Future<List<QuickNoteItem>> fetchQuickNotes({String? tag}) async {
-    final path = tag == null || tag.trim().isEmpty
+  Future<List<QuickNoteItem>> fetchQuickNotes({
+    String? tag,
+    String? query,
+  }) async {
+    final params = <String, String>{};
+    final cleanedTag = tag?.trim() ?? '';
+    final cleanedQuery = query?.trim() ?? '';
+    if (cleanedTag.isNotEmpty) {
+      params['tag'] = cleanedTag;
+    }
+    if (cleanedQuery.isNotEmpty) {
+      params['q'] = cleanedQuery;
+    }
+    final path = params.isEmpty
         ? '/quick-notes'
-        : '/quick-notes?tag=${Uri.encodeQueryComponent(tag.trim())}';
+        : '/quick-notes?${Uri(queryParameters: params).query}';
     final json = await _sendJson('GET', path);
     return _asList(json).map(QuickNoteItem.fromJson).toList();
   }
@@ -161,8 +181,12 @@ class ApiClient {
 
   Future<List<ConversationThreadItem>> fetchConversations() async {
     final json = await _sendJson('GET', '/agent/conversations');
-    return ((json as Map<String, dynamic>)['items'] as List<dynamic>? ?? <dynamic>[])
-        .map((item) => ConversationThreadItem.fromJson(item as Map<String, dynamic>))
+    return ((json as Map<String, dynamic>)['items'] as List<dynamic>? ??
+            <dynamic>[])
+        .map(
+          (item) =>
+              ConversationThreadItem.fromJson(item as Map<String, dynamic>),
+        )
         .toList();
   }
 
@@ -170,17 +194,30 @@ class ApiClient {
     final json = await _sendJson(
       'POST',
       '/agent/conversations',
-      body: title == null ? <String, dynamic>{} : <String, dynamic>{'title': title},
+      body: title == null
+          ? <String, dynamic>{}
+          : <String, dynamic>{'title': title},
     );
-    return ConversationThreadItem.fromJson((json as Map<String, dynamic>)['conversation'] as Map<String, dynamic>);
+    return ConversationThreadItem.fromJson(
+      (json as Map<String, dynamic>)['conversation'] as Map<String, dynamic>,
+    );
   }
 
-  Future<(ConversationThreadItem, List<ConversationMessageItem>)> fetchConversationMessages(int conversationId) async {
-    final json = await _sendJson('GET', '/agent/conversations/$conversationId/messages');
+  Future<(ConversationThreadItem, List<ConversationMessageItem>)>
+  fetchConversationMessages(int conversationId) async {
+    final json = await _sendJson(
+      'GET',
+      '/agent/conversations/$conversationId/messages',
+    );
     final map = json as Map<String, dynamic>;
-    final conversation = ConversationThreadItem.fromJson(map['conversation'] as Map<String, dynamic>);
+    final conversation = ConversationThreadItem.fromJson(
+      map['conversation'] as Map<String, dynamic>,
+    );
     final items = (map['items'] as List<dynamic>? ?? <dynamic>[])
-        .map((item) => ConversationMessageItem.fromJson(item as Map<String, dynamic>))
+        .map(
+          (item) =>
+              ConversationMessageItem.fromJson(item as Map<String, dynamic>),
+        )
         .toList();
     return (conversation, items);
   }
@@ -194,15 +231,22 @@ class ApiClient {
       '/agent/conversations/$conversationId',
       body: <String, dynamic>{'title': title},
     );
-    return ConversationThreadItem.fromJson((json as Map<String, dynamic>)['conversation'] as Map<String, dynamic>);
+    return ConversationThreadItem.fromJson(
+      (json as Map<String, dynamic>)['conversation'] as Map<String, dynamic>,
+    );
   }
 
   Future<void> deleteConversation(int conversationId) async {
     await _sendJson('DELETE', '/agent/conversations/$conversationId');
   }
 
-  Future<ConversationRewindResult> rewindConversationLastTurn(int conversationId) async {
-    final json = await _sendJson('POST', '/agent/conversations/$conversationId/rewind-last-turn');
+  Future<ConversationRewindResult> rewindConversationLastTurn(
+    int conversationId,
+  ) async {
+    final json = await _sendJson(
+      'POST',
+      '/agent/conversations/$conversationId/rewind-last-turn',
+    );
     return ConversationRewindResult.fromJson(json as Map<String, dynamic>);
   }
 
@@ -223,7 +267,9 @@ class ApiClient {
         'context': context,
       },
     );
-    return ConversationSendAcceptedResult.fromJson(json as Map<String, dynamic>);
+    return ConversationSendAcceptedResult.fromJson(
+      json as Map<String, dynamic>,
+    );
   }
 
   Stream<ConversationStreamEvent> streamConversation({
@@ -233,7 +279,9 @@ class ApiClient {
     try {
       final request = http.Request(
         'GET',
-        Uri.parse('${_normalizedBase()}/agent/conversations/$conversationId/streams/$streamId'),
+        Uri.parse(
+          '${_normalizedBase()}/agent/conversations/$conversationId/streams/$streamId',
+        ),
       );
       request.headers.addAll(_authHeaders(includeJson: false));
       request.headers['Accept'] = 'text/event-stream';
@@ -241,16 +289,23 @@ class ApiClient {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final body = await response.stream.bytesToString();
         final decoded = _decodeJsonBody(body);
-        throw ApiException(_extractErrorMessage(decoded, response.statusCode, body));
+        throw ApiException(
+          _extractErrorMessage(decoded, response.statusCode, body),
+        );
       }
 
       String? currentEvent;
       final dataLines = <String>[];
-      await for (final line in response.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+      await for (final line
+          in response.stream
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())) {
         if (line.isEmpty) {
           if (currentEvent != null) {
             final dataText = dataLines.join('\n').trim();
-            final decoded = dataText.isEmpty ? <String, dynamic>{} : jsonDecode(dataText) as Map<String, dynamic>;
+            final decoded = dataText.isEmpty
+                ? <String, dynamic>{}
+                : jsonDecode(dataText) as Map<String, dynamic>;
             yield ConversationStreamEvent(event: currentEvent, data: decoded);
           }
           currentEvent = null;
@@ -276,10 +331,7 @@ class ApiClient {
     final json = await _sendJson(
       'POST',
       '/agent/conversations/$conversationId/actions',
-      body: {
-        'action': action,
-        'payload': payload,
-      },
+      body: {'action': action, 'payload': payload},
     );
     return ConversationActionResult.fromJson(json as Map<String, dynamic>);
   }
@@ -342,13 +394,17 @@ class ApiClient {
     try {
       final uri = Uri.parse('${_normalizedBase()}$path');
       final request = http.Request(method, uri);
-      request.headers.addAll(_authHeaders(includeJson: true, authenticated: authenticated));
+      request.headers.addAll(
+        _authHeaders(includeJson: true, authenticated: authenticated),
+      );
       request.body = body == null ? '' : jsonEncode(body);
       final response = await _httpClient.send(request);
       final responseBody = await response.stream.bytesToString();
       final decoded = _decodeJsonBody(responseBody);
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw ApiException(_extractErrorMessage(decoded, response.statusCode, responseBody));
+        throw ApiException(
+          _extractErrorMessage(decoded, response.statusCode, responseBody),
+        );
       }
       return decoded;
     } on http.ClientException catch (error) {
@@ -375,7 +431,9 @@ class ApiClient {
   }
 
   String _normalizedBase() {
-    return _baseUrl.endsWith('/') ? _baseUrl.substring(0, _baseUrl.length - 1) : _baseUrl;
+    return _baseUrl.endsWith('/')
+        ? _baseUrl.substring(0, _baseUrl.length - 1)
+        : _baseUrl;
   }
 
   dynamic _decodeJsonBody(String body) {
@@ -393,7 +451,11 @@ class ApiClient {
     }
   }
 
-  String _extractErrorMessage(dynamic decoded, int statusCode, [String rawBody = '']) {
+  String _extractErrorMessage(
+    dynamic decoded,
+    int statusCode, [
+    String rawBody = '',
+  ]) {
     if (decoded is Map<String, dynamic> && decoded['detail'] is String) {
       final detail = (decoded['detail'] as String).trim();
       if (detail.isNotEmpty) {
@@ -401,7 +463,8 @@ class ApiClient {
       }
     }
     final trimmedBody = rawBody.trim();
-    if (trimmedBody.isNotEmpty && trimmedBody.toLowerCase() != 'internal server error') {
+    if (trimmedBody.isNotEmpty &&
+        trimmedBody.toLowerCase() != 'internal server error') {
       return trimmedBody;
     }
     switch (statusCode) {
@@ -419,10 +482,14 @@ class ApiClient {
   ApiException _mapClientException(http.ClientException error) {
     final message = error.message.trim();
     final lowered = message.toLowerCase();
-    if (kIsWeb && (lowered.contains('failed to fetch') || lowered.contains('xmlhttprequest error'))) {
+    if (kIsWeb &&
+        (lowered.contains('failed to fetch') ||
+            lowered.contains('xmlhttprequest error'))) {
       return ApiException(AppStrings.webConnectionFailed);
     }
-    return ApiException(message.isNotEmpty ? message : AppStrings.networkRequestFailed);
+    return ApiException(
+      message.isNotEmpty ? message : AppStrings.networkRequestFailed,
+    );
   }
 
   List<Map<String, dynamic>> _asList(dynamic json) {

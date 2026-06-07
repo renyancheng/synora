@@ -9,10 +9,10 @@ import 'package:synora/src/models.dart';
 import 'package:synora/src/strings.dart';
 
 class FakeApiClient extends ApiClient {
-  FakeApiClient({
-    List<ConversationMessageItem>? conversationMessages,
-  })  : _conversationMessages = conversationMessages ?? _defaultConversationMessages(),
-        super(baseUrl: 'http://localhost:8000');
+  FakeApiClient({List<ConversationMessageItem>? conversationMessages})
+    : _conversationMessages =
+          conversationMessages ?? _defaultConversationMessages(),
+      super(baseUrl: 'http://localhost:8000');
 
   final List<ConversationMessageItem> _conversationMessages;
 
@@ -48,11 +48,14 @@ class FakeApiClient extends ApiClient {
   }
 
   @override
-  Future<List<ScheduleItem>> fetchSchedules() async => <ScheduleItem>[];
+  Future<List<ScheduleItem>> fetchSchedules({String? query}) async =>
+      <ScheduleItem>[];
 
   @override
-  Future<List<QuickNoteItem>> fetchQuickNotes({String? tag}) async =>
-      <QuickNoteItem>[];
+  Future<List<QuickNoteItem>> fetchQuickNotes({
+    String? tag,
+    String? query,
+  }) async => <QuickNoteItem>[];
 
   @override
   Future<List<NotificationItem>> fetchNotifications() async =>

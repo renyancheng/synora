@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domains.memory.service import MemoryService
+from app.domains.search.service import SemanticSearchService
 from app.models import QuickNote
 from app.runtime.approval_gate import ApprovalGate
 from app.runtime.tool_impls import prepare_quick_note_draft
@@ -97,12 +98,20 @@ def save_note_after_approval(
     db.add(note)
     db.commit()
     db.refresh(note)
+    SemanticSearchService().upsert_quick_note(note)
     return note
 
 
-def list_notes(db: Session, user_id: int, *, tag: str | None = None) -> list[QuickNote]:
-    rows = db.scalars(select(QuickNote).where(QuickNote.user_id == user_id).order_by(QuickNote.created_at.desc())).all()
+def list_notes(db: Session, user_id: int, *, tag: str | None = None, query: str | None = None) -> list[QuickNote]:
     normalized_tag = (tag or "").strip()
+    cleaned_query = (query or "").strip()
+    if cleaned_query:
+        rows = _search_notes_semantic(db, user_id=user_id, query=cleaned_query, tag=normalized_tag)
+        if rows:
+            return rows
+        return _search_notes_fallback(db, user_id=user_id, query=cleaned_query, tag=normalized_tag)
+
+    rows = db.scalars(select(QuickNote).where(QuickNote.user_id == user_id).order_by(QuickNote.created_at.desc())).all()
     if not normalized_tag:
         return rows
     return [row for row in rows if normalized_tag in list(row.topic_tags_json or [])]
@@ -160,6 +169,7 @@ def update_note(
             }
         ],
     )
+    SemanticSearchService().upsert_quick_note(note)
     return note
 
 
@@ -169,3 +179,60 @@ def delete_note(db: Session, user_id: int, note_id: int) -> None:
         raise ValueError("速记不存在或已被删除。")
     db.delete(note)
     db.commit()
+    SemanticSearchService().delete_quick_note(user_id=user_id, note_id=note_id)
+
+
+def _search_notes_semantic(db: Session, *, user_id: int, query: str, tag: str | None = None) -> list[QuickNote]:
+    note_ids = SemanticSearchService().search_quick_note_ids(user_id=user_id, query_text=query)
+    if not note_ids:
+        return []
+    rows = db.scalars(select(QuickNote).where(QuickNote.user_id == user_id, QuickNote.id.in_(note_ids))).all()
+    by_id = {row.id: row for row in rows}
+    ordered_rows = [by_id[note_id] for note_id in note_ids if note_id in by_id]
+    normalized_tag = (tag or "").strip()
+    if normalized_tag:
+        ordered_rows = [row for row in ordered_rows if normalized_tag in list(row.topic_tags_json or [])]
+    return ordered_rows
+
+
+def _search_notes_fallback(db: Session, *, user_id: int, query: str, tag: str | None = None) -> list[QuickNote]:
+    normalized_tag = (tag or "").strip()
+    rows = db.scalars(select(QuickNote).where(QuickNote.user_id == user_id)).all()
+    ranked: list[tuple[int, QuickNote]] = []
+    for row in rows:
+        if normalized_tag and normalized_tag not in list(row.topic_tags_json or []):
+            continue
+        score = _note_keyword_score(row, query)
+        if score > 0:
+            ranked.append((score, row))
+    ranked.sort(key=lambda item: (-item[0], item[1].created_at, item[1].id), reverse=False)
+    return [item[1] for item in ranked]
+
+
+def _note_keyword_score(note: QuickNote, query: str) -> int:
+    terms = _query_terms(query)
+    if not terms:
+        return 0
+    score = 0
+    fields = [
+        (note.content or "", 6),
+        (" ".join(list(note.topic_tags_json or [])), 4),
+        (note.source_text or "", 2),
+    ]
+    for term in terms:
+        for raw_value, weight in fields:
+            value = raw_value.lower()
+            if term in value:
+                score += max(1, value.count(term)) * weight
+    return score
+
+
+def _query_terms(query: str) -> list[str]:
+    cleaned = query.strip().lower()
+    if not cleaned:
+        return []
+    terms = [cleaned]
+    for part in cleaned.split():
+        if part and part not in terms:
+            terms.append(part)
+    return terms

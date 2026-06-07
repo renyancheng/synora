@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../app_controller.dart';
@@ -18,6 +20,10 @@ class ScheduleListPage extends StatefulWidget {
 class _ScheduleListPageState extends State<ScheduleListPage> {
   late DateTime _visibleMonth;
   late DateTime _selectedDay;
+  late Future<List<ScheduleItem>> _future;
+  final TextEditingController _searchController = TextEditingController();
+  Timer? _searchDebounce;
+  String _searchQuery = '';
 
   @override
   void initState() {
@@ -25,33 +31,105 @@ class _ScheduleListPageState extends State<ScheduleListPage> {
     final now = DateTime.now();
     _visibleMonth = DateTime(now.year, now.month);
     _selectedDay = DateTime(now.year, now.month, now.day);
+    _future = _loadSchedules();
   }
 
   Future<void> _openDetails(ScheduleItem item) async {
     final changed = await Navigator.of(context).push<bool>(
       MaterialPageRoute<bool>(
-        builder: (_) => ScheduleDetailPage(controller: widget.controller, item: item),
+        builder: (_) =>
+            ScheduleDetailPage(controller: widget.controller, item: item),
       ),
     );
     if (changed == true && mounted) {
-      setState(() {});
+      await _reload();
     }
+  }
+
+  Future<List<ScheduleItem>> _loadSchedules({
+    bool alignSelectedDay = false,
+  }) async {
+    final schedules = List<ScheduleItem>.from(
+      await widget.controller.fetchSchedules(query: _searchQuery),
+    )..sort((a, b) => a.start.dateTime.compareTo(b.start.dateTime));
+    if (alignSelectedDay && schedules.isNotEmpty) {
+      final first = schedules.first.start.dateTime.toLocal();
+      _visibleMonth = DateTime(first.year, first.month);
+      _selectedDay = DateTime(first.year, first.month, first.day);
+    }
+    return schedules;
+  }
+
+  Future<void> _reload({bool alignSelectedDay = false}) async {
+    setState(() {
+      _future = _loadSchedules(alignSelectedDay: alignSelectedDay);
+    });
+  }
+
+  void _handleSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _searchQuery = value.trim();
+        _future = _loadSchedules(alignSelectedDay: _searchQuery.isNotEmpty);
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: widget.controller,
-      builder: (context, _) {
-        final schedules = List<ScheduleItem>.from(widget.controller.schedules)
-          ..sort((a, b) => a.start.dateTime.compareTo(b.start.dateTime));
-        final filteredSchedules = schedules.where((item) => isSameDay(item.start.dateTime, _selectedDay)).toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text(AppStrings.scheduleListTitle)),
+      body: FutureBuilder<List<ScheduleItem>>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(child: Text(snapshot.error.toString()));
+          }
+          final schedules = snapshot.data ?? const <ScheduleItem>[];
+          final filteredSchedules = schedules
+              .where((item) => isSameDay(item.start.dateTime, _selectedDay))
+              .toList();
 
-        return Scaffold(
-          appBar: AppBar(title: const Text(AppStrings.scheduleListTitle)),
-          body: ListView(
+          return ListView(
             padding: const EdgeInsets.all(16),
             children: <Widget>[
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: TextField(
+                  controller: _searchController,
+                  onChanged: _handleSearchChanged,
+                  decoration: InputDecoration(
+                    hintText: AppStrings.searchSchedulesHint,
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _searchQuery.isEmpty
+                        ? null
+                        : IconButton(
+                            onPressed: () {
+                              _searchController.clear();
+                              _handleSearchChanged('');
+                            },
+                            icon: const Icon(Icons.close),
+                          ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+              ),
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -60,22 +138,34 @@ class _ScheduleListPageState extends State<ScheduleListPage> {
                     children: <Widget>[
                       Row(
                         children: <Widget>[
-                          Text(AppStrings.monthViewTitle, style: Theme.of(context).textTheme.titleMedium),
+                          Text(
+                            AppStrings.monthViewTitle,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
                           const Spacer(),
                           IconButton(
                             onPressed: () {
                               setState(() {
-                                _visibleMonth = DateTime(_visibleMonth.year, _visibleMonth.month - 1);
+                                _visibleMonth = DateTime(
+                                  _visibleMonth.year,
+                                  _visibleMonth.month - 1,
+                                );
                               });
                             },
                             icon: const Icon(Icons.chevron_left),
                             tooltip: AppStrings.previousMonth,
                           ),
-                          Text(formatMonthLabel(_visibleMonth), style: Theme.of(context).textTheme.titleSmall),
+                          Text(
+                            formatMonthLabel(_visibleMonth),
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
                           IconButton(
                             onPressed: () {
                               setState(() {
-                                _visibleMonth = DateTime(_visibleMonth.year, _visibleMonth.month + 1);
+                                _visibleMonth = DateTime(
+                                  _visibleMonth.year,
+                                  _visibleMonth.month + 1,
+                                );
                               });
                             },
                             icon: const Icon(Icons.chevron_right),
@@ -123,9 +213,9 @@ class _ScheduleListPageState extends State<ScheduleListPage> {
                   ),
                 ),
             ],
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }
@@ -146,11 +236,19 @@ class _MonthCalendar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final firstDay = DateTime(visibleMonth.year, visibleMonth.month, 1);
-    final daysInMonth = DateTime(visibleMonth.year, visibleMonth.month + 1, 0).day;
+    final daysInMonth = DateTime(
+      visibleMonth.year,
+      visibleMonth.month + 1,
+      0,
+    ).day;
     final startOffset = firstDay.weekday - 1;
     final totalCells = ((startOffset + daysInMonth) / 7).ceil() * 7;
     final scheduleDays = schedules
-        .where((item) => item.start.dateTime.year == visibleMonth.year && item.start.dateTime.month == visibleMonth.month)
+        .where(
+          (item) =>
+              item.start.dateTime.year == visibleMonth.year &&
+              item.start.dateTime.month == visibleMonth.month,
+        )
         .map((item) {
           final date = item.start.dateTime.toLocal();
           return DateTime(date.year, date.month, date.day);
@@ -168,7 +266,10 @@ class _MonthCalendar extends StatelessWidget {
                   child: Center(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Text(label, style: Theme.of(context).textTheme.bodySmall),
+                      child: Text(
+                        label,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ),
                   ),
                 ),
@@ -189,7 +290,11 @@ class _MonthCalendar extends StatelessWidget {
             if (dayNumber < 1 || dayNumber > daysInMonth) {
               return const SizedBox.shrink();
             }
-            final day = DateTime(visibleMonth.year, visibleMonth.month, dayNumber);
+            final day = DateTime(
+              visibleMonth.year,
+              visibleMonth.month,
+              dayNumber,
+            );
             final normalizedDay = DateTime(day.year, day.month, day.day);
             final selected = isSameDay(day, selectedDay);
             final hasSchedule = scheduleDays.contains(normalizedDay);
@@ -200,7 +305,9 @@ class _MonthCalendar extends StatelessWidget {
                 onTap: () => onDaySelected(day),
                 child: Ink(
                   decoration: BoxDecoration(
-                    color: selected ? Theme.of(context).colorScheme.primaryContainer : null,
+                    color: selected
+                        ? Theme.of(context).colorScheme.primaryContainer
+                        : null,
                     borderRadius: BorderRadius.circular(14),
                   ),
                   child: Stack(

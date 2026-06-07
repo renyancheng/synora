@@ -78,10 +78,11 @@ def confirm_quick_note(
 @router.get("", response_model=list[QuickNoteItem])
 def get_quick_notes(
     tag: str | None = Query(default=None),
+    q: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[QuickNoteItem]:
-    rows = list_notes(db, current_user.id, tag=tag)
+    rows = list_notes(db, current_user.id, tag=tag, query=q)
     return [
         QuickNoteItem(
             id=row.id,

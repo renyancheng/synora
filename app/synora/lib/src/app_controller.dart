@@ -55,7 +55,9 @@ class ConversationViewState {
       messages: messages ?? this.messages,
       isLoading: isLoading ?? this.isLoading,
       isSending: isSending ?? this.isSending,
-      streamStatusLabel: clearStreamStatusLabel ? null : (streamStatusLabel ?? this.streamStatusLabel),
+      streamStatusLabel: clearStreamStatusLabel
+          ? null
+          : (streamStatusLabel ?? this.streamStatusLabel),
       lastError: clearLastError ? null : (lastError ?? this.lastError),
       draftText: draftText ?? this.draftText,
       draftAttachments: draftAttachments ?? this.draftAttachments,
@@ -64,15 +66,16 @@ class ConversationViewState {
     );
   }
 
-  static ConversationViewState draft() => ConversationViewState(messages: const <ConversationMessageItem>[], isDraft: true);
+  static ConversationViewState draft() => ConversationViewState(
+    messages: const <ConversationMessageItem>[],
+    isDraft: true,
+  );
 }
 
 class AppController extends ChangeNotifier {
-  AppController({
-    ApiClient? apiClient,
-    LocalSessionStore? sessionStore,
-  })  : _apiClient = apiClient ?? ApiClient(),
-        _sessionStore = sessionStore ?? LocalSessionStore() {
+  AppController({ApiClient? apiClient, LocalSessionStore? sessionStore})
+    : _apiClient = apiClient ?? ApiClient(),
+      _sessionStore = sessionStore ?? LocalSessionStore() {
     unawaited(_restorePersistedSession());
   }
 
@@ -91,7 +94,10 @@ class AppController extends ChangeNotifier {
   List<MemoryItem> _memoryItems = <MemoryItem>[];
   UserPreferences _userPreferences = UserPreferences(wecomRobotWebhook: null);
   List<ConversationThreadItem> _conversations = <ConversationThreadItem>[];
-  final Map<int, ConversationViewState> _conversationStates = <int, ConversationViewState>{draftConversationId: ConversationViewState.draft()};
+  final Map<int, ConversationViewState> _conversationStates =
+      <int, ConversationViewState>{
+        draftConversationId: ConversationViewState.draft(),
+      };
   int _activeConversationId = draftConversationId;
 
   SessionInfo? get session => _session;
@@ -99,24 +105,33 @@ class AppController extends ChangeNotifier {
   bool get isAuthenticated => _session != null;
   bool get isLoading => _loading;
   bool get isRestoringSession => _restoringSession;
-  List<ScheduleItem> get schedules => List<ScheduleItem>.unmodifiable(_schedules);
-  List<QuickNoteItem> get quickNotes => List<QuickNoteItem>.unmodifiable(_quickNotes);
-  List<NotificationItem> get notifications => List<NotificationItem>.unmodifiable(_notifications);
+  List<ScheduleItem> get schedules =>
+      List<ScheduleItem>.unmodifiable(_schedules);
+  List<QuickNoteItem> get quickNotes =>
+      List<QuickNoteItem>.unmodifiable(_quickNotes);
+  List<NotificationItem> get notifications =>
+      List<NotificationItem>.unmodifiable(_notifications);
   String get memorySummary => _memorySummary;
-  List<MemoryItem> get memoryItems => List<MemoryItem>.unmodifiable(_memoryItems);
+  List<MemoryItem> get memoryItems =>
+      List<MemoryItem>.unmodifiable(_memoryItems);
   UserPreferences get userPreferences => _userPreferences;
-  List<ConversationThreadItem> get conversations => List<ConversationThreadItem>.unmodifiable(_conversations);
+  List<ConversationThreadItem> get conversations =>
+      List<ConversationThreadItem>.unmodifiable(_conversations);
   int get activeConversationId => _activeConversationId;
   bool get isDraftConversation => _activeConversationId == draftConversationId;
 
-  ConversationViewState get activeState => _conversationStates[_activeConversationId] ?? ConversationViewState.draft();
-  List<ConversationMessageItem> get messages => List<ConversationMessageItem>.unmodifiable(activeState.messages);
+  ConversationViewState get activeState =>
+      _conversationStates[_activeConversationId] ??
+      ConversationViewState.draft();
+  List<ConversationMessageItem> get messages =>
+      List<ConversationMessageItem>.unmodifiable(activeState.messages);
   bool get isConversationLoading => activeState.isLoading;
   bool get isMessageSending => activeState.isSending;
   String? get lastError => activeState.lastError;
   String? get streamStatusLabel => activeState.streamStatusLabel;
   String get draftText => activeState.draftText;
-  List<ComposerAttachment> get draftAttachments => List<ComposerAttachment>.unmodifiable(activeState.draftAttachments);
+  List<ComposerAttachment> get draftAttachments =>
+      List<ComposerAttachment>.unmodifiable(activeState.draftAttachments);
   ConversationTool? get draftTool => activeState.draftTool;
 
   int? get latestUserMessageId {
@@ -227,7 +242,8 @@ class AppController extends ChangeNotifier {
       _conversations = (results[3] as List<ConversationThreadItem>)
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
       _userPreferences = results[4] as UserPreferences;
-      if (!isDraftConversation && !_conversations.any((item) => item.id == _activeConversationId)) {
+      if (!isDraftConversation &&
+          !_conversations.any((item) => item.id == _activeConversationId)) {
         beginDraftConversation(notify: false);
       }
     } finally {
@@ -272,17 +288,33 @@ class AppController extends ChangeNotifier {
       _conversationStates[draftConversationId] = ConversationViewState.draft();
     }
     _activeConversationId = conversationId;
-    final current = _conversationStates[conversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[]);
-    _conversationStates[conversationId] = current.copyWith(isLoading: true, clearLastError: true, clearStreamStatusLabel: true, isDraft: false);
+    final current =
+        _conversationStates[conversationId] ??
+        ConversationViewState(messages: const <ConversationMessageItem>[]);
+    _conversationStates[conversationId] = current.copyWith(
+      isLoading: true,
+      clearLastError: true,
+      clearStreamStatusLabel: true,
+      isDraft: false,
+    );
     notifyListeners();
     try {
       final result = await _apiClient.fetchConversationMessages(conversationId);
       final thread = result.$1;
       final items = result.$2;
       _upsertConversation(thread);
-      _conversationStates[conversationId] = current.copyWith(messages: items, isLoading: false, isDraft: false, clearLastError: true, clearStreamStatusLabel: true);
+      _conversationStates[conversationId] = current.copyWith(
+        messages: items,
+        isLoading: false,
+        isDraft: false,
+        clearLastError: true,
+        clearStreamStatusLabel: true,
+      );
     } catch (error) {
-      _conversationStates[conversationId] = current.copyWith(isLoading: false, lastError: error.toString());
+      _conversationStates[conversationId] = current.copyWith(
+        isLoading: false,
+        lastError: error.toString(),
+      );
       rethrow;
     } finally {
       notifyListeners();
@@ -301,12 +333,19 @@ class AppController extends ChangeNotifier {
   }
 
   void setDraftTool(ConversationTool? tool) {
-    _setStateFor(_activeConversationId, activeState.copyWith(draftTool: tool, clearDraftTool: tool == null));
+    _setStateFor(
+      _activeConversationId,
+      activeState.copyWith(draftTool: tool, clearDraftTool: tool == null),
+    );
   }
 
   void addDraftAttachments(List<ComposerAttachment> attachments) {
-    final next = List<ComposerAttachment>.from(activeState.draftAttachments)..addAll(attachments);
-    _setStateFor(_activeConversationId, activeState.copyWith(draftAttachments: next));
+    final next = List<ComposerAttachment>.from(activeState.draftAttachments)
+      ..addAll(attachments);
+    _setStateFor(
+      _activeConversationId,
+      activeState.copyWith(draftAttachments: next),
+    );
   }
 
   void removeDraftAttachmentAt(int index) {
@@ -315,7 +354,10 @@ class AppController extends ChangeNotifier {
       return;
     }
     next.removeAt(index);
-    _setStateFor(_activeConversationId, activeState.copyWith(draftAttachments: next));
+    _setStateFor(
+      _activeConversationId,
+      activeState.copyWith(draftAttachments: next),
+    );
   }
 
   void refillComposerFromMessage(ConversationMessageItem message) {
@@ -373,7 +415,10 @@ class AppController extends ChangeNotifier {
       thread = await _apiClient.createConversation();
       conversationId = thread.id;
       _upsertConversation(thread);
-      _conversationStates[conversationId] = ConversationViewState(messages: const <ConversationMessageItem>[], isDraft: false);
+      _conversationStates[conversationId] = ConversationViewState(
+        messages: const <ConversationMessageItem>[],
+        isDraft: false,
+      );
       _activeConversationId = conversationId;
       _conversationStates.remove(draftConversationId);
     }
@@ -384,7 +429,15 @@ class AppController extends ChangeNotifier {
       if (attachments.any((item) => !item.isLocal))
         'attachment_refs': attachments
             .where((item) => !item.isLocal)
-            .map((item) => item.remote?.toJson() ?? <String, dynamic>{'attachment_id': -1, 'file_name': item.fileName, 'content_type': ''})
+            .map(
+              (item) =>
+                  item.remote?.toJson() ??
+                  <String, dynamic>{
+                    'attachment_id': -1,
+                    'file_name': item.fileName,
+                    'content_type': '',
+                  },
+            )
             .toList(),
     };
     final tempUserMessage = ConversationMessageItem.local(
@@ -394,20 +447,33 @@ class AppController extends ChangeNotifier {
       status: 'sending',
       textContent: textContent,
       structuredPayload: tempPayload,
-      localAttachments: attachments.where((item) => item.isLocal).map((item) => item.local!).toList(),
+      localAttachments: attachments
+          .where((item) => item.isLocal)
+          .map((item) => item.local!)
+          .toList(),
     );
-    final existingMessages = List<ConversationMessageItem>.from((_conversationStates[conversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[])).messages)
-      ..add(tempUserMessage);
-    _conversationStates[conversationId] = (_conversationStates[conversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[])).copyWith(
-      messages: existingMessages,
-      isSending: true,
-      clearLastError: true,
-      clearStreamStatusLabel: true,
-      draftText: '',
-      draftAttachments: const <ComposerAttachment>[],
-      clearDraftTool: true,
-      isDraft: false,
-    );
+    final existingMessages = List<ConversationMessageItem>.from(
+      (_conversationStates[conversationId] ??
+              ConversationViewState(
+                messages: const <ConversationMessageItem>[],
+              ))
+          .messages,
+    )..add(tempUserMessage);
+    _conversationStates[conversationId] =
+        (_conversationStates[conversationId] ??
+                ConversationViewState(
+                  messages: const <ConversationMessageItem>[],
+                ))
+            .copyWith(
+              messages: existingMessages,
+              isSending: true,
+              clearLastError: true,
+              clearStreamStatusLabel: true,
+              draftText: '',
+              draftAttachments: const <ComposerAttachment>[],
+              clearDraftTool: true,
+              isDraft: false,
+            );
     notifyListeners();
 
     int? assistantMessageId;
@@ -428,7 +494,11 @@ class AppController extends ChangeNotifier {
         attachmentIds: uploadedIds,
         selectedTool: selectedTool,
       );
-      _replaceMessage(conversationId, tempUserId, accepted.userMessage.copyWith(status: 'sent'));
+      _replaceMessage(
+        conversationId,
+        tempUserId,
+        accepted.userMessage.copyWith(status: 'sent'),
+      );
       assistantMessageId = accepted.assistantMessageId;
       _replaceOrAppendMessage(
         conversationId,
@@ -442,8 +512,15 @@ class AppController extends ChangeNotifier {
       );
       notifyListeners();
 
-      await for (final event in _apiClient.streamConversation(conversationId: conversationId, streamId: accepted.streamId)) {
-        _handleStreamEvent(conversationId, event, assistantMessageId: assistantMessageId);
+      await for (final event in _apiClient.streamConversation(
+        conversationId: conversationId,
+        streamId: accepted.streamId,
+      )) {
+        _handleStreamEvent(
+          conversationId,
+          event,
+          assistantMessageId: assistantMessageId,
+        );
       }
       await _refreshCollectionsOnly();
     } catch (error) {
@@ -461,13 +538,27 @@ class AppController extends ChangeNotifier {
           ),
         );
       }
-      _setStateFor(conversationId, (_conversationStates[conversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[])).copyWith(lastError: failureText, isSending: false, clearStreamStatusLabel: true));
+      _setStateFor(
+        conversationId,
+        (_conversationStates[conversationId] ??
+                ConversationViewState(
+                  messages: const <ConversationMessageItem>[],
+                ))
+            .copyWith(
+              lastError: failureText,
+              isSending: false,
+              clearStreamStatusLabel: true,
+            ),
+      );
       notifyListeners();
       rethrow;
     } finally {
       final current = _conversationStates[conversationId];
       if (current != null) {
-        _conversationStates[conversationId] = current.copyWith(isSending: false, clearStreamStatusLabel: true);
+        _conversationStates[conversationId] = current.copyWith(
+          isSending: false,
+          clearStreamStatusLabel: true,
+        );
       }
       notifyListeners();
     }
@@ -487,13 +578,20 @@ class AppController extends ChangeNotifier {
       payload: payload,
     );
     _upsertConversation(result.conversation);
-    final refreshed = await _apiClient.fetchConversationMessages(conversationId);
-    _conversationStates[conversationId] = (_conversationStates[conversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[])).copyWith(
-      messages: refreshed.$2,
-      isLoading: false,
-      isDraft: false,
-      clearLastError: true,
+    final refreshed = await _apiClient.fetchConversationMessages(
+      conversationId,
     );
+    _conversationStates[conversationId] =
+        (_conversationStates[conversationId] ??
+                ConversationViewState(
+                  messages: const <ConversationMessageItem>[],
+                ))
+            .copyWith(
+              messages: refreshed.$2,
+              isLoading: false,
+              isDraft: false,
+              clearLastError: true,
+            );
     await _refreshCollectionsOnly();
     notifyListeners();
   }
@@ -502,15 +600,19 @@ class AppController extends ChangeNotifier {
     required int conversationId,
     required String title,
   }) async {
-    final updated = await _apiClient.renameConversation(conversationId: conversationId, title: title);
+    final updated = await _apiClient.renameConversation(
+      conversationId: conversationId,
+      title: title,
+    );
     _upsertConversation(updated);
     notifyListeners();
   }
 
   Future<void> deleteConversation(int conversationId) async {
     await _apiClient.deleteConversation(conversationId);
-    _conversations = _conversations.where((item) => item.id != conversationId).toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _conversations =
+        _conversations.where((item) => item.id != conversationId).toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     _conversationStates.remove(conversationId);
     if (_activeConversationId == conversationId) {
       beginDraftConversation(notify: false);
@@ -523,7 +625,8 @@ class AppController extends ChangeNotifier {
       return;
     }
     if (message.status == 'failed') {
-      final messages = List<ConversationMessageItem>.from(activeState.messages)..removeWhere((item) => item.id == message.id);
+      final messages = List<ConversationMessageItem>.from(activeState.messages)
+        ..removeWhere((item) => item.id == message.id);
       final attachments = message.localAttachments.isNotEmpty
           ? message.localAttachments.map(ComposerAttachment.local).toList()
           : message.attachmentRefs.map(ComposerAttachment.remote).toList();
@@ -543,20 +646,31 @@ class AppController extends ChangeNotifier {
       refillComposerFromMessage(message);
       return;
     }
-    final result = await _apiClient.rewindConversationLastTurn(_activeConversationId);
-    final refreshed = await _apiClient.fetchConversationMessages(_activeConversationId);
-    final restored = result.restoredMessage;
-    final attachments = restored.attachmentRefs.map(ComposerAttachment.remote).toList();
-    _upsertConversation(result.conversation);
-    _conversationStates[_activeConversationId] = (_conversationStates[_activeConversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[])).copyWith(
-      messages: refreshed.$2,
-      draftText: restored.textContent ?? '',
-      draftAttachments: attachments,
-      draftTool: restored.selectedTool,
-      isDraft: false,
-      clearLastError: true,
-      clearStreamStatusLabel: true,
+    final result = await _apiClient.rewindConversationLastTurn(
+      _activeConversationId,
     );
+    final refreshed = await _apiClient.fetchConversationMessages(
+      _activeConversationId,
+    );
+    final restored = result.restoredMessage;
+    final attachments = restored.attachmentRefs
+        .map(ComposerAttachment.remote)
+        .toList();
+    _upsertConversation(result.conversation);
+    _conversationStates[_activeConversationId] =
+        (_conversationStates[_activeConversationId] ??
+                ConversationViewState(
+                  messages: const <ConversationMessageItem>[],
+                ))
+            .copyWith(
+              messages: refreshed.$2,
+              draftText: restored.textContent ?? '',
+              draftAttachments: attachments,
+              draftTool: restored.selectedTool,
+              isDraft: false,
+              clearLastError: true,
+              clearStreamStatusLabel: true,
+            );
     await _refreshCollectionsOnly();
     notifyListeners();
   }
@@ -600,7 +714,11 @@ class AppController extends ChangeNotifier {
     required String content,
     required List<String> tags,
   }) async {
-    final item = await _apiClient.updateQuickNote(noteId: noteId, content: content, tags: tags);
+    final item = await _apiClient.updateQuickNote(
+      noteId: noteId,
+      content: content,
+      tags: tags,
+    );
     await _refreshCollectionsOnly();
     notifyListeners();
     return item;
@@ -632,11 +750,20 @@ class AppController extends ChangeNotifier {
     return _apiClient.fetchQuickNoteTags();
   }
 
-  Future<List<QuickNoteItem>> fetchQuickNotesByTag(String? tag) {
-    return _apiClient.fetchQuickNotes(tag: tag);
+  Future<List<QuickNoteItem>> fetchQuickNotesByTag(
+    String? tag, {
+    String? query,
+  }) {
+    return _apiClient.fetchQuickNotes(tag: tag, query: query);
   }
 
-  Future<void> updateUserPreferences({required String? wecomRobotWebhook}) async {
+  Future<List<ScheduleItem>> fetchSchedules({String? query}) {
+    return _apiClient.fetchSchedules(query: query);
+  }
+
+  Future<void> updateUserPreferences({
+    required String? wecomRobotWebhook,
+  }) async {
     _userPreferences = await _apiClient.updateUserPreferences(
       wecomRobotWebhook: wecomRobotWebhook,
     );
@@ -658,7 +785,7 @@ class AppController extends ChangeNotifier {
     _memorySummary = '';
     _memoryItems = <MemoryItem>[];
     _conversations = <ConversationThreadItem>[];
-      _conversationStates
+    _conversationStates
       ..clear()
       ..[draftConversationId] = ConversationViewState.draft();
     _activeConversationId = draftConversationId;
@@ -666,7 +793,11 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _handleStreamEvent(int conversationId, ConversationStreamEvent event, {required int assistantMessageId}) {
+  void _handleStreamEvent(
+    int conversationId,
+    ConversationStreamEvent event, {
+    required int assistantMessageId,
+  }) {
     switch (event.event) {
       case 'run_started':
         _replaceOrAppendMessage(
@@ -687,51 +818,106 @@ class AppController extends ChangeNotifier {
           break;
         }
         final messages = List<ConversationMessageItem>.from(current.messages);
-        final index = messages.indexWhere((item) => item.id == assistantMessageId);
+        final index = messages.indexWhere(
+          (item) => item.id == assistantMessageId,
+        );
         if (index >= 0) {
           final message = messages[index];
-          messages[index] = message.copyWith(status: 'streaming', textContent: '${message.textContent ?? ''}$delta');
-          _conversationStates[conversationId] = current.copyWith(messages: messages);
+          messages[index] = message.copyWith(
+            status: 'streaming',
+            textContent: '${message.textContent ?? ''}$delta',
+          );
+          _conversationStates[conversationId] = current.copyWith(
+            messages: messages,
+          );
         }
         break;
       case 'message_completed':
-        final messageJson = event.data['message'] as Map<String, dynamic>? ?? <String, dynamic>{};
-        _replaceOrAppendMessage(conversationId, ConversationMessageItem.fromJson(messageJson));
-        _setStateFor(conversationId, _conversationStates[conversationId]!.copyWith(clearStreamStatusLabel: true));
+        final messageJson =
+            event.data['message'] as Map<String, dynamic>? ??
+            <String, dynamic>{};
+        _replaceOrAppendMessage(
+          conversationId,
+          ConversationMessageItem.fromJson(messageJson),
+        );
+        _setStateFor(
+          conversationId,
+          _conversationStates[conversationId]!.copyWith(
+            clearStreamStatusLabel: true,
+          ),
+        );
         break;
       case 'card_snapshot':
-        final messageJson = event.data['message'] as Map<String, dynamic>? ?? <String, dynamic>{};
-        _replaceOrAppendMessage(conversationId, ConversationMessageItem.fromJson(messageJson));
+        final messageJson =
+            event.data['message'] as Map<String, dynamic>? ??
+            <String, dynamic>{};
+        _replaceOrAppendMessage(
+          conversationId,
+          ConversationMessageItem.fromJson(messageJson),
+        );
         break;
       case 'tool_call_started':
-        _setStateFor(conversationId, _conversationStates[conversationId]!.copyWith(streamStatusLabel: _toolStatusLabel(event.data['tool_name'] as String?)));
+        _setStateFor(
+          conversationId,
+          _conversationStates[conversationId]!.copyWith(
+            streamStatusLabel: _toolStatusLabel(
+              event.data['tool_name'] as String?,
+            ),
+          ),
+        );
         break;
       case 'tool_call_completed':
       case 'tool_call_failed':
-        _setStateFor(conversationId, _conversationStates[conversationId]!.copyWith(clearStreamStatusLabel: true));
+        _setStateFor(
+          conversationId,
+          _conversationStates[conversationId]!.copyWith(
+            clearStreamStatusLabel: true,
+          ),
+        );
         break;
       case 'run_failed':
-        final failureText = AppStrings.chatFailureReason(event.data['code'] as String?, event.data['message'] as String?);
+        final failureText = AppStrings.chatFailureReason(
+          event.data['code'] as String?,
+          event.data['message'] as String?,
+        );
         final current = _conversationStates[conversationId];
         if (current != null) {
           final messages = List<ConversationMessageItem>.from(current.messages);
-          final index = messages.indexWhere((item) => item.id == assistantMessageId);
+          final index = messages.indexWhere(
+            (item) => item.id == assistantMessageId,
+          );
           if (index >= 0) {
             final message = messages[index];
-            messages[index] = message.copyWith(status: 'failed', textContent: (message.textContent ?? '').trim().isNotEmpty ? message.textContent : failureText);
+            messages[index] = message.copyWith(
+              status: 'failed',
+              textContent: (message.textContent ?? '').trim().isNotEmpty
+                  ? message.textContent
+                  : failureText,
+            );
           }
-          _conversationStates[conversationId] = current.copyWith(messages: messages, lastError: failureText, isSending: false, clearStreamStatusLabel: true);
+          _conversationStates[conversationId] = current.copyWith(
+            messages: messages,
+            lastError: failureText,
+            isSending: false,
+            clearStreamStatusLabel: true,
+          );
         }
         break;
       case 'run_completed':
         final current = _conversationStates[conversationId];
         if (current != null) {
           final messages = List<ConversationMessageItem>.from(current.messages);
-          final index = messages.indexWhere((item) => item.id == assistantMessageId);
+          final index = messages.indexWhere(
+            (item) => item.id == assistantMessageId,
+          );
           if (index >= 0) {
             messages[index] = messages[index].copyWith(status: 'completed');
           }
-          _conversationStates[conversationId] = current.copyWith(messages: messages, clearStreamStatusLabel: true, isSending: false);
+          _conversationStates[conversationId] = current.copyWith(
+            messages: messages,
+            clearStreamStatusLabel: true,
+            isSending: false,
+          );
         }
         break;
     }
@@ -769,12 +955,19 @@ class AppController extends ChangeNotifier {
     _schedules = results[0] as List<ScheduleItem>;
     _quickNotes = results[1] as List<QuickNoteItem>;
     _notifications = results[2] as List<NotificationItem>;
-    _conversations = (results[3] as List<ConversationThreadItem>)..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    _conversations = (results[3] as List<ConversationThreadItem>)
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     _userPreferences = results[4] as UserPreferences;
   }
 
-  void _replaceMessage(int conversationId, int targetId, ConversationMessageItem replacement) {
-    final current = _conversationStates[conversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[]);
+  void _replaceMessage(
+    int conversationId,
+    int targetId,
+    ConversationMessageItem replacement,
+  ) {
+    final current =
+        _conversationStates[conversationId] ??
+        ConversationViewState(messages: const <ConversationMessageItem>[]);
     final messages = List<ConversationMessageItem>.from(current.messages);
     final index = messages.indexWhere((item) => item.id == targetId);
     if (index >= 0) {
@@ -794,12 +987,19 @@ class AppController extends ChangeNotifier {
     final index = messages.indexWhere((item) => item.id == targetId);
     if (index >= 0) {
       messages[index] = messages[index].copyWith(status: 'failed');
-      _conversationStates[conversationId] = current.copyWith(messages: messages);
+      _conversationStates[conversationId] = current.copyWith(
+        messages: messages,
+      );
     }
   }
 
-  void _replaceOrAppendMessage(int conversationId, ConversationMessageItem item) {
-    final current = _conversationStates[conversationId] ?? ConversationViewState(messages: const <ConversationMessageItem>[]);
+  void _replaceOrAppendMessage(
+    int conversationId,
+    ConversationMessageItem item,
+  ) {
+    final current =
+        _conversationStates[conversationId] ??
+        ConversationViewState(messages: const <ConversationMessageItem>[]);
     final messages = List<ConversationMessageItem>.from(current.messages);
     final index = messages.indexWhere((message) => message.id == item.id);
     if (index >= 0) {
@@ -811,7 +1011,9 @@ class AppController extends ChangeNotifier {
   }
 
   void _upsertConversation(ConversationThreadItem item) {
-    final filtered = _conversations.where((current) => current.id != item.id).toList();
+    final filtered = _conversations
+        .where((current) => current.id != item.id)
+        .toList();
     filtered.add(item);
     filtered.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     _conversations = filtered;
