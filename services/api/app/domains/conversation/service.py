@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncGenerator, Iterable
 from datetime import datetime, timezone
 from typing import Any
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domains.attachment.service import build_attachment_prompt_assets
+from app.domains.conversation.history_search_service import ConversationHistorySearchService
 from app.domains.memory.service import MemoryService
 from app.domains.quick_note.service import save_note_after_approval
 from app.domains.schedule.service import build_draft_hash, create_schedule_after_approval, detect_conflicts, normalize_reminder_preset
@@ -31,6 +33,22 @@ NON_EDITABLE_CARD_MESSAGE_TYPES = {
     "quick_note_preview_card",
     "conflict_card",
 }
+RECENT_MESSAGE_DB_WINDOW = 12
+RECENT_MESSAGE_LLM_WINDOW = 8
+CONVERSATION_HISTORY_SCAN_LIMIT = 160
+CONVERSATION_HISTORY_PICK_LIMIT = 6
+CONVERSATION_HISTORY_SNIPPET_LENGTH = 140
+CONVERSATION_REFERENCE_HINTS = (
+    "之前",
+    "前面",
+    "刚才",
+    "上次",
+    "前文",
+    "继续",
+    "总结",
+    "回顾",
+    "那个",
+)
 
 
 def _enqueue_memory_writeback(*, user_id: int, source_kind: str, source_ref_id: str | None, text: str, summary: str = '') -> None:
@@ -120,6 +138,137 @@ def _tool_selection_reminder(intent: str) -> str:
     return "如果你要创建日程或速记，请先选择对应工具后再发送。"
 
 
+def _extract_history_query_terms(text: str) -> list[str]:
+    normalized = " ".join(text.strip().lower().split())
+    if not normalized:
+        return []
+    terms: list[str] = [normalized]
+    for item in re.findall(r"[a-z0-9_]{2,}", normalized):
+        if item not in terms:
+            terms.append(item)
+    stop_chars = {"我", "你", "他", "她", "它", "的", "了", "吗", "呢", "啊", "呀", "吧", "是", "在", "把", "要", "和"}
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+        if chunk not in terms:
+            terms.append(chunk)
+        meaningful_chars = [char for char in chunk if char not in stop_chars]
+        for size in range(2, min(5, len(meaningful_chars) + 1)):
+            for index in range(0, len(meaningful_chars) - size + 1):
+                token = "".join(meaningful_chars[index : index + size])
+                if token and token not in terms:
+                    terms.append(token)
+    return terms
+
+
+def _history_char_overlap_score(query_text: str, candidate_text: str) -> float:
+    ignored = {"我", "你", "他", "她", "它", "的", "了", "吗", "呢", "啊", "呀", "吧", "是", "在", "和", "就", "也"}
+    query_chars = {char for char in query_text if "\u4e00" <= char <= "\u9fff" and char not in ignored}
+    candidate_chars = {char for char in candidate_text if "\u4e00" <= char <= "\u9fff" and char not in ignored}
+    if not query_chars or not candidate_chars:
+        return 0.0
+    return float(len(query_chars & candidate_chars))
+
+
+def _score_history_message(query_text: str, terms: list[str], message: ConversationMessage) -> float:
+    content = str(message.text_content or "").strip().lower()
+    if not content:
+        return 0.0
+    score = _history_char_overlap_score(query_text.lower(), content)
+    for term in terms:
+        cleaned = term.strip().lower()
+        if len(cleaned) < 2:
+            continue
+        if cleaned in content:
+            score += max(1, content.count(cleaned)) * (2.5 if len(cleaned) >= 4 else 1.2)
+    if message.role == "user":
+        score += 0.5
+    return score
+
+
+def _truncate_history_text(text: str, limit: int = CONVERSATION_HISTORY_SNIPPET_LENGTH) -> str:
+    normalized = " ".join(text.strip().split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1].rstrip() + "…"
+
+
+def _build_conversation_history_recall(
+    db: Session,
+    *,
+    conversation_id: int,
+    current_user_message_id: int | None,
+) -> list[str]:
+    current_message = db.get(ConversationMessage, current_user_message_id) if current_user_message_id else None
+    query_text = str(getattr(current_message, "text_content", "") or "").strip()
+    if not query_text:
+        return []
+
+    raw_rows = db.scalars(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation_id,
+            ConversationMessage.message_type == "text",
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(RECENT_MESSAGE_DB_WINDOW + CONVERSATION_HISTORY_SCAN_LIMIT + 24)
+    ).all()
+    filtered_rows = [
+        row
+        for row in raw_rows
+        if row.id != current_user_message_id and str(row.text_content or "").strip()
+    ]
+    older_rows = filtered_rows[RECENT_MESSAGE_DB_WINDOW:]
+    if not older_rows:
+        return []
+
+    terms = _extract_history_query_terms(query_text)
+    ranked: list[tuple[float, ConversationMessage]] = []
+    for row in older_rows:
+        score = _score_history_message(query_text, terms, row)
+        if score > 0:
+            ranked.append((score, row))
+    ranked.sort(key=lambda item: (-item[0], item[1].created_at, item[1].id))
+
+    selected_rows: list[ConversationMessage] = []
+    seen_ids: set[int] = set()
+    for _, row in ranked[:CONVERSATION_HISTORY_PICK_LIMIT]:
+        if row.id not in seen_ids:
+            selected_rows.append(row)
+            seen_ids.add(row.id)
+
+    if not selected_rows and any(hint in query_text for hint in CONVERSATION_REFERENCE_HINTS):
+        for row in reversed(older_rows[:CONVERSATION_HISTORY_PICK_LIMIT]):
+            if row.id not in seen_ids:
+                selected_rows.append(row)
+                seen_ids.add(row.id)
+
+    selected_rows.sort(key=lambda item: (item.created_at, item.id))
+    return [
+        f"{'用户' if row.role == 'user' else '助手'}：{_truncate_history_text(str(row.text_content or ''))}"
+        for row in selected_rows
+    ]
+
+
+def _resolve_conversation_history_lines(
+    db: Session,
+    *,
+    conversation_id: int,
+    current_user_message_id: int | None,
+) -> list[str]:
+    semantic_lines = ConversationHistorySearchService().retrieve_history_lines(
+        db,
+        conversation_id=conversation_id,
+        current_user_message_id=current_user_message_id,
+        recent_window=RECENT_MESSAGE_DB_WINDOW,
+    )
+    if semantic_lines:
+        return semantic_lines
+    return _build_conversation_history_recall(
+        db,
+        conversation_id=conversation_id,
+        current_user_message_id=current_user_message_id,
+    )
+
+
 
 def _error_payload(exc: Exception, *, assistant_message_id: int) -> dict[str, object]:
     if isinstance(exc, LLMServiceError):
@@ -193,6 +342,7 @@ def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None
     thread = get_conversation(db, user_id, conversation_id)
     pending = _get_pending_state(db, conversation_id)
     messages = db.scalars(select(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id)).all()
+    text_message_ids = [message.id for message in messages if message.message_type == "text"]
     action_group_ids = {
         str(message.action_group_id)
         for message in messages
@@ -218,6 +368,10 @@ def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None
             db.delete(run)
     db.delete(thread)
     db.commit()
+    ConversationHistorySearchService().delete_messages(
+        conversation_id=conversation_id,
+        message_ids=text_message_ids,
+    )
 
 
 def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[ConversationThread, ConversationMessage]:
@@ -268,6 +422,7 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
     )
     created_message_ids: list[int] = []
     assistant_message_id: int | None = None
+    deleted_text_message_ids: set[int] = {user_message.id} if user_message.message_type == "text" else set()
     if agent_run is not None:
         created_message_ids = [int(item) for item in list(agent_run.output_json.get("created_message_ids") or []) if isinstance(item, int)]
         assistant_message_id = agent_run.assistant_message_id
@@ -279,11 +434,15 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
     for message_id in created_message_ids:
         message = db.get(ConversationMessage, message_id)
         if message is not None:
+            if message.message_type == "text":
+                deleted_text_message_ids.add(message.id)
             db.delete(message)
 
     if assistant_message_id is not None:
         assistant_message = db.get(ConversationMessage, assistant_message_id)
         if assistant_message is not None:
+            if assistant_message.message_type == "text":
+                deleted_text_message_ids.add(assistant_message.id)
             db.delete(assistant_message)
 
     pending = _get_pending_state(db, conversation_id)
@@ -313,6 +472,10 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
         user_id=user_id,
         source_kind="conversation_message",
         source_ref_id=str(user_message.id),
+    )
+    ConversationHistorySearchService().delete_messages(
+        conversation_id=conversation_id,
+        message_ids=deleted_text_message_ids,
     )
 
     latest_message = db.scalar(
@@ -354,6 +517,8 @@ def queue_message(
             selected_tool=payload.selected_tool,
         ),
     )
+    if text_content:
+        ConversationHistorySearchService().upsert_message(user_message)
     if has_user_message is None and text_content:
         thread.title = ModelAdapter().generate_conversation_title(text_content)
         db.commit()
@@ -425,6 +590,14 @@ async def consume_stream(
     attachment_ids = list(payload.get("attachment_ids") or [])
     selected_tool = payload.get("selected_tool")
     context = dict(payload.get("context") or {})
+    if agent_run.user_message_id:
+        history_lines = _resolve_conversation_history_lines(
+            db,
+            conversation_id=conversation_id,
+            current_user_message_id=agent_run.user_message_id,
+        )
+        if history_lines:
+            context["conversation_history_lines"] = history_lines
     assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
     attachment_parts = [part for asset in assets for part in asset.parts]
 
@@ -478,6 +651,7 @@ async def consume_stream(
                 agent_run,
                 user_message=text_content,
                 attachment_parts=attachment_parts,
+                conversation_history_lines=list(context.get("conversation_history_lines") or []),
             ):
                 yield item
             final_text = assistant_message.text_content or ""
@@ -598,12 +772,13 @@ async def _stream_general_chat(
     *,
     user_message: str,
     attachment_parts: list[dict],
+    conversation_history_lines: list[str] | None = None,
 ) -> AsyncGenerator[dict, None]:
     recent_messages = db.scalars(
         select(ConversationMessage)
         .where(ConversationMessage.conversation_id == thread.id)
         .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
-        .limit(12)
+        .limit(RECENT_MESSAGE_DB_WINDOW)
     ).all()
     ordered = list(reversed(list(recent_messages)))
     model = ModelAdapter()
@@ -618,13 +793,20 @@ async def _stream_general_chat(
         memory_summary=memory_context.summary,
         memory_items=memory_context.items,
     )
+    history_text = ContextAssembler.build_conversation_history_context(conversation_history_lines)
+    prompt_parts: list[str] = []
+    if memory_text:
+        prompt_parts.append(memory_text)
+    if history_text:
+        prompt_parts.append(history_text)
+    prompt_parts.append(f"当前输入：\n{user_message}".strip())
     messages = model.build_langchain_messages(
         recent_messages=[
             {"role": item.role, "content": item.text_content or ""}
-            for item in ordered
+            for item in ordered[-RECENT_MESSAGE_LLM_WINDOW:]
             if item.id != assistant_message.id and item.text_content
         ],
-        user_message=f"{memory_text}\n\n当前输入：\n{user_message}".strip() if memory_text else user_message,
+        user_message="\n\n".join(part for part in prompt_parts if part).strip(),
         attachment_parts=attachment_parts,
     )
 
@@ -1373,6 +1555,8 @@ def _finalize_run(
     }
     agent_run.completed_at = datetime.now(timezone.utc)
     db.commit()
+    if (assistant_text or "").strip():
+        ConversationHistorySearchService().upsert_message(assistant_message)
     user_message = db.get(ConversationMessage, agent_run.user_message_id) if agent_run.user_message_id else None
     if user_message and (user_message.text_content or "").strip() and agent_run.workflow == "general_chat":
         memory_entries = MemoryService().extract_memory_facts(text=(user_message.text_content or "").strip(), summary=assistant_text[:200])

@@ -38,6 +38,19 @@ class _FakeToolOnlyGeneralChatAgent:
         }
 
 
+class _CapturingGeneralChatAgent:
+    def __init__(self) -> None:
+        self.payloads: list[dict] = []
+
+    async def astream_events(self, payload, version="v2"):
+        assert version == "v2"
+        self.payloads.append(payload)
+        yield {
+            "event": "on_chain_end",
+            "data": {"output": {"messages": [SimpleNamespace(content="我已经结合历史上下文整理好了。")]}}
+        }
+
+
 class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.engine = create_engine("sqlite:///:memory:", future=True)
@@ -109,6 +122,44 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "好的，我来帮你一起整理。")
         self.assertEqual(write_memory_mock.call_count, 0)
 
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="历史问答")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
+    async def test_general_chat_includes_semantic_conversation_history_lines(
+        self,
+        history_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        history_mock.return_value = [
+            "用户：上周已经确定答辩地点在信息楼 202",
+            "助手：你之前提到答辩安排在周三下午",
+        ]
+        agent = _CapturingGeneralChatAgent()
+        thread = create_conversation(self.db, self.user.id)
+        with patch.object(ModelAdapter, "build_general_chat_agent", return_value=agent):
+            _, _, _, agent_run = queue_message(
+                self.db,
+                self.user.id,
+                thread.id,
+                ConversationSendMessageRequest(text_content="那地点还是之前那个吗"),
+            )
+            _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertTrue(agent.payloads)
+        messages = agent.payloads[0]["messages"]
+        final_prompt = ModelAdapter._extract_message_text(messages[-1])
+        self.assertIn("同一会话较早相关历史：", final_prompt)
+        self.assertIn("信息楼 202", final_prompt)
+        self.assertIn("当前输入：\n那地点还是之前那个吗", final_prompt)
+
     async def test_stream_returns_run_failed_when_llm_not_configured(self) -> None:
         thread = create_conversation(self.db, self.user.id)
         _, _, assistant_message, agent_run = queue_message(
@@ -161,13 +212,16 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
     @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
     async def test_schedule_message_creates_pending_cards(
         self,
+        history_mock,
         _intent_mock,
         _title_mock,
         invoke_tool_mock,
         _write_memory_mock,
     ) -> None:
+        history_mock.return_value = []
         draft = self._draft()
         invoke_tool_mock.side_effect = [
             (
@@ -214,6 +268,200 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNotNone(pending)
         self.assertEqual(pending.stage, "approval_pending")
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
+    async def test_schedule_intake_passes_semantic_history_lines_to_tool_context(
+        self,
+        history_mock,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        history_mock.return_value = ["用户：之前说过地点在学院会议室"]
+        draft = self._draft()
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["学院会议室"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash",
+                    },
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="那就按之前说的地点安排答辩", selected_tool="schedule"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        first_tool_payload = invoke_tool_mock.await_args_list[0].args[1]
+        self.assertEqual(first_tool_payload["context"]["conversation_history_lines"], ["用户：之前说过地点在学院会议室"])
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.domains.conversation.service._build_conversation_history_recall")
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
+    async def test_schedule_intake_falls_back_to_lexical_history_recall(
+        self,
+        history_mock,
+        fallback_mock,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        history_mock.return_value = []
+        fallback_mock.return_value = ["用户：之前说过时间是周三下午"]
+        draft = self._draft()
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["周三下午"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash",
+                    },
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="那就还是之前那个时间", selected_tool="schedule"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        first_tool_payload = invoke_tool_mock.await_args_list[0].args[1]
+        self.assertEqual(first_tool_payload["context"]["conversation_history_lines"], ["用户：之前说过时间是周三下午"])
+
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.upsert_message")
+    def test_queue_message_upserts_user_text_to_history_index(self, upsert_mock) -> None:
+        thread = create_conversation(self.db, self.user.id)
+
+        _, user_message, _, _ = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="帮我记录一下下周答辩安排"),
+        )
+
+        upsert_mock.assert_called_once()
+        self.assertEqual(upsert_mock.call_args.args[0].id, user_message.id)
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
+    @patch.object(ModelAdapter, "build_general_chat_agent", return_value=_FakeGeneralChatAgent())
+    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学安排")
+    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.upsert_message")
+    async def test_finalize_run_upserts_assistant_text_to_history_index(
+        self,
+        upsert_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _agent_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排"),
+        )
+
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        upserted_ids = [call.args[0].id for call in upsert_mock.call_args_list]
+        self.assertIn(assistant_message.id, upserted_ids)
+
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.delete_messages")
+    def test_delete_conversation_deletes_history_index_messages(self, delete_mock) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, user_message, assistant_message, _ = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="需要删除的对话"),
+        )
+
+        delete_conversation(self.db, self.user.id, thread.id)
+
+        delete_mock.assert_called_once()
+        self.assertEqual(delete_mock.call_args.kwargs["conversation_id"], thread.id)
+        self.assertCountEqual(delete_mock.call_args.kwargs["message_ids"], [user_message.id, assistant_message.id])
+
+    @patch("app.domains.conversation.service.ConversationHistorySearchService.delete_messages")
+    def test_rewind_last_turn_deletes_history_index_messages(self, delete_mock) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, user_message, assistant_message, _ = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="这轮消息待撤回"),
+        )
+
+        rewind_last_turn(self.db, self.user.id, thread.id)
+
+        delete_mock.assert_called_once()
+        self.assertEqual(delete_mock.call_args.kwargs["conversation_id"], thread.id)
+        self.assertCountEqual(delete_mock.call_args.kwargs["message_ids"], [user_message.id, assistant_message.id])
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.create_schedule_after_approval")

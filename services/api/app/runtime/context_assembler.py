@@ -3,6 +3,13 @@ from __future__ import annotations
 
 class ContextAssembler:
     @staticmethod
+    def build_conversation_history_context(history_lines: list[str] | None = None) -> str:
+        lines = [item.strip() for item in (history_lines or []) if item and item.strip()]
+        if not lines:
+            return ""
+        return "同一会话较早相关历史：\n" + "\n".join(lines)
+
+    @staticmethod
     def build_memory_context(*, memory_summary: str, memory_items: list[dict] | None = None) -> str:
         parts: list[str] = []
         if memory_summary.strip():
@@ -27,6 +34,7 @@ class ContextAssembler:
         memory_items: list[dict] | None = None,
         source_history: list[str] | None = None,
         previous_draft_summary: str = "",
+        conversation_history_lines: list[str] | None = None,
     ) -> dict[str, str]:
         normalized_history = [item.strip() for item in (source_history or []) if item and item.strip()]
         latest_user_text = text_content.strip()
@@ -36,12 +44,15 @@ class ContextAssembler:
         source_text = "\n\n".join(normalized_history).strip()
         attachment_section = "\n\n".join(item.strip() for item in attachment_texts if item.strip()).strip()
         memory_context = self.build_memory_context(memory_summary=memory_summary, memory_items=memory_items)
+        conversation_history_context = self.build_conversation_history_context(conversation_history_lines)
 
         prompt_sections: list[str] = []
         if source_text:
             prompt_sections.append(f"用户原话历史：\n{source_text}")
         if latest_user_text:
             prompt_sections.append(f"本轮最新更正：\n{latest_user_text}")
+        if conversation_history_context:
+            prompt_sections.append(conversation_history_context)
         if previous_draft_summary.strip():
             prompt_sections.append(f"上一版规范化草稿：\n{previous_draft_summary.strip()}")
         if attachment_section:
@@ -55,6 +66,7 @@ class ContextAssembler:
             "latest_user_text": latest_user_text,
             "attachment_text": attachment_section,
             "memory_context": memory_context,
+            "conversation_history_context": conversation_history_context,
             "prompt_text": "\n\n".join(prompt_sections).strip(),
         }
 
@@ -66,16 +78,20 @@ class ContextAssembler:
         manual_tags: list[str],
         previous_note_content: str = "",
         latest_user_text: str = "",
+        conversation_history_lines: list[str] | None = None,
     ) -> dict[str, str | list[str]]:
         current_input = text_content.strip()
         previous_note = previous_note_content.strip()
         latest_correction = latest_user_text.strip() or current_input
+        conversation_history_context = self.build_conversation_history_context(conversation_history_lines)
 
         merged_parts: list[str] = []
         if previous_note:
             merged_parts.append(previous_note)
         if latest_correction and latest_correction not in merged_parts:
             merged_parts.append(latest_correction)
+        if conversation_history_context:
+            merged_parts.append(conversation_history_context)
         merged_parts.extend(item.strip() for item in attachment_texts if item.strip())
         base_text = "\n\n".join(merged_parts).strip()
 
@@ -86,6 +102,8 @@ class ContextAssembler:
             prompt_sections.append(f"上一版待确认速记：\n{previous_note}")
         if latest_correction and previous_note:
             prompt_sections.append(f"本轮补充或修正：\n{latest_correction}")
+        if conversation_history_context:
+            prompt_sections.append(conversation_history_context)
         attachment_section = "\n\n".join(item.strip() for item in attachment_texts if item.strip()).strip()
         if attachment_section:
             prompt_sections.append(f"附件证据：\n{attachment_section}")

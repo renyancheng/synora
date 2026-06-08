@@ -43,6 +43,7 @@ def parse_schedule_draft(
     reference_time = datetime.now(ZoneInfo(timezone_name))
     source_history = [item for item in list(context.get("source_history") or []) if isinstance(item, str)]
     previous_draft_summary = str(context.get("previous_draft_summary") or "").strip()
+    conversation_history_lines = [item for item in list(context.get("conversation_history_lines") or []) if isinstance(item, str)]
 
     assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
     attachment_parts = _flatten_attachment_parts(assets)
@@ -59,6 +60,7 @@ def parse_schedule_draft(
         memory_items=memory_context.items,
         source_history=source_history,
         previous_draft_summary=previous_draft_summary,
+        conversation_history_lines=conversation_history_lines,
     )
 
     parsed = ModelAdapter().extract_schedule(
@@ -152,6 +154,9 @@ def prepare_quick_note_draft(
         manual_tags=tags,
         previous_note_content=str(context.get("previous_note_content") or ""),
         latest_user_text=str(context.get("latest_user_text") or ""),
+        conversation_history_lines=[
+            item for item in list(context.get("conversation_history_lines") or []) if isinstance(item, str)
+        ],
     )
     parsed = ModelAdapter().suggest_quick_note_tags(
         merged_text=str(assembled["prompt_text"]),

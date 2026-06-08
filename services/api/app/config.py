@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     quick_note_vector_table: str = "synora_quick_note_vectors"
     schedule_vector_schema: str = "public"
     schedule_vector_table: str = "synora_schedule_vectors"
+    conversation_history_vector_schema: str = "public"
+    conversation_history_vector_table: str = "synora_conversation_history_vectors"
+    conversation_history_top_k: int = 6
+    conversation_history_candidate_limit: int = 18
 
     mcp_bearer_token: str = ""
     mcp_mount_path: str = "/mcp"

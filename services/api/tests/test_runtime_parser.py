@@ -35,6 +35,36 @@ class RuntimeParserTests(unittest.TestCase):
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
     @patch("app.runtime.tool_impls.ModelAdapter.extract_schedule")
+    def test_parse_schedule_prompt_includes_conversation_history_section(self, extract_schedule_mock, _attachment_mock) -> None:
+        extract_schedule_mock.return_value = {
+            "title": "教学例会",
+            "location": "学院会议室",
+            "details": "讨论课程安排",
+            "start_at": "2026-05-25T14:30:00+08:00",
+            "end_at": "2026-05-25T15:30:00+08:00",
+            "missing_fields": [],
+            "ambiguity_flags": [],
+            "parse_confidence": 0.92,
+            "evidence_digest": ["学院会议室"],
+            "recurrence": [],
+        }
+        _ = parse_schedule_draft(
+            db=None,
+            user_id=1,
+            text_content="那就按之前说的地点安排例会",
+            attachment_ids=[],
+            context={
+                "client_timezone": "Asia/Shanghai",
+                "conversation_history_lines": ["用户：之前说过地点在学院会议室"],
+            },
+        )
+
+        merged_text = extract_schedule_mock.call_args.kwargs["merged_text"]
+        self.assertIn("同一会话较早相关历史：", merged_text)
+        self.assertIn("用户：之前说过地点在学院会议室", merged_text)
+
+    @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
+    @patch("app.runtime.tool_impls.ModelAdapter.extract_schedule")
     def test_parse_schedule_infers_relative_time_when_model_returns_null(self, extract_schedule_mock, _attachment_mock) -> None:
         extract_schedule_mock.return_value = {
             "title": "软件工程教研会",
@@ -77,6 +107,30 @@ class RuntimeParserTests(unittest.TestCase):
         )
         self.assertEqual(result["preview_tags"], ["科研", "论文", "待办"])
         self.assertEqual(result["normalized_content"], "整理论文实验图表并准备投稿清单")
+
+    @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
+    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    def test_quick_note_prompt_includes_conversation_history_section(self, suggest_tags_mock, _attachment_mock) -> None:
+        suggest_tags_mock.return_value = {
+            "normalized_content": "答辩材料还需要补充封面和目录",
+            "preview_tags": ["答辩", "材料"],
+            "evidence_digest": ["封面", "目录"],
+        }
+
+        _ = record_quick_note(
+            db=None,
+            user_id=1,
+            content="把刚才那份答辩材料补充点细节",
+            tags=[],
+            attachment_ids=[],
+            context={
+                "conversation_history_lines": ["助手：刚才提到答辩材料还缺封面和目录"],
+            },
+        )
+
+        merged_text = suggest_tags_mock.call_args.kwargs["merged_text"]
+        self.assertIn("同一会话较早相关历史：", merged_text)
+        self.assertIn("助手：刚才提到答辩材料还缺封面和目录", merged_text)
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
     @patch("app.runtime.tool_impls.MemoryService.retrieve_context")
