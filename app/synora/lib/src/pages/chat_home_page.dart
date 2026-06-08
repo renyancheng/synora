@@ -10,7 +10,6 @@ import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
 import '../tag_palette.dart';
-import '../voice_input_service.dart';
 import 'event_date_time_field.dart';
 import 'quick_note_list_page.dart';
 import 'schedule_list_page.dart';
@@ -32,41 +31,6 @@ class _ChatHomePageState extends State<ChatHomePage> {
   int _lastMessageCount = 0;
   String? _lastShownError;
   bool _isSyncingComposer = false;
-  final VoiceInputService _voiceInputService = createVoiceInputService();
-  VoiceInputState _voiceState = VoiceInputState.idle;
-  double? _voiceDownloadProgress;
-
-  bool get _isVoiceBusy =>
-      _voiceState == VoiceInputState.downloading ||
-      _voiceState == VoiceInputState.initializing ||
-      _voiceState == VoiceInputState.listening ||
-      _voiceState == VoiceInputState.processing;
-
-  bool get _isVoiceListening => _voiceState == VoiceInputState.listening;
-
-  String? get _voiceStatusLabel {
-    switch (_voiceState) {
-      case VoiceInputState.awaitingDownloadConfirmation:
-        return null;
-      case VoiceInputState.downloading:
-        if (_voiceDownloadProgress != null) {
-          final percent = (_voiceDownloadProgress! * 100)
-              .clamp(0, 100)
-              .toStringAsFixed(0);
-          return '${AppStrings.voiceDownloading} $percent%';
-        }
-        return AppStrings.voiceDownloading;
-      case VoiceInputState.initializing:
-        return AppStrings.voiceInitializing;
-      case VoiceInputState.listening:
-        return AppStrings.voiceListening;
-      case VoiceInputState.processing:
-        return AppStrings.voiceProcessing;
-      case VoiceInputState.failed:
-      case VoiceInputState.idle:
-        return null;
-    }
-  }
 
   @override
   void initState() {
@@ -83,7 +47,6 @@ class _ChatHomePageState extends State<ChatHomePage> {
       ..removeListener(_handleComposerChanged)
       ..dispose();
     _scrollController.dispose();
-    _voiceInputService.dispose();
     super.dispose();
   }
 
@@ -401,88 +364,6 @@ class _ChatHomePageState extends State<ChatHomePage> {
         });
   }
 
-  Future<void> _toggleVoiceInput() async {
-    if (!await _voiceInputService.isSupported) {
-      _showMessage(AppStrings.voiceComingSoon);
-      return;
-    }
-    if (widget.controller.isMessageSending) {
-      return;
-    }
-    if (_isVoiceListening) {
-      await _stopVoiceInput();
-      return;
-    }
-    if (_isVoiceBusy) {
-      return;
-    }
-    await _startVoiceInput();
-  }
-
-  Future<void> _startVoiceInput() async {
-    try {
-      _setVoiceState(VoiceInputState.initializing, clearProgress: true);
-      await _voiceInputService.ensureReady();
-      await _voiceInputService.startListening();
-      _setVoiceState(VoiceInputState.listening, clearProgress: true);
-    } catch (error) {
-      _setVoiceFailure(error);
-    }
-  }
-
-  Future<void> _stopVoiceInput() async {
-    try {
-      _setVoiceState(VoiceInputState.processing, clearProgress: true);
-      final result = await _voiceInputService.stopListening();
-      final mergedText = _mergeVoiceText(
-        widget.controller.draftText,
-        result.text,
-      );
-      widget.controller.updateDraftText(mergedText);
-      _syncComposerFromController(force: true);
-      _setVoiceState(VoiceInputState.idle, clearProgress: true);
-    } catch (error) {
-      _setVoiceFailure(error);
-    }
-  }
-
-  String _mergeVoiceText(String current, String incoming) {
-    final base = current.trimRight();
-    final addition = incoming.trim();
-    if (addition.isEmpty) {
-      return current;
-    }
-    if (base.isEmpty) {
-      return addition;
-    }
-    return '$base\n$addition';
-  }
-
-  void _setVoiceFailure(Object error) {
-    final message = error is VoiceInputException
-        ? AppStrings.voiceErrorReason(error.code, error.message)
-        : AppStrings.voiceErrorReason(null, error.toString());
-    _setVoiceState(VoiceInputState.failed, clearProgress: true);
-    _showMessage(message);
-    _setVoiceState(VoiceInputState.idle, clearProgress: true);
-  }
-
-  void _setVoiceState(
-    VoiceInputState state, {
-    double? progress,
-    bool clearProgress = false,
-  }) {
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _voiceState = state;
-      _voiceDownloadProgress = clearProgress
-          ? null
-          : (progress ?? _voiceDownloadProgress);
-    });
-  }
-
   void _showMessage(String message) {
     ScaffoldMessenger.of(
       context,
@@ -531,11 +412,8 @@ class _ChatHomePageState extends State<ChatHomePage> {
         final hasInput =
             _textController.text.trim().isNotEmpty || attachments.isNotEmpty;
         final sending = widget.controller.isMessageSending;
-        final voiceBusy = _isVoiceBusy;
-        final voiceListening = _isVoiceListening;
-        final composerLocked = sending || voiceBusy;
-        final statusLabel =
-            _voiceStatusLabel ?? widget.controller.streamStatusLabel;
+        final composerLocked = sending;
+        final statusLabel = widget.controller.streamStatusLabel;
 
         return Scaffold(
           appBar: AppBar(
@@ -755,7 +633,6 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                   controller: _textController,
                                   minLines: 1,
                                   maxLines: 6,
-                                  readOnly: voiceBusy,
                                   textAlignVertical: TextAlignVertical.center,
                                   textInputAction: TextInputAction.newline,
                                   decoration: const InputDecoration(
@@ -807,21 +684,16 @@ class _ChatHomePageState extends State<ChatHomePage> {
                                         ),
                                         tooltip: AppStrings.send,
                                       )
-                                    : IconButton(
-                                        key: ValueKey(
-                                          voiceListening
-                                              ? 'voice-stop'
-                                              : 'voice-start',
+                                    : IconButton.filled(
+                                        key: const ValueKey('send-disabled'),
+                                        onPressed: hasInput
+                                            ? _sendMessage
+                                            : null,
+                                        icon: const Icon(
+                                          Icons.send_rounded,
+                                          size: 20,
                                         ),
-                                        onPressed: _toggleVoiceInput,
-                                        icon: Icon(
-                                          voiceListening
-                                              ? Icons.stop_rounded
-                                              : Icons.mic_none,
-                                        ),
-                                        tooltip: voiceListening
-                                            ? AppStrings.voiceStop
-                                            : AppStrings.voiceStart,
+                                        tooltip: AppStrings.send,
                                       ),
                               ),
                             ),
@@ -1312,7 +1184,8 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
     _endValue = end == null
         ? null
         : DateTime.tryParse(end['dateTime'] as String? ?? '')?.toLocal();
-    _reminderPreset = _draft['reminder_preset'] as String? ?? 'previous_day_1700';
+    _reminderPreset =
+        _draft['reminder_preset'] as String? ?? 'previous_day_1700';
   }
 
   @override
@@ -1459,7 +1332,9 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
           const SizedBox(height: 12),
           DropdownButtonFormField<String>(
             initialValue: _reminderPreset,
-            decoration: const InputDecoration(labelText: AppStrings.reminderField),
+            decoration: const InputDecoration(
+              labelText: AppStrings.reminderField,
+            ),
             items: reminderPresetOptions
                 .map(
                   (item) => DropdownMenuItem<String>(
@@ -1491,11 +1366,14 @@ class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
             title: AppStrings.recurrenceField,
             values: <String>[formatRecurrence(recurrence)],
           ),
-          if (terminalSummary != null && terminalSummary.trim().isNotEmpty) ...<Widget>[
+          if (terminalSummary != null &&
+              terminalSummary.trim().isNotEmpty) ...<Widget>[
             Text(terminalSummary),
             const SizedBox(height: 8),
           ],
-          Text('${AppStrings.reminderField}：${formatReminderPreset(_reminderPreset)}'),
+          Text(
+            '${AppStrings.reminderField}：${formatReminderPreset(_reminderPreset)}',
+          ),
           const SizedBox(height: 8),
           Text(
             '${AppStrings.parseConfidenceField}：${(parseConfidence * 100).toStringAsFixed(0)}%',
@@ -1655,11 +1533,16 @@ class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
         children: <Widget>[
           Text(payload['normalized_content'] as String? ?? ''),
           const SizedBox(height: 12),
-          if (terminalSummary != null && terminalSummary.trim().isNotEmpty) ...<Widget>[
+          if (terminalSummary != null &&
+              terminalSummary.trim().isNotEmpty) ...<Widget>[
             Text(terminalSummary),
             const SizedBox(height: 12),
           ],
-          _SectionChips(title: AppStrings.tagsField, values: tags, colored: true),
+          _SectionChips(
+            title: AppStrings.tagsField,
+            values: tags,
+            colored: true,
+          ),
           _SectionList(title: AppStrings.evidenceField, values: evidenceDigest),
           if (isActionable) ...<Widget>[
             const SizedBox(height: 16),
@@ -1735,7 +1618,11 @@ class _CardShell extends StatelessWidget {
 }
 
 class _SectionChips extends StatelessWidget {
-  const _SectionChips({required this.title, required this.values, this.colored = false});
+  const _SectionChips({
+    required this.title,
+    required this.values,
+    this.colored = false,
+  });
 
   final String title;
   final List<String> values;

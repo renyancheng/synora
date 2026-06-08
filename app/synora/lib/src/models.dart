@@ -1,16 +1,6 @@
-﻿import 'dart:typed_data';
+import 'dart:typed_data';
 
 enum ConversationTool { schedule, quickNote }
-
-enum VoiceInputState {
-  idle,
-  awaitingDownloadConfirmation,
-  downloading,
-  initializing,
-  listening,
-  processing,
-  failed,
-}
 
 extension ConversationToolX on ConversationTool {
   String get apiValue {
@@ -35,10 +25,7 @@ extension ConversationToolX on ConversationTool {
 }
 
 class LocalAttachmentData {
-  LocalAttachmentData({
-    required this.fileName,
-    required this.bytes,
-  });
+  LocalAttachmentData({required this.fileName, required this.bytes});
 
   final String fileName;
   final Uint8List bytes;
@@ -100,13 +87,9 @@ class AttachmentRef {
 }
 
 class ComposerAttachment {
-  ComposerAttachment.local(this.local)
-      : remote = null,
-        isLocal = true;
+  ComposerAttachment.local(this.local) : remote = null, isLocal = true;
 
-  ComposerAttachment.remote(this.remote)
-      : local = null,
-        isLocal = false;
+  ComposerAttachment.remote(this.remote) : local = null, isLocal = false;
 
   final LocalAttachmentData? local;
   final AttachmentRef? remote;
@@ -136,10 +119,7 @@ class UserProfile {
 }
 
 class CurrentSessionInfo {
-  CurrentSessionInfo({
-    required this.expiresAt,
-    required this.user,
-  });
+  CurrentSessionInfo({required this.expiresAt, required this.user});
 
   final DateTime expiresAt;
   final UserProfile user;
@@ -159,15 +139,16 @@ class UserPreferences {
 
   factory UserPreferences.fromJson(Map<String, dynamic> json) {
     return UserPreferences(
-      wecomRobotWebhook: (json['wecom_robot_webhook'] as String?)?.trim().isEmpty == true
+      wecomRobotWebhook:
+          (json['wecom_robot_webhook'] as String?)?.trim().isEmpty == true
           ? null
           : json['wecom_robot_webhook'] as String?,
     );
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'wecom_robot_webhook': wecomRobotWebhook,
-      };
+    'wecom_robot_webhook': wecomRobotWebhook,
+  };
 }
 
 class SessionInfo {
@@ -214,10 +195,7 @@ class ApprovalInfo {
 }
 
 class EventDateTimeValue {
-  EventDateTimeValue({
-    required this.dateTime,
-    required this.timeZone,
-  });
+  EventDateTimeValue({required this.dateTime, required this.timeZone});
 
   final DateTime dateTime;
   final String timeZone;
@@ -230,16 +208,10 @@ class EventDateTimeValue {
   }
 
   Map<String, dynamic> toJson() {
-    return {
-      'dateTime': dateTime.toIso8601String(),
-      'timeZone': timeZone,
-    };
+    return {'dateTime': dateTime.toIso8601String(), 'timeZone': timeZone};
   }
 
-  EventDateTimeValue copyWith({
-    DateTime? dateTime,
-    String? timeZone,
-  }) {
+  EventDateTimeValue copyWith({DateTime? dateTime, String? timeZone}) {
     return EventDateTimeValue(
       dateTime: dateTime ?? this.dateTime,
       timeZone: timeZone ?? this.timeZone,
@@ -285,11 +257,15 @@ class ScheduleDraft {
       isAllDay: json['isAllDay'] as bool? ?? false,
       start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
       end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
-      recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[])
+          .cast<String>(),
       reminderPreset: json['reminder_preset'] as String? ?? 'previous_day_1700',
-      sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
+      sourceAttachmentIds:
+          (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[])
+              .cast<int>(),
       parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
-      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[])
+          .cast<String>(),
     );
   }
 
@@ -334,7 +310,8 @@ class ScheduleDraftResult {
       draftHash: json['draft_hash'] as String,
       missingFields: (json['missing_fields'] as List<dynamic>).cast<String>(),
       ambiguityFlags: (json['ambiguity_flags'] as List<dynamic>).cast<String>(),
-      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[])
+          .cast<String>(),
       parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
     );
   }
@@ -405,7 +382,9 @@ class ConflictCheckResult {
           .map((item) => ConflictItem.fromJson(item as Map<String, dynamic>))
           .toList(),
       suggestions: (json['suggestions'] as List<dynamic>)
-          .map((item) => ConflictSuggestion.fromJson(item as Map<String, dynamic>))
+          .map(
+            (item) => ConflictSuggestion.fromJson(item as Map<String, dynamic>),
+          )
           .toList(),
       riskLevel: json['risk_level'] as String,
       approval: ApprovalInfo.fromJson(json['approval'] as Map<String, dynamic>),
@@ -437,10 +416,7 @@ class ReminderJobInfo {
 }
 
 class ScheduleConfirmResult {
-  ScheduleConfirmResult({
-    required this.scheduleId,
-    required this.reminderJobs,
-  });
+  ScheduleConfirmResult({required this.scheduleId, required this.reminderJobs});
 
   final int scheduleId;
   final List<ReminderJobInfo> reminderJobs;
@@ -480,7 +456,9 @@ class ScheduleEditPreviewResult {
           .map((item) => ConflictItem.fromJson(item as Map<String, dynamic>))
           .toList(),
       suggestions: (json['suggestions'] as List<dynamic>? ?? <dynamic>[])
-          .map((item) => ConflictSuggestion.fromJson(item as Map<String, dynamic>))
+          .map(
+            (item) => ConflictSuggestion.fromJson(item as Map<String, dynamic>),
+          )
           .toList(),
       riskLevel: json['risk_level'] as String? ?? 'low',
       approval: ApprovalInfo.fromJson(json['approval'] as Map<String, dynamic>),
@@ -552,10 +530,15 @@ class ScheduleItem {
       isAllDay: json['isAllDay'] as bool? ?? false,
       start: EventDateTimeValue.fromJson(json['start'] as Map<String, dynamic>),
       end: EventDateTimeValue.fromJson(json['end'] as Map<String, dynamic>),
-      recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      recurrence: (json['recurrence'] as List<dynamic>? ?? <dynamic>[])
+          .cast<String>(),
       reminderPreset: json['reminder_preset'] as String? ?? 'previous_day_1700',
-      sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
-      reminderOffsetsMinutes: (json['reminder_offsets_minutes'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
+      sourceAttachmentIds:
+          (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[])
+              .cast<int>(),
+      reminderOffsetsMinutes:
+          (json['reminder_offsets_minutes'] as List<dynamic>? ?? <dynamic>[])
+              .cast<int>(),
       status: json['status'] as String,
       createdAt: DateTime.parse(json['created_at'] as String),
       parseConfidence: (json['parse_confidence'] as num? ?? 0).toDouble(),
@@ -591,7 +574,8 @@ class ScheduleItem {
       recurrence: recurrence ?? this.recurrence,
       reminderPreset: reminderPreset ?? this.reminderPreset,
       sourceAttachmentIds: sourceAttachmentIds ?? this.sourceAttachmentIds,
-      reminderOffsetsMinutes: reminderOffsetsMinutes ?? this.reminderOffsetsMinutes,
+      reminderOffsetsMinutes:
+          reminderOffsetsMinutes ?? this.reminderOffsetsMinutes,
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       parseConfidence: parseConfidence ?? this.parseConfidence,
@@ -619,17 +603,15 @@ class QuickNoteDraftPreview {
       normalizedContent: json['normalized_content'] as String,
       previewTags: (json['preview_tags'] as List<dynamic>).cast<String>(),
       attachmentIds: (json['attachment_ids'] as List<dynamic>).cast<int>(),
-      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[]).cast<String>(),
+      evidenceDigest: (json['evidence_digest'] as List<dynamic>? ?? <dynamic>[])
+          .cast<String>(),
       approval: ApprovalInfo.fromJson(json['approval'] as Map<String, dynamic>),
     );
   }
 }
 
 class QuickNoteSaveResult {
-  QuickNoteSaveResult({
-    required this.noteId,
-    required this.topicTags,
-  });
+  QuickNoteSaveResult({required this.noteId, required this.topicTags});
 
   final int noteId;
   final List<String> topicTags;
@@ -663,16 +645,15 @@ class QuickNoteItem {
       content: json['content'] as String,
       tags: (json['tags'] as List<dynamic>).cast<String>(),
       createdAt: DateTime.parse(json['created_at'] as String),
-      sourceAttachmentIds: (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[]).cast<int>(),
+      sourceAttachmentIds:
+          (json['source_attachment_ids'] as List<dynamic>? ?? <dynamic>[])
+              .cast<int>(),
     );
   }
 }
 
 class QuickNoteTagItem {
-  QuickNoteTagItem({
-    required this.tag,
-    required this.count,
-  });
+  QuickNoteTagItem({required this.tag, required this.count});
 
   final String tag;
   final int count;
@@ -721,7 +702,9 @@ class NotificationItem {
       retryCount: json['retry_count'] as int? ?? 0,
       errorMessage: json['error_message'] as String?,
       createdAt: DateTime.parse(json['created_at'] as String),
-      deliveredAt: json['delivered_at'] == null ? null : DateTime.parse(json['delivered_at'] as String),
+      deliveredAt: json['delivered_at'] == null
+          ? null
+          : DateTime.parse(json['delivered_at'] as String),
     );
   }
 }
@@ -762,10 +745,7 @@ class MemoryItem {
 }
 
 class MemoryListResult {
-  MemoryListResult({
-    required this.summary,
-    required this.items,
-  });
+  MemoryListResult({required this.summary, required this.items});
 
   final String summary;
   final List<MemoryItem> items;
@@ -850,10 +830,13 @@ class ConversationMessageItem {
   bool get isUser => role == 'user';
   bool get isAssistant => role == 'assistant';
 
-  ConversationTool? get selectedTool => ConversationToolX.fromApiValue(structuredPayload['selected_tool'] as String?);
+  ConversationTool? get selectedTool => ConversationToolX.fromApiValue(
+    structuredPayload['selected_tool'] as String?,
+  );
 
   List<AttachmentRef> get attachmentRefs {
-    final raw = structuredPayload['attachment_refs'] as List<dynamic>? ?? <dynamic>[];
+    final raw =
+        structuredPayload['attachment_refs'] as List<dynamic>? ?? <dynamic>[];
     return raw
         .whereType<Map<String, dynamic>>()
         .map(AttachmentRef.fromJson)
@@ -867,7 +850,9 @@ class ConversationMessageItem {
       messageType: json['message_type'] as String,
       status: json['status'] as String? ?? 'completed',
       textContent: json['text_content'] as String?,
-      structuredPayload: (json['structured_payload'] as Map<String, dynamic>? ?? <String, dynamic>{}),
+      structuredPayload:
+          (json['structured_payload'] as Map<String, dynamic>? ??
+          <String, dynamic>{}),
       actionGroupId: json['action_group_id'] as String?,
       revision: json['revision'] as int? ?? 1,
       createdAt: DateTime.parse(json['created_at'] as String),
@@ -937,8 +922,12 @@ class ConversationSendAcceptedResult {
 
   factory ConversationSendAcceptedResult.fromJson(Map<String, dynamic> json) {
     return ConversationSendAcceptedResult(
-      conversation: ConversationThreadItem.fromJson(json['conversation'] as Map<String, dynamic>),
-      userMessage: ConversationMessageItem.fromJson(json['user_message'] as Map<String, dynamic>),
+      conversation: ConversationThreadItem.fromJson(
+        json['conversation'] as Map<String, dynamic>,
+      ),
+      userMessage: ConversationMessageItem.fromJson(
+        json['user_message'] as Map<String, dynamic>,
+      ),
       assistantMessageId: json['assistant_message_id'] as int,
       streamId: json['stream_id'] as String,
     );
@@ -956,9 +945,14 @@ class ConversationActionResult {
 
   factory ConversationActionResult.fromJson(Map<String, dynamic> json) {
     return ConversationActionResult(
-      conversation: ConversationThreadItem.fromJson(json['conversation'] as Map<String, dynamic>),
+      conversation: ConversationThreadItem.fromJson(
+        json['conversation'] as Map<String, dynamic>,
+      ),
       assistantMessages: (json['assistant_messages'] as List<dynamic>)
-          .map((item) => ConversationMessageItem.fromJson(item as Map<String, dynamic>))
+          .map(
+            (item) =>
+                ConversationMessageItem.fromJson(item as Map<String, dynamic>),
+          )
           .toList(),
     );
   }
@@ -975,17 +969,18 @@ class ConversationRewindResult {
 
   factory ConversationRewindResult.fromJson(Map<String, dynamic> json) {
     return ConversationRewindResult(
-      conversation: ConversationThreadItem.fromJson(json['conversation'] as Map<String, dynamic>),
-      restoredMessage: ConversationMessageItem.fromJson(json['restored_message'] as Map<String, dynamic>),
+      conversation: ConversationThreadItem.fromJson(
+        json['conversation'] as Map<String, dynamic>,
+      ),
+      restoredMessage: ConversationMessageItem.fromJson(
+        json['restored_message'] as Map<String, dynamic>,
+      ),
     );
   }
 }
 
 class ConversationStreamEvent {
-  ConversationStreamEvent({
-    required this.event,
-    required this.data,
-  });
+  ConversationStreamEvent({required this.event, required this.data});
 
   final String event;
   final Map<String, dynamic> data;

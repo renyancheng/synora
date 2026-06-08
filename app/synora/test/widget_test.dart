@@ -212,13 +212,14 @@ void main() {
     expect(find.text(AppStrings.conversationHistory), findsOneWidget);
   });
 
-  testWidgets('空输入显示语音按钮，输入后切换为发送按钮', (tester) async {
+  testWidgets('空输入不显示语音按钮且发送按钮保持可见', (tester) async {
     final controller = buildTestController();
     await controller.login('han.teacher@example.com', 'SynoraMVP123!');
     await tester.pumpWidget(SynoraApp(controller: controller));
     await tester.pumpAndSettle();
 
-    expect(find.byIcon(Icons.mic_none), findsOneWidget);
+    expect(find.byIcon(Icons.mic_none), findsNothing);
+    expect(find.byIcon(Icons.send_rounded), findsOneWidget);
     await tester.enterText(find.byType(TextField).first, '明天下午三点开会');
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.send_rounded), findsOneWidget);

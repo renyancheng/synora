@@ -310,22 +310,28 @@ class _MonthCalendar extends StatelessWidget {
                         : null,
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: Stack(
-                    alignment: Alignment.center,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: <Widget>[
                       Text('$dayNumber'),
-                      if (hasSchedule)
-                        Positioned(
-                          bottom: 8,
-                          child: Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              color: Theme.of(context).colorScheme.primary,
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                        ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        height: 8,
+                        child: hasSchedule
+                            ? Center(
+                                child: Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: BoxDecoration(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                      ),
                     ],
                   ),
                 ),
