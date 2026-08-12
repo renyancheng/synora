@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import AsyncGenerator, Iterable
@@ -10,6 +11,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agent import llm
+from app.agent.tools import build_agent_tools
+from app.config import get_settings
 from app.domains.attachment.service import build_attachment_prompt_assets
 from app.domains.conversation.history_search_service import ConversationHistorySearchService
 from app.domains.memory.service import MemoryService
@@ -18,8 +22,7 @@ from app.domains.schedule.service import build_draft_hash, create_schedule_after
 from app.models import AgentRun, AgentToolCallAudit, ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, ConversationThread
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.errors import LLMServiceError
-from app.runtime.mcp_client import get_synora_tools, invoke_synora_tool
-from app.runtime.model_adapter import ModelAdapter
+from app.runtime.mcp_client import invoke_synora_tool
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
 from app.schemas.quick_note import QuickNoteDraftRequest
 from app.schemas.schedule import ScheduleEventDraft
@@ -49,6 +52,35 @@ CONVERSATION_REFERENCE_HINTS = (
     "回顾",
     "那个",
 )
+
+
+def _schedule_checkpoint_cleanup(thread_ids: Iterable[str | None]) -> None:
+    """尽力而为地删除孤儿 checkpoint（rewind / delete_conversation 后）。
+
+    AsyncSqliteSaver 删除是异步的，这里在已运行的事件循环里调度 task，
+    否则新建临时循环执行；失败仅记日志，不阻断主流程。
+    """
+    ids = [tid for tid in thread_ids if tid]
+    if not ids:
+        return
+
+    from app.agent.checkpointer import delete_checkpoint
+
+    async def _run() -> None:
+        for thread_id in ids:
+            await delete_checkpoint(thread_id)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        asyncio.create_task(_run())
+    else:
+        try:
+            asyncio.run(_run())
+        except Exception:
+            logger.exception("checkpoint_cleanup_failed")
 
 
 def _enqueue_memory_writeback(*, user_id: int, source_kind: str, source_ref_id: str | None, text: str, summary: str = '') -> None:
@@ -359,15 +391,19 @@ def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None
         approval_token=pending.approval_token if pending is not None else None,
     )
     agent_runs = db.scalars(select(AgentRun).where(AgentRun.conversation_id == conversation_id)).all()
+    checkpoint_thread_ids: list[str] = []
     if agent_runs:
         run_ids = [item.id for item in agent_runs]
         audits = db.scalars(select(AgentToolCallAudit).where(AgentToolCallAudit.agent_run_id.in_(run_ids))).all()
         for audit in audits:
             db.delete(audit)
         for run in agent_runs:
+            if run.checkpoint_thread_id:
+                checkpoint_thread_ids.append(run.checkpoint_thread_id)
             db.delete(run)
     db.delete(thread)
     db.commit()
+    _schedule_checkpoint_cleanup(checkpoint_thread_ids)
     ConversationHistorySearchService().delete_messages(
         conversation_id=conversation_id,
         message_ids=text_message_ids,
@@ -422,6 +458,7 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
     )
     created_message_ids: list[int] = []
     assistant_message_id: int | None = None
+    checkpoint_thread_ids: list[str] = []
     deleted_text_message_ids: set[int] = {user_message.id} if user_message.message_type == "text" else set()
     if agent_run is not None:
         created_message_ids = [int(item) for item in list(agent_run.output_json.get("created_message_ids") or []) if isinstance(item, int)]
@@ -429,6 +466,8 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
         audits = db.scalars(select(AgentToolCallAudit).where(AgentToolCallAudit.agent_run_id == agent_run.id)).all()
         for audit in audits:
             db.delete(audit)
+        if agent_run.checkpoint_thread_id:
+            checkpoint_thread_ids.append(agent_run.checkpoint_thread_id)
         db.delete(agent_run)
 
     for message_id in created_message_ids:
@@ -466,6 +505,7 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
 
     db.delete(user_message)
     db.commit()
+    _schedule_checkpoint_cleanup(checkpoint_thread_ids)
 
     memory_service.delete_records_by_source(
         db,
@@ -520,7 +560,7 @@ def queue_message(
     if text_content:
         ConversationHistorySearchService().upsert_message(user_message)
     if has_user_message is None and text_content:
-        thread.title = ModelAdapter().generate_conversation_title(text_content)
+        thread.title = llm.generate_conversation_title(get_settings(), text_content)
         db.commit()
         db.refresh(thread)
 
@@ -610,103 +650,38 @@ async def consume_stream(
     }
 
     try:
-        pending = _get_pending_state(db, conversation_id)
-        model = ModelAdapter()
-        if pending:
-            intent, text_content, attachment_ids, attachment_parts, context = _prepare_pending_regeneration(
+        if get_settings().agent_backend == "legacy":
+            async for item in _consume_stream_legacy(
                 db,
                 user_id=user_id,
-                pending=pending,
+                conversation_id=conversation_id,
+                stream_id=stream_id,
+                agent_run=agent_run,
+                assistant_message=assistant_message,
+                thread=thread,
                 text_content=text_content,
                 attachment_ids=attachment_ids,
+                selected_tool=selected_tool,
                 attachment_parts=attachment_parts,
                 context=context,
-            )
-        else:
-            intent = await model.aroute_conversation_intent(
-                {
-                    "text_content": text_content,
-                    "attachment_ids": attachment_ids,
-                    "selected_tool": selected_tool,
-                    "context": context,
-                },
-                attachment_parts=attachment_parts,
-            )
-            if not selected_tool and intent in {"schedule_intake", "quick_note_intake"}:
-                intent = f"needs_tool_selection:{intent}"
-        agent_run.workflow = intent
-        agent_run.output_json = {
-            **dict(agent_run.output_json or {}),
-            "workflow": intent,
-            "model_name": model._settings.llm_model,
-            "provider_name": "dashscope",
-        }
-        db.commit()
-
-        if intent == "general_chat":
-            async for item in _stream_general_chat(
-                db,
-                thread,
-                assistant_message,
-                agent_run,
-                user_message=text_content,
-                attachment_parts=attachment_parts,
-                conversation_history_lines=list(context.get("conversation_history_lines") or []),
             ):
                 yield item
-            final_text = assistant_message.text_content or ""
-            _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
-            yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
-            yield {"event": "run_completed", "data": {"stream_id": stream_id}}
             return
-
-        if intent.startswith("needs_tool_selection:"):
-            final_text = _tool_selection_reminder(intent.split(":", 1)[1])
-            async for item in _emit_text_stream(db, assistant_message, final_text):
-                yield item
-            _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
-            yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
-            yield {"event": "run_completed", "data": {"stream_id": stream_id}}
-            return
-
-        if intent == "schedule_intake":
-            final_text, created_ids, requires_approval, tool_events = await _process_schedule_intake(
-                db,
-                user_id,
-                thread,
-                agent_run,
-                text_content=text_content,
-                attachment_ids=attachment_ids,
-                context=context,
-                action_group_id=context.get("pending_action_group_id") or None,
-                revision=int(context.get("pending_revision") or 1),
-            )
-        else:
-            final_text, created_ids, requires_approval, tool_events = await _process_quick_note_intake(
-                db,
-                user_id,
-                thread,
-                agent_run,
-                text_content=text_content,
-                attachment_ids=attachment_ids,
-                context=context,
-                action_group_id=context.get("pending_action_group_id") or None,
-                revision=int(context.get("pending_revision") or 1),
-            )
-
-        for tool_event in tool_events:
-            yield tool_event
-        async for item in _emit_text_stream(db, assistant_message, final_text):
+        async for item in _consume_stream_graph(
+            db,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            stream_id=stream_id,
+            agent_run=agent_run,
+            assistant_message=assistant_message,
+            thread=thread,
+            text_content=text_content,
+            attachment_ids=attachment_ids,
+            selected_tool=selected_tool,
+            attachment_parts=attachment_parts,
+            context=context,
+        ):
             yield item
-        _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=created_ids)
-        yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
-        for message_id in created_ids:
-            message = db.get(ConversationMessage, message_id)
-            if message:
-                yield {"event": "card_snapshot", "data": {"message": _message_payload(message)}}
-        if requires_approval:
-            yield {"event": "approval_required", "data": requires_approval}
-        yield {"event": "run_completed", "data": {"stream_id": stream_id}}
     except Exception as exc:
         agent_run.status = "failed"
         agent_run.stream_status = "failed"
@@ -715,6 +690,195 @@ async def consume_stream(
         assistant_message.status = "failed"
         db.commit()
         yield {"event": "run_failed", "data": _error_payload(exc, assistant_message_id=assistant_message.id)}
+
+
+async def _consume_stream_legacy(
+    db: Session,
+    *,
+    user_id: int,
+    conversation_id: int,
+    stream_id: str,
+    agent_run: AgentRun,
+    assistant_message: ConversationMessage,
+    thread: ConversationThread,
+    text_content: str,
+    attachment_ids: list[int],
+    selected_tool: Any,
+    attachment_parts: list[dict],
+    context: dict[str, Any],
+) -> AsyncGenerator[dict, None]:
+    """旧编排路径（agent_backend=legacy 时启用，用于观察期回滚）。"""
+    settings = get_settings()
+    pending = _get_pending_state(db, conversation_id)
+    if pending:
+        intent, text_content, attachment_ids, attachment_parts, context = _prepare_pending_regeneration(
+            db,
+            user_id=user_id,
+            pending=pending,
+            text_content=text_content,
+            attachment_ids=attachment_ids,
+            attachment_parts=attachment_parts,
+            context=context,
+        )
+    else:
+        intent = await llm.aroute_conversation_intent(
+            settings,
+            {
+                "text_content": text_content,
+                "attachment_ids": attachment_ids,
+                "selected_tool": selected_tool,
+                "context": context,
+            },
+            attachment_parts=attachment_parts,
+        )
+        if not selected_tool and intent in {"schedule_intake", "quick_note_intake"}:
+            intent = f"needs_tool_selection:{intent}"
+    agent_run.workflow = intent
+    agent_run.output_json = {
+        **dict(agent_run.output_json or {}),
+        "workflow": intent,
+        "model_name": settings.llm_model,
+        "provider_name": "dashscope",
+    }
+    db.commit()
+
+    if intent == "general_chat":
+        async for item in _stream_general_chat(
+            db,
+            thread,
+            assistant_message,
+            agent_run,
+            user_message=text_content,
+            attachment_parts=attachment_parts,
+            conversation_history_lines=list(context.get("conversation_history_lines") or []),
+        ):
+            yield item
+        final_text = assistant_message.text_content or ""
+        _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
+        yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
+        yield {"event": "run_completed", "data": {"stream_id": stream_id}}
+        return
+
+    if intent.startswith("needs_tool_selection:"):
+        final_text = _tool_selection_reminder(intent.split(":", 1)[1])
+        async for item in _emit_text_stream(db, assistant_message, final_text):
+            yield item
+        _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
+        yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
+        yield {"event": "run_completed", "data": {"stream_id": stream_id}}
+        return
+
+    if intent == "schedule_intake":
+        final_text, created_ids, requires_approval, tool_events = await _process_schedule_intake(
+            db,
+            user_id,
+            thread,
+            agent_run,
+            text_content=text_content,
+            attachment_ids=attachment_ids,
+            context=context,
+            action_group_id=context.get("pending_action_group_id") or None,
+            revision=int(context.get("pending_revision") or 1),
+        )
+    else:
+        final_text, created_ids, requires_approval, tool_events = await _process_quick_note_intake(
+            db,
+            user_id,
+            thread,
+            agent_run,
+            text_content=text_content,
+            attachment_ids=attachment_ids,
+            context=context,
+            action_group_id=context.get("pending_action_group_id") or None,
+            revision=int(context.get("pending_revision") or 1),
+        )
+
+    for tool_event in tool_events:
+        yield tool_event
+    async for item in _emit_text_stream(db, assistant_message, final_text):
+        yield item
+    _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=created_ids)
+    yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
+    for message_id in created_ids:
+        message = db.get(ConversationMessage, message_id)
+        if message:
+            yield {"event": "card_snapshot", "data": {"message": _message_payload(message)}}
+    if requires_approval:
+        yield {"event": "approval_required", "data": requires_approval}
+    yield {"event": "run_completed", "data": {"stream_id": stream_id}}
+
+
+async def _consume_stream_graph(
+    db: Session,
+    *,
+    user_id: int,
+    conversation_id: int,
+    stream_id: str,
+    agent_run: AgentRun,
+    assistant_message: ConversationMessage,
+    thread: ConversationThread,
+    text_content: str,
+    attachment_ids: list[int],
+    selected_tool: Any,
+    attachment_parts: list[dict],
+    context: dict[str, Any],
+) -> AsyncGenerator[dict, None]:
+    """LangGraph 编排路径：图内节点通过 get_stream_writer 实时发事件。
+
+    节点负责 tool_call_* / message_delta / 文本分块，本函数只做图后 DB 收尾，
+    保证 message_completed -> card_snapshot -> approval_required -> run_completed
+    的 SSE 顺序与旧路径一致。
+    """
+    from app.agent.checkpointer import setup_checkpointer
+    from app.agent.graph import build_graph
+    from app.agent.state import AgentState
+
+    await setup_checkpointer()
+    graph = build_graph()
+    initial: AgentState = {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "agent_run_id": agent_run.id,
+        "assistant_message_id": assistant_message.id,
+        "stream_id": stream_id,
+        "user_message": text_content,
+        "attachment_ids": attachment_ids,
+        "attachment_parts": attachment_parts,
+        "context": context,
+        "selected_tool": selected_tool,
+        "conversation_history_lines": list(context.get("conversation_history_lines") or []),
+    }
+    thread_id = f"conv_{conversation_id}_run_{agent_run.id}"
+    agent_run.checkpoint_thread_id = thread_id
+    db.commit()
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "db": db,
+            "agent_run": agent_run,
+            "assistant_message": assistant_message,
+            "thread": thread,
+        }
+    }
+    final_update: dict[str, Any] = {}
+    async for mode, chunk in graph.astream(initial, config, stream_mode=["updates", "custom"]):
+        if mode == "custom":
+            yield chunk
+        elif isinstance(chunk, dict):
+            final_update = chunk.get("finalize") or {}
+
+    final_text = str(final_update.get("assistant_text") or "")
+    created_ids = list(final_update.get("created_message_ids") or [])
+    requires_approval = final_update.get("requires_approval")
+    _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=created_ids)
+    yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
+    for message_id in created_ids:
+        message = db.get(ConversationMessage, message_id)
+        if message:
+            yield {"event": "card_snapshot", "data": {"message": _message_payload(message)}}
+    if requires_approval:
+        yield {"event": "approval_required", "data": requires_approval}
+    yield {"event": "run_completed", "data": {"stream_id": stream_id}}
 
 
 def apply_action(
@@ -781,9 +945,8 @@ async def _stream_general_chat(
         .limit(RECENT_MESSAGE_DB_WINDOW)
     ).all()
     ordered = list(reversed(list(recent_messages)))
-    model = ModelAdapter()
-    tools = await get_synora_tools()
-    agent = model.build_general_chat_agent(tools)
+    tools = await build_agent_tools()
+    agent = llm.build_general_chat_agent(get_settings(), tools)
     memory_context = MemoryService().retrieve_context(
         db,
         user_id=thread.user_id,
@@ -800,7 +963,7 @@ async def _stream_general_chat(
     if history_text:
         prompt_parts.append(history_text)
     prompt_parts.append(f"当前输入：\n{user_message}".strip())
-    messages = model.build_langchain_messages(
+    messages = llm.build_langchain_messages(
         recent_messages=[
             {"role": item.role, "content": item.text_content or ""}
             for item in ordered[-RECENT_MESSAGE_LLM_WINDOW:]
@@ -1818,7 +1981,7 @@ def _extract_langchain_delta(event: dict[str, Any]) -> str:
     chunk = event.get("data", {}).get("chunk")
     if chunk is None:
         return ""
-    return ModelAdapter._extract_message_text(chunk)
+    return llm.extract_message_text(chunk)
 
 
 def _extract_langchain_final_text(event: dict[str, Any]) -> str:
@@ -1826,13 +1989,13 @@ def _extract_langchain_final_text(event: dict[str, Any]) -> str:
     if isinstance(output, dict):
         messages = output.get("messages")
         if isinstance(messages, list) and messages:
-            return ModelAdapter._extract_message_text(messages[-1])
+            return llm.extract_message_text(messages[-1])
         if isinstance(output.get("output"), str):
             return str(output.get("output")).strip()
         return ""
     if isinstance(output, list) and output:
-        return ModelAdapter._extract_message_text(output[-1])
-    return ModelAdapter._extract_message_text(output)
+        return llm.extract_message_text(output[-1])
+    return llm.extract_message_text(output)
 
 
 def _prepare_pending_regeneration(

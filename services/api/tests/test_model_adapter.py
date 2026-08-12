@@ -1,12 +1,13 @@
 from unittest.mock import patch
 import unittest
 
+from app.agent import llm
+from app.agent.llm import QuickNotePreparationResult, ScheduleExtractionResult
 from app.config import Settings
-from app.runtime.model_adapter import ModelAdapter, QuickNotePreparationResult, ScheduleExtractionResult
 
 
 class ModelAdapterTests(unittest.TestCase):
-    @patch("app.runtime.model_adapter.ChatOpenAI")
+    @patch("app.agent.llm.ChatOpenAI")
     def test_qwen_model_disables_thinking_by_default(self, chat_openai_mock) -> None:
         settings = Settings(
             llm_api_key="test-key",
@@ -14,12 +15,12 @@ class ModelAdapterTests(unittest.TestCase):
             llm_enable_thinking=False,
         )
 
-        ModelAdapter(settings)._create_chat_model(temperature=0.2, streaming=False, enable_thinking=False)
+        llm.create_chat_model(settings, temperature=0.2, streaming=False, enable_thinking=False)
 
         _, kwargs = chat_openai_mock.call_args
         self.assertEqual(kwargs["extra_body"], {"enable_thinking": False})
 
-    @patch("app.runtime.model_adapter.ChatOpenAI")
+    @patch("app.agent.llm.ChatOpenAI")
     def test_qwen_structured_or_tool_calling_forces_thinking_off(self, chat_openai_mock) -> None:
         settings = Settings(
             llm_api_key="test-key",
@@ -27,12 +28,12 @@ class ModelAdapterTests(unittest.TestCase):
             llm_enable_thinking=True,
         )
 
-        ModelAdapter(settings)._create_chat_model(temperature=0.2, streaming=True, enable_thinking=False)
+        llm.create_chat_model(settings, temperature=0.2, streaming=True, enable_thinking=False)
 
         _, kwargs = chat_openai_mock.call_args
         self.assertEqual(kwargs["extra_body"], {"enable_thinking": False})
 
-    @patch("app.runtime.model_adapter.ChatOpenAI")
+    @patch("app.agent.llm.ChatOpenAI")
     def test_non_qwen_model_does_not_send_thinking_flag(self, chat_openai_mock) -> None:
         settings = Settings(
             llm_api_key="test-key",
@@ -40,7 +41,7 @@ class ModelAdapterTests(unittest.TestCase):
             llm_enable_thinking=False,
         )
 
-        ModelAdapter(settings)._create_chat_model(temperature=0.2, streaming=False)
+        llm.create_chat_model(settings, temperature=0.2, streaming=False)
 
         _, kwargs = chat_openai_mock.call_args
         self.assertIsNone(kwargs["extra_body"])
@@ -50,7 +51,7 @@ class ModelAdapterTests(unittest.TestCase):
             def __str__(self) -> str:
                 return "Command(update={'messages': [AIMessage(tool_calls=[...])]} )"
 
-        self.assertEqual(ModelAdapter._extract_message_text(_CommandLike()), "")
+        self.assertEqual(llm.extract_message_text(_CommandLike()), "")
 
     def test_current_time_prompt_contains_timezone_and_readable_time(self) -> None:
         settings = Settings(
@@ -58,7 +59,7 @@ class ModelAdapterTests(unittest.TestCase):
             default_timezone="Asia/Shanghai",
         )
 
-        prompt = ModelAdapter(settings)._current_time_prompt()
+        prompt = llm.current_time_prompt(settings)
 
         self.assertIn("当前时区：Asia/Shanghai", prompt)
         self.assertIn("当前时间：", prompt)

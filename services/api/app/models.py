@@ -205,6 +205,7 @@ class AgentRun(Base):
     input_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     output_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
+    checkpoint_thread_id: Mapped[str] = mapped_column(String(96), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 

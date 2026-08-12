@@ -44,6 +44,40 @@ docker compose up --build
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+## Agent 编排（LangGraph）
+
+对话编排基于 LangGraph `StateGraph`（`app/agent/graph.py`）：意图路由 → 分支节点
+（general_chat / schedule_intake / quick_note_intake / tool_selection_reminder）→ 统一 finalize。
+SSE 事件契约（`run_started / message_delta / tool_call_* / message_completed / card_snapshot / approval_required / run_completed`）
+与历史实现逐字节兼容。
+
+可通过环境变量回滚到旧编排：
+
+- `SYNORA_AGENT_BACKEND`：`langgraph`（默认）| `legacy`
+
+## MCP servers
+
+本服务进程内暴露 FastMCP server（`app/runtime/mcp/server.py`），Agent 通过
+`langchain-mcp-adapters` 进程内调用。可通过 `SYNORA_MCP_SERVERS` 以 JSON 数组聚合外部 MCP server，
+其工具会自动并入 Agent 工具集；单个 server 配置失败仅记日志并跳过，不阻断主流程：
+
+```dotenv
+# Streamable HTTP server（如 remote-mcp / npx -y @modelcontextprotocol/server-filesystem）
+SYNORA_MCP_SERVERS=[{"name":"files","transport":"streamable_http","url":"http://localhost:9000/mcp","headers":{"Authorization":"Bearer <token>"},"timeout_seconds":30}]
+
+# stdio server（本地进程）
+SYNORA_MCP_SERVERS=[{"name":"files","transport":"stdio","command":"python","args":["-m","mcp_server_files"],"env":{"FOO":"bar"}}]
+```
+
+## LangGraph checkpointer
+
+每轮对话一个 checkpoint thread（`conv_{conversation_id}_run_{agent_run_id}`），供图内状态恢复；
+终态与审批仍由 `AgentRun` 表审计。`rewind_last_turn` / `delete_conversation` 会同步清理孤儿 checkpoint。
+
+- `SYNORA_LANGGRAPH_CHECKPOINT_BACKEND`：`sqlite`（默认）| `postgres`
+- `SYNORA_LANGGRAPH_CHECKPOINT_DB_URL`：Postgres DSN（`postgresql+psycopg://...`），backend 为 `postgres` 时使用
+- `SYNORA_LANGGRAPH_CHECKPOINT_SQLITE_PATH`：SQLite 路径，默认 `langgraph_checkpoints.db`
+
 ## 默认账号
 
 - 邮箱：`han.teacher@example.com`

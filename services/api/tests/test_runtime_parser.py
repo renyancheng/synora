@@ -2,12 +2,12 @@ import unittest
 from unittest.mock import patch
 
 from app.runtime.errors import LLMServiceError
-from app.runtime.tool_impls import parse_schedule_draft, record_quick_note
+from app.runtime.tool_impls import parse_schedule_draft, prepare_quick_note_draft
 
 
 class RuntimeParserTests(unittest.TestCase):
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
-    @patch("app.runtime.tool_impls.ModelAdapter.extract_schedule")
+    @patch("app.runtime.tool_impls.extract_schedule")
     def test_parse_schedule_with_model_result(self, extract_schedule_mock, _attachment_mock) -> None:
         extract_schedule_mock.return_value = {
             "title": "教学例会",
@@ -34,7 +34,7 @@ class RuntimeParserTests(unittest.TestCase):
         self.assertAlmostEqual(result["parse_confidence"], 0.92)
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
-    @patch("app.runtime.tool_impls.ModelAdapter.extract_schedule")
+    @patch("app.runtime.tool_impls.extract_schedule")
     def test_parse_schedule_prompt_includes_conversation_history_section(self, extract_schedule_mock, _attachment_mock) -> None:
         extract_schedule_mock.return_value = {
             "title": "教学例会",
@@ -64,7 +64,7 @@ class RuntimeParserTests(unittest.TestCase):
         self.assertIn("用户：之前说过地点在学院会议室", merged_text)
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
-    @patch("app.runtime.tool_impls.ModelAdapter.extract_schedule")
+    @patch("app.runtime.tool_impls.extract_schedule")
     def test_parse_schedule_infers_relative_time_when_model_returns_null(self, extract_schedule_mock, _attachment_mock) -> None:
         extract_schedule_mock.return_value = {
             "title": "软件工程教研会",
@@ -90,14 +90,14 @@ class RuntimeParserTests(unittest.TestCase):
         self.assertIsNotNone(result["draft"]["end"]["dateTime"])
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
-    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    @patch("app.runtime.tool_impls.suggest_quick_note_tags")
     def test_quick_note_preview_tags(self, suggest_tags_mock, _attachment_mock) -> None:
         suggest_tags_mock.return_value = {
             "normalized_content": "整理论文实验图表并准备投稿清单",
             "preview_tags": ["科研", "论文", "待办"],
             "evidence_digest": ["论文", "实验图表", "投稿清单"],
         }
-        result = record_quick_note(
+        result = prepare_quick_note_draft(
             db=None,
             user_id=1,
             content="整理论文实验图表并准备投稿清单",
@@ -109,7 +109,7 @@ class RuntimeParserTests(unittest.TestCase):
         self.assertEqual(result["normalized_content"], "整理论文实验图表并准备投稿清单")
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
-    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    @patch("app.runtime.tool_impls.suggest_quick_note_tags")
     def test_quick_note_prompt_includes_conversation_history_section(self, suggest_tags_mock, _attachment_mock) -> None:
         suggest_tags_mock.return_value = {
             "normalized_content": "答辩材料还需要补充封面和目录",
@@ -117,7 +117,7 @@ class RuntimeParserTests(unittest.TestCase):
             "evidence_digest": ["封面", "目录"],
         }
 
-        _ = record_quick_note(
+        _ = prepare_quick_note_draft(
             db=None,
             user_id=1,
             content="把刚才那份答辩材料补充点细节",
@@ -134,7 +134,7 @@ class RuntimeParserTests(unittest.TestCase):
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
     @patch("app.runtime.tool_impls.MemoryService.retrieve_context")
-    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    @patch("app.runtime.tool_impls.suggest_quick_note_tags")
     def test_quick_note_draft_does_not_read_long_term_memory(
         self,
         suggest_tags_mock,
@@ -147,7 +147,7 @@ class RuntimeParserTests(unittest.TestCase):
             "evidence_digest": ["深色主题", "图标简洁", "设置页少说明文字"],
         }
 
-        result = record_quick_note(
+        result = prepare_quick_note_draft(
             db=None,
             user_id=1,
             content="记一下：我更喜欢深色主题，图标尽量简洁，设置页别放太多说明文字。",
@@ -166,7 +166,7 @@ class RuntimeParserTests(unittest.TestCase):
         )
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
-    @patch("app.runtime.tool_impls.ModelAdapter.suggest_quick_note_tags")
+    @patch("app.runtime.tool_impls.suggest_quick_note_tags")
     def test_quick_note_regeneration_prompt_uses_structured_sections(
         self,
         suggest_tags_mock,
@@ -178,7 +178,7 @@ class RuntimeParserTests(unittest.TestCase):
             "evidence_digest": ["下周三", "图表"],
         }
 
-        result = record_quick_note(
+        result = prepare_quick_note_draft(
             db=None,
             user_id=1,
             content="改成下周三，并补充图表",
@@ -200,7 +200,7 @@ class RuntimeParserTests(unittest.TestCase):
 
     @patch("app.runtime.tool_impls.build_attachment_prompt_assets", return_value=[])
     @patch(
-        "app.runtime.tool_impls.ModelAdapter.extract_schedule",
+        "app.runtime.tool_impls.extract_schedule",
         side_effect=LLMServiceError(
             "llm_invalid_response",
             "智能服务返回异常，本轮未完成。",

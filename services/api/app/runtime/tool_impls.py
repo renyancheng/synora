@@ -5,11 +5,11 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
+from app.agent.llm import extract_schedule, suggest_quick_note_tags
 from app.config import get_settings
 from app.domains.attachment.service import build_attachment_prompt_assets
 from app.domains.memory.service import MemoryService
 from app.runtime.context_assembler import ContextAssembler
-from app.runtime.model_adapter import ModelAdapter
 from app.runtime.output_normalizer import OutputNormalizer
 
 
@@ -63,7 +63,8 @@ def parse_schedule_draft(
         conversation_history_lines=conversation_history_lines,
     )
 
-    parsed = ModelAdapter().extract_schedule(
+    parsed = extract_schedule(
+        get_settings(),
         merged_text=assembled["prompt_text"],
         attachment_parts=attachment_parts,
         timezone_name=timezone_name,
@@ -158,7 +159,8 @@ def prepare_quick_note_draft(
             item for item in list(context.get("conversation_history_lines") or []) if isinstance(item, str)
         ],
     )
-    parsed = ModelAdapter().suggest_quick_note_tags(
+    parsed = suggest_quick_note_tags(
+        get_settings(),
         merged_text=str(assembled["prompt_text"]),
         manual_tags=tags,
         attachment_parts=attachment_parts,
@@ -173,7 +175,3 @@ def prepare_quick_note_draft(
         "attachment_ids": attachment_ids,
         "evidence_digest": evidence_digest,
     }
-
-
-def record_quick_note(**kwargs) -> dict:
-    return prepare_quick_note_draft(**kwargs)

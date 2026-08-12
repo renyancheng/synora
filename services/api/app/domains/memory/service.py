@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.models import MemoryProfile, MemoryRecord
-from app.runtime.model_adapter import ModelAdapter
+from app.agent.llm import invoke_text
 from app.security import sha256_text
 
 logger = logging.getLogger(__name__)
@@ -292,7 +292,8 @@ class MemoryService:
         summary = "\n".join(lines)
         if self._settings.llm_api_key.strip():
             try:
-                summary = ModelAdapter(self._settings)._invoke_text(
+                summary = invoke_text(
+                    self._settings,
                     operation="summarize_memory_profile",
                     system_prompt=(
                         "你是 Synora 的用户画像整理助手。"

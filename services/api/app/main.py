@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent.checkpointer import setup_checkpointer
 from app.bootstrap import init_db
 from app.config import get_settings
 from app.mcp import create_mcp_exact_route, create_mcp_http_app, get_mcp_server
@@ -20,6 +21,7 @@ async def lifespan(_: FastAPI):
     server.streamable_http_app()
     async with server.session_manager.run():
         init_db()
+        await setup_checkpointer()
         logger.info(
             "synora_api_starting llm_enabled=%s llm_model=%s llm_base_url=%s llm_enable_thinking=%s",
             bool(settings.llm_api_key),

@@ -1,13 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.agent import llm
+from app.config import get_settings
 from app.db import get_db
 from app.dependencies import get_current_user
 from app.domains.quick_note.service import create_quick_note_draft
 from app.domains.schedule.service import create_schedule_draft
 from app.models import User
 from app.runtime.errors import LLMServiceError
-from app.runtime.model_adapter import ModelAdapter
 from app.schemas.agent import AgentSessionIntakeRequest, AgentSessionIntakeResponse
 from app.schemas.quick_note import QuickNoteDraftRequest
 from app.schemas.schedule import ScheduleDraftInput
@@ -23,7 +24,7 @@ def intake(
 ) -> AgentSessionIntakeResponse:
     payload_data = payload.model_dump(mode="json")
     try:
-        workflow = ModelAdapter().route_workflow(payload_data)
+        workflow = llm.route_workflow(get_settings(), payload_data)
         if workflow == "schedule_intake":
             draft, draft_hash, missing_fields, ambiguity_flags, evidence_digest, parse_confidence = create_schedule_draft(
                 db,

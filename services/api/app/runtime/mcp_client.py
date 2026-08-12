@@ -28,17 +28,20 @@ def _internal_httpx_client_factory(
 
 @lru_cache
 def get_mcp_client() -> MultiServerMCPClient:
-    return MultiServerMCPClient(
-        {
-            "synora": {
-                "transport": "streamable_http",
-                "url": "http://mcp.local",
-                "timeout": timedelta(seconds=30),
-                "sse_read_timeout": timedelta(minutes=5),
-                "httpx_client_factory": _internal_httpx_client_factory,
-            }
+    from app.config import get_settings
+
+    servers: dict[str, dict] = {
+        "synora": {
+            "transport": "streamable_http",
+            "url": "http://mcp.local",
+            "timeout": timedelta(seconds=30),
+            "sse_read_timeout": timedelta(minutes=5),
+            "httpx_client_factory": _internal_httpx_client_factory,
         }
-    )
+    }
+    for cfg in get_settings().mcp_servers:
+        servers[cfg.name] = cfg.to_adapter_config()
+    return MultiServerMCPClient(servers)
 
 
 async def get_synora_tools():

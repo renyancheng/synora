@@ -6,13 +6,15 @@ import unittest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.agent import checkpointer as checkpointer_module, llm
+from app.agent.graph import build_graph
+from app.config import get_settings
 from app.db import Base
 from app.domains.approval.service import create_approval_request
 from app.domains.conversation.service import apply_action, consume_stream, create_conversation, delete_conversation, queue_message, rewind_last_turn, update_conversation_title
 from app.domains.quick_note.service import delete_note
 from app.domains.schedule.service import build_approval_draft_hash, build_draft_hash, delete_schedule
 from app.models import ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
-from app.runtime.model_adapter import ModelAdapter
 from app.schemas.common import EventDateTimeValue
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
 from app.schemas.schedule import ScheduleEventDraft
@@ -53,6 +55,10 @@ class _CapturingGeneralChatAgent:
 
 class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        self._prev_ckpt_path = get_settings().langgraph_checkpoint_sqlite_path
+        get_settings().langgraph_checkpoint_sqlite_path = ":memory:"
+        checkpointer_module.reset_checkpointer()
+        build_graph.cache_clear()
         self.engine = create_engine("sqlite:///:memory:", future=True)
         self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
         Base.metadata.create_all(self.engine)
@@ -70,6 +76,9 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
+        get_settings().langgraph_checkpoint_sqlite_path = self._prev_ckpt_path
+        checkpointer_module.reset_checkpointer()
+        build_graph.cache_clear()
 
     def _draft(self) -> ScheduleEventDraft:
         return ScheduleEventDraft(
@@ -87,10 +96,10 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
-    @patch.object(ModelAdapter, "build_general_chat_agent", return_value=_FakeGeneralChatAgent())
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学安排")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeGeneralChatAgent())
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学安排")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     async def test_send_general_chat_message(
         self,
@@ -123,9 +132,9 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(write_memory_mock.call_count, 0)
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="历史问答")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.generate_conversation_title", return_value="历史问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
     async def test_general_chat_includes_semantic_conversation_history_lines(
@@ -144,7 +153,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         ]
         agent = _CapturingGeneralChatAgent()
         thread = create_conversation(self.db, self.user.id)
-        with patch.object(ModelAdapter, "build_general_chat_agent", return_value=agent):
+        with patch("app.agent.llm.build_general_chat_agent", return_value=agent):
             _, _, _, agent_run = queue_message(
                 self.db,
                 self.user.id,
@@ -155,7 +164,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(agent.payloads)
         messages = agent.payloads[0]["messages"]
-        final_prompt = ModelAdapter._extract_message_text(messages[-1])
+        final_prompt = llm.extract_message_text(messages[-1])
         self.assertIn("同一会话较早相关历史：", final_prompt)
         self.assertIn("信息楼 202", final_prompt)
         self.assertIn("当前输入：\n那地点还是之前那个吗", final_prompt)
@@ -180,10 +189,10 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed.text_content, "")
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
-    @patch.object(ModelAdapter, "build_general_chat_agent", return_value=_FakeToolOnlyGeneralChatAgent())
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="测试聊天")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeToolOnlyGeneralChatAgent())
+    @patch("app.agent.llm.generate_conversation_title", return_value="测试聊天")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     async def test_general_chat_does_not_leak_langchain_internal_repr(
         self,
@@ -210,8 +219,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
     async def test_schedule_message_creates_pending_cards(
         self,
@@ -271,8 +280,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
     async def test_schedule_intake_passes_semantic_history_lines_to_tool_context(
         self,
@@ -328,8 +337,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     @patch("app.domains.conversation.service._build_conversation_history_recall")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
     async def test_schedule_intake_falls_back_to_lexical_history_recall(
@@ -401,10 +410,10 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(upsert_mock.call_args.args[0].id, user_message.id)
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.get_synora_tools", new_callable=AsyncMock, return_value=[])
-    @patch.object(ModelAdapter, "build_general_chat_agent", return_value=_FakeGeneralChatAgent())
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学安排")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeGeneralChatAgent())
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学安排")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.upsert_message")
     async def test_finalize_run_upserts_assistant_text_to_history_index(
@@ -466,8 +475,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.create_schedule_after_approval")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_updates_existing_cards_in_place(
         self,
         _intent_mock,
@@ -548,8 +557,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_uses_real_schedule_creation_path(
         self,
         _intent_mock,
@@ -632,8 +641,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_accepts_non_default_reminder_preset(
         self,
         _intent_mock,
@@ -716,8 +725,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.create_schedule_after_approval")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_succeeds_when_card_finalize_fails(
         self,
         _intent_mock,
@@ -794,8 +803,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.save_note_after_approval")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="实验记录")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="实验记录")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
     async def test_quick_note_message_and_confirm(
         self,
         _intent_mock,
@@ -854,8 +863,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="实验记录")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="实验记录")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
     async def test_pending_quick_note_regenerates_new_revision(
         self,
         _intent_mock,
@@ -1175,8 +1184,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="蓝桥杯安排")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="蓝桥杯安排")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_schedule_regeneration_keeps_user_history_in_source_text(
         self,
         _intent_mock,
@@ -1286,8 +1295,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="教学例会")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_pending_schedule_regenerates_new_revision_with_cards(
         self,
         _intent_mock,
@@ -1441,8 +1450,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
-    @patch.object(ModelAdapter, "generate_conversation_title", return_value="创建提醒")
-    @patch.object(ModelAdapter, "aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    @patch("app.agent.llm.generate_conversation_title", return_value="创建提醒")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_conversation_without_selected_tool_returns_tool_selection_reminder(
         self,
         _intent_mock,

@@ -3,6 +3,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.agent.external_mcp import McpServerSettings
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -37,6 +39,11 @@ class Settings(BaseSettings):
     notification_to_email: str = "han.teacher@example.com"
     wecom_robot_webhook: str = ""
 
+    agent_backend: str = "langgraph"  # "langgraph" | "legacy"
+    mcp_servers: list[McpServerSettings] = []  # SYNORA_MCP_SERVERS JSON 数组
+    langgraph_checkpoint_backend: str = "sqlite"  # "sqlite" | "postgres"
+    langgraph_checkpoint_db_url: str = ""
+    langgraph_checkpoint_sqlite_path: str = "langgraph_checkpoints.db"
     llm_api_key: str = ""
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen3.6-flash"
