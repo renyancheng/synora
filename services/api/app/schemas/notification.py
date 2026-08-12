@@ -11,6 +11,7 @@ class NotificationItem(BaseModel):
     provider: str
     recipient: str
     subject: str
+    body: str | None = None
     status: str
     error_message: str | None = None
     retry_count: int

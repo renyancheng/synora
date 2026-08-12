@@ -81,25 +81,95 @@ async def route_intent(state: AgentState) -> dict[str, Any]:
     }
 
 
-async def general_chat_node(state: AgentState) -> dict[str, Any]:
-    from app.domains.conversation.service import _stream_general_chat
+async def plan_node(state: AgentState) -> dict[str, Any]:
+    """plan：LLM 生成一句话行动计划，产出 reasoning_step(plan)。"""
+    from app.domains.conversation.service import _plan_step
 
     cfg = _config_items()
     writer = get_stream_writer()
-    async for sse in _stream_general_chat(
+    result = await _plan_step(
         cfg["db"],
         cfg["thread"],
         cfg["assistant_message"],
         cfg["agent_run"],
-        user_message=state.get("user_message") or "",
-        attachment_parts=list(state.get("attachment_parts") or []),
-        conversation_history_lines=list(state.get("conversation_history_lines") or []),
-    ):
-        writer(sse)
+        state=dict(state),
+        emit=writer,
+    )
     return {
+        "plan": result.get("plan") or "",
+        "iteration_count": 0,
+        "max_iterations": get_settings().agent_max_loop_iterations,
+        "loop_decision": "continue",
+        "reasoning_steps": list(result.get("steps") or []),
+    }
+
+
+async def act_node(state: AgentState) -> dict[str, Any]:
+    """act：手动 bind_tools + astream 流式吐文本，捕获 tool_calls。"""
+    from app.domains.conversation.service import _act_step
+
+    cfg = _config_items()
+    writer = get_stream_writer()
+    result = await _act_step(
+        cfg["db"],
+        cfg["thread"],
+        cfg["assistant_message"],
+        cfg["agent_run"],
+        state=dict(state),
+        emit=writer,
+    )
+    aimessage = result.get("aimessage")
+    return {
+        "agent_messages": [aimessage] if aimessage else [],
+        "pending_tool_calls": list(result.get("pending_tool_calls") or []),
+        "current_aimessage": aimessage,
+        "iteration_count": int(result.get("iteration") or 1),
         "assistant_text": cfg["assistant_message"].text_content or "",
-        "created_message_ids": [],
-        "requires_approval": None,
+        "reasoning_steps": list(result.get("steps") or []),
+    }
+
+
+async def observe_node(state: AgentState) -> dict[str, Any]:
+    """observe：执行 tool_calls，产出 ToolMessage 与观察摘要（0 次 LLM）。"""
+    from app.domains.conversation.service import _observe_step
+
+    cfg = _config_items()
+    writer = get_stream_writer()
+    result = await _observe_step(
+        cfg["db"],
+        cfg["thread"],
+        cfg["assistant_message"],
+        cfg["agent_run"],
+        state=dict(state),
+        emit=writer,
+    )
+    return {
+        "agent_messages": list(result.get("tool_messages") or []),
+        "observation": result.get("observation") or "",
+        "pending_tool_calls": [],
+        "reasoning_steps": list(result.get("steps") or []),
+    }
+
+
+async def reflect_node(state: AgentState) -> dict[str, Any]:
+    """reflect：启发式短路 + LLM 评估，产出 loop_decision。"""
+    from app.domains.conversation.service import _reflect_step
+
+    cfg = _config_items()
+    writer = get_stream_writer()
+    result = await _reflect_step(
+        cfg["db"],
+        cfg["thread"],
+        cfg["assistant_message"],
+        cfg["agent_run"],
+        state=dict(state),
+        emit=writer,
+    )
+    return {
+        "loop_decision": result.get("loop_decision") or "done",
+        "reflection": result.get("reflection") or "",
+        "follow_up_prompt": result.get("follow_up_prompt"),
+        "reasoning_steps": list(result.get("steps") or []),
     }
 
 
@@ -160,9 +230,10 @@ async def quick_note_intake_node(state: AgentState) -> dict[str, Any]:
 
 
 def finalize_node(state: AgentState) -> dict[str, Any]:
-    """输出归一化：字段已由各分支节点写入，此处仅保证 key 存在。"""
+    """输出归一化：字段已由各分支节点写入，此处仅保证 key 存在并透传推理轨迹。"""
     return {
         "assistant_text": state.get("assistant_text") or "",
         "created_message_ids": list(state.get("created_message_ids") or []),
         "requires_approval": state.get("requires_approval"),
+        "reasoning_steps": list(state.get("reasoning_steps") or []),
     }

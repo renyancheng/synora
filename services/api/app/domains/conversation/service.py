@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -305,12 +307,22 @@ def _resolve_conversation_history_lines(
 
 
 def _error_payload(exc: Exception, *, assistant_message_id: int) -> dict[str, object]:
-    if isinstance(exc, LLMServiceError):
+    # LangGraph 会把节点异常包装进 Pregel/Runnable 链，需沿 __cause__/__context__
+    # 解包到最内层的业务异常，避免丢失 LLMServiceError 的 code。
+    unwrapped = exc
+    seen: set[int] = set()
+    while not isinstance(unwrapped, LLMServiceError):
+        cause = getattr(unwrapped, "__cause__", None) or getattr(unwrapped, "__context__", None)
+        if cause is None or id(cause) in seen:
+            break
+        seen.add(id(cause))
+        unwrapped = cause
+    if isinstance(unwrapped, LLMServiceError):
         return {
             "assistant_message_id": assistant_message_id,
-            "code": exc.code,
-            "message": exc.message,
-            "retryable": exc.retryable,
+            "code": unwrapped.code,
+            "message": unwrapped.message,
+            "retryable": unwrapped.retryable,
         }
     return {
         "assistant_message_id": assistant_message_id,
@@ -861,6 +873,20 @@ async def _consume_stream_graph(
     created_ids = list(final_update.get("created_message_ids") or [])
     requires_approval = final_update.get("requires_approval")
     _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=created_ids)
+    # 推理轨迹持久化：reasoning_step 消息卡片（历史可回溯），经 card_snapshot 推送
+    reasoning_steps = list(final_update.get("reasoning_steps") or [])
+    if reasoning_steps:
+        step_summary = _summarize_reasoning_steps(reasoning_steps)
+        step_message = _append_message(
+            db,
+            thread,
+            role="assistant",
+            message_type="reasoning_step",
+            status="completed",
+            text_content=step_summary,
+            structured_payload={"steps": reasoning_steps, "summary": step_summary},
+        )
+        created_ids.append(step_message.id)
     yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
     for message_id in created_ids:
         message = db.get(ConversationMessage, message_id)
@@ -1035,6 +1061,384 @@ async def _stream_general_chat(
 
     assistant_message.text_content = final_text
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# plan → act → observe → reflect 主循环（general_chat 专用）
+# 节点通过 get_stream_writer() 传入 emit；步骤以持久化 dict 返回，节点写入
+# state.reasoning_steps（Annotated add 累积），SSE 事件由 emit 实时写出。
+# ---------------------------------------------------------------------------
+
+
+def _build_reasoning_step_event(assistant_message_id: int, step: dict[str, Any]) -> dict[str, Any]:
+    """把持久化 step dict 包装成 SSE reasoning_step 事件。"""
+    return {"event": "reasoning_step", "data": {"assistant_message_id": assistant_message_id, **step}}
+
+
+def _summarize_reasoning_steps(steps: list[dict[str, Any]]) -> str:
+    """把步骤序列压成一行摘要（reasoning_step 卡片的 text_content）。"""
+    parts: list[str] = []
+    for step in steps:
+        label = step.get("label") or step.get("step_type") or ""
+        content = str(step.get("content") or "").strip()
+        if not content or content in ("（无文本输出）", "本轮无工具调用"):
+            continue
+        parts.append(f"{label}: {content}" if label else content)
+    summary = " → ".join(parts)
+    return summary[:160] or "推理过程"
+
+
+def _extract_model_chunk_delta(chunk: Any) -> str:
+    """从流式 AIMessageChunk 提取纯文本增量（兼容 str 与 list[dict] content）。"""
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text":
+                text = str(item.get("text") or "")
+                if text:
+                    parts.append(text)
+        return "".join(parts)
+    return ""
+
+
+def _make_aimessage(content: str, tool_calls: list[dict] | None) -> AIMessage:
+    return AIMessage(
+        content=content,
+        tool_calls=[
+            {"name": tc.get("name", ""), "args": tc.get("args", {}), "id": tc.get("id", ""), "type": "tool_call"}
+            for tc in tool_calls or []
+        ],
+    )
+
+
+def _serialize_tool_calls(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
+    return [
+        {"name": tc.get("name", ""), "args": tc.get("args", {}), "id": tc.get("id", "")}
+        for tc in tool_calls or []
+    ]
+
+
+def _serialize_aimessage(message: Any) -> dict[str, Any]:
+    return {
+        "role": "ai",
+        "content": llm.extract_message_text(message),
+        "tool_calls": _serialize_tool_calls(getattr(message, "tool_calls", None) or []),
+    }
+
+
+def _deserialize_message(item: dict[str, Any]) -> Any:
+    role = str(item.get("role") or "")
+    content = str(item.get("content") or "")
+    if role == "ai":
+        return _make_aimessage(content, list(item.get("tool_calls") or []))
+    if role == "tool":
+        return ToolMessage(
+            content=content,
+            tool_call_id=str(item.get("tool_call_id") or ""),
+            name=str(item.get("name") or ""),
+        )
+    return HumanMessage(content=content)
+
+
+def _serialize_tool_result(result: Any) -> str:
+    if isinstance(result, str):
+        return result
+    try:
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception:
+        return str(result)
+
+
+def _build_general_chat_messages(
+    db: Session,
+    thread: ConversationThread,
+    assistant_message: ConversationMessage,
+    *,
+    user_message: str,
+    attachment_parts: list[dict],
+    conversation_history_lines: list[str] | None = None,
+    agent_messages: list[dict] | None = None,
+    follow_up_prompt: str | None = None,
+) -> list[Any]:
+    """构建 general_chat 的完整消息序列：历史 + 记忆/上下文 + 当前输入 + 跨迭代 agent 消息。"""
+    recent_messages = db.scalars(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == thread.id)
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(RECENT_MESSAGE_DB_WINDOW)
+    ).all()
+    ordered = list(reversed(list(recent_messages)))
+    memory_context = MemoryService().retrieve_context(db, user_id=thread.user_id, query_text=user_message)
+    memory_text = ContextAssembler.build_memory_context(
+        memory_summary=memory_context.summary,
+        memory_items=memory_context.items,
+    )
+    history_text = ContextAssembler.build_conversation_history_context(conversation_history_lines)
+    prompt_parts: list[str] = []
+    if memory_text:
+        prompt_parts.append(memory_text)
+    if history_text:
+        prompt_parts.append(history_text)
+    prompt_parts.append(f"当前输入：\n{user_message}".strip())
+    messages = llm.build_langchain_messages(
+        recent_messages=[
+            {"role": item.role, "content": item.text_content or ""}
+            for item in ordered[-RECENT_MESSAGE_LLM_WINDOW:]
+            if item.id != assistant_message.id and item.text_content
+        ],
+        user_message="\n\n".join(part for part in prompt_parts if part).strip(),
+        attachment_parts=attachment_parts,
+    )
+    for item in agent_messages or []:
+        messages.append(_deserialize_message(item))
+    if follow_up_prompt:
+        messages.append(HumanMessage(content=str(follow_up_prompt)))
+    return messages
+
+
+async def _plan_step(
+    db: Session,
+    thread: ConversationThread,
+    assistant_message: ConversationMessage,
+    agent_run: AgentRun,
+    *,
+    state: dict[str, Any],
+    emit: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    settings = get_settings()
+    user_message = state.get("user_message") or ""
+    existing = list(state.get("reasoning_steps") or [])
+    seq = len(existing) + 1
+    try:
+        result = await llm.ainvoke_structured(
+            settings,
+            schema=llm.PlanResult,
+            system_prompt=(
+                "你是 Synora 的规划助手。用一句话（不超过20字）描述当前回合你要"
+                "执行的核心动作，面向用户可读。若只是简单问答，直接给出回答意图。"
+            ),
+            user_text=user_message,
+            operation="agent_plan",
+        )
+        plan = str(result.plan or "").strip() or "回答用户"
+    except Exception:
+        plan = "回答用户"
+    step = {
+        "seq": seq,
+        "step_type": "plan",
+        "label": "规划",
+        "content": plan,
+        "status": "completed",
+        "iteration": 0,
+    }
+    emit(_build_reasoning_step_event(assistant_message.id, step))
+    return {"plan": plan, "steps": [step]}
+
+
+async def _act_step(
+    db: Session,
+    thread: ConversationThread,
+    assistant_message: ConversationMessage,
+    agent_run: AgentRun,
+    *,
+    state: dict[str, Any],
+    emit: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    settings = get_settings()
+    iteration = int(state.get("iteration_count") or 0)
+    existing = list(state.get("reasoning_steps") or [])
+    seq = len(existing) + 1
+    running_step = {
+        "seq": seq,
+        "step_type": "act",
+        "label": "行动",
+        "content": "",
+        "status": "running",
+        "iteration": iteration,
+    }
+    emit(_build_reasoning_step_event(assistant_message.id, running_step))
+
+    messages = _build_general_chat_messages(
+        db,
+        thread,
+        assistant_message,
+        user_message=state.get("user_message") or "",
+        attachment_parts=list(state.get("attachment_parts") or []),
+        conversation_history_lines=list(state.get("conversation_history_lines") or []),
+        agent_messages=list(state.get("agent_messages") or []),
+        follow_up_prompt=state.get("follow_up_prompt"),
+    )
+    model = llm.create_chat_model(settings, temperature=0.35, streaming=True, enable_thinking=False)
+    tools = await build_agent_tools(exclude_names=GENERAL_CHAT_EXCLUDED_TOOLS)
+    bound_model = model.bind_tools(tools) if tools else model
+
+    final_text = assistant_message.text_content or ""
+    iteration_text = ""
+    raw_tool_calls: list[dict] = []
+    async for chunk in bound_model.astream(messages):
+        delta = _extract_model_chunk_delta(chunk)
+        if delta:
+            iteration_text += delta
+            final_text += delta
+            assistant_message.text_content = final_text
+            db.commit()
+            emit({"event": "message_delta", "data": {"assistant_message_id": assistant_message.id, "delta": delta}})
+        calls = getattr(chunk, "tool_calls", None)
+        if calls:
+            raw_tool_calls = calls
+
+    aimessage = _make_aimessage(iteration_text, raw_tool_calls)
+    completed_step = {
+        **running_step,
+        "content": iteration_text or "（无文本输出）",
+        "status": "completed",
+    }
+    emit(_build_reasoning_step_event(assistant_message.id, completed_step))
+    return {
+        "aimessage": _serialize_aimessage(aimessage),
+        "pending_tool_calls": _serialize_tool_calls(raw_tool_calls),
+        "iteration": iteration + 1,
+        "steps": [completed_step],
+    }
+
+
+async def _observe_step(
+    db: Session,
+    thread: ConversationThread,
+    assistant_message: ConversationMessage,
+    agent_run: AgentRun,
+    *,
+    state: dict[str, Any],
+    emit: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    tool_calls = list(state.get("pending_tool_calls") or [])
+    existing = list(state.get("reasoning_steps") or [])
+    seq = len(existing) + 1
+    iteration = int(state.get("iteration_count") or 0)
+    running_step = {
+        "seq": seq,
+        "step_type": "observe",
+        "label": "观察",
+        "content": "",
+        "status": "running",
+        "iteration": iteration,
+    }
+    emit(_build_reasoning_step_event(assistant_message.id, running_step))
+
+    tool_messages: list[dict[str, Any]] = []
+    summaries: list[str] = []
+    if tool_calls:
+        tools = await build_agent_tools(exclude_names=GENERAL_CHAT_EXCLUDED_TOOLS)
+        tool_map = {tool.name: tool for tool in tools}
+        for call in tool_calls:
+            name = str(call.get("name") or "")
+            args = call.get("args") or {}
+            call_id = str(call.get("id") or mint_token())
+            tool = tool_map.get(name)
+            emit({"event": "tool_call_started", "data": {"tool_name": name, "call_id": call_id}})
+            audit = _start_tool_audit(
+                db,
+                agent_run_id=agent_run.id,
+                tool_name=name,
+                request_json={"arguments": args},
+            )
+            if tool is None:
+                content_text = f"未知工具：{name}"
+                _finish_tool_audit(db, audit, status="failed", response_json={}, error_message=content_text)
+                emit({"event": "tool_call_failed", "data": {"tool_name": name, "call_id": call_id, "message": content_text}})
+            else:
+                try:
+                    result = await tool.ainvoke(args)
+                    content_text = _serialize_tool_result(result)
+                    _finish_tool_audit(db, audit, status="ok", response_json=_serialize_any(result))
+                    emit({"event": "tool_call_completed", "data": {"tool_name": name, "call_id": call_id}})
+                except Exception as exc:
+                    content_text = f"工具执行失败：{exc}"
+                    _finish_tool_audit(db, audit, status="failed", response_json={}, error_message=str(exc))
+                    emit({"event": "tool_call_failed", "data": {"tool_name": name, "call_id": call_id, "message": str(exc)}})
+            tool_messages.append(
+                {"role": "tool", "content": content_text, "name": name, "tool_call_id": call_id}
+            )
+            summaries.append(f"{name}: {content_text[:80]}")
+    observation = "；".join(summaries)[:120] or "本轮无工具调用"
+    completed_step = {**running_step, "content": observation, "status": "completed"}
+    emit(_build_reasoning_step_event(assistant_message.id, completed_step))
+    return {
+        "tool_messages": tool_messages,
+        "observation": observation,
+        "pending_tool_calls": [],
+        "steps": [completed_step],
+    }
+
+
+async def _reflect_step(
+    db: Session,
+    thread: ConversationThread,
+    assistant_message: ConversationMessage,
+    agent_run: AgentRun,
+    *,
+    state: dict[str, Any],
+    emit: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    settings = get_settings()
+    iteration = int(state.get("iteration_count") or 0)
+    max_iter = int(state.get("max_iterations") or settings.agent_max_loop_iterations)
+    existing = list(state.get("reasoning_steps") or [])
+    seq = len(existing) + 1
+    aimessage = state.get("current_aimessage") or {}
+    had_tool_calls = bool(aimessage.get("tool_calls"))
+    decision = "done"
+    rationale = ""
+    follow_up_prompt: str | None = None
+    if not had_tool_calls:
+        decision = "done"
+        rationale = "本轮无工具调用，回答完整"
+    elif iteration >= max_iter:
+        decision = "done"
+        rationale = f"已达最大迭代次数（{max_iter}）"
+    else:
+        try:
+            result = await llm.ainvoke_structured(
+                settings,
+                schema=llm.ReflectDecision,
+                system_prompt=(
+                    "你是 Synora 的执行评估器。判断当前工具调用链是否已获得足够信息"
+                    "回答用户。若已充分，is_complete=true；若还需继续行动，"
+                    "is_complete=false 并给出最多一句话的 follow_up_prompt 作为下一步指引。"
+                ),
+                user_text=state.get("user_message") or "",
+                operation="agent_reflect",
+            )
+            if result.is_complete:
+                decision = "done"
+                rationale = result.rationale or "信息已充分"
+            else:
+                decision = "continue"
+                rationale = result.rationale or "需要继续行动"
+                follow_up_prompt = result.follow_up_prompt
+        except Exception:
+            decision = "done"
+            rationale = "评估失败，保守收尾"
+    step = {
+        "seq": seq,
+        "step_type": "reflect",
+        "label": "反思",
+        "content": rationale or decision,
+        "status": "completed",
+        "iteration": iteration,
+    }
+    emit(_build_reasoning_step_event(assistant_message.id, step))
+    return {
+        "loop_decision": decision,
+        "reflection": rationale,
+        "follow_up_prompt": follow_up_prompt,
+        "steps": [step],
+    }
 
 
 async def _process_schedule_intake(
@@ -1849,6 +2253,8 @@ def _upsert_pending_state(
     attachment_ids: list[int],
     payload_json: dict,
     meta_json: dict,
+    planned_at: datetime | None = None,
+    intent_type: str | None = None,
 ) -> ConversationPendingState:
     pending = _get_pending_state(db, conversation_id)
     if not pending:
@@ -1863,6 +2269,8 @@ def _upsert_pending_state(
             attachment_ids_json=attachment_ids,
             payload_json=payload_json,
             meta_json=meta_json,
+            planned_at=planned_at,
+            intent_type=intent_type,
         )
         db.add(pending)
     else:
@@ -1874,6 +2282,8 @@ def _upsert_pending_state(
         pending.attachment_ids_json = attachment_ids
         pending.payload_json = payload_json
         pending.meta_json = meta_json
+        pending.planned_at = planned_at
+        pending.intent_type = intent_type
     db.commit()
     db.refresh(pending)
     return pending
@@ -1882,6 +2292,22 @@ def _upsert_pending_state(
 def _clear_pending_state(db: Session, pending: ConversationPendingState) -> None:
     db.delete(pending)
     db.commit()
+
+
+def mark_cross_day_intent(db: Session, conversation_id: int, *, planned_at: datetime) -> ConversationPendingState | None:
+    """将挂起会话标记为跨天意图：到 ``planned_at`` 时由 beat 任务主动唤醒跟进。
+
+    供意图路由在识别到“改天再处理”时调用；返回更新后的 pending，若该会话无
+    挂起状态则返回 None（不做任何事）。
+    """
+    pending = _get_pending_state(db, conversation_id)
+    if not pending:
+        return None
+    pending.intent_type = "cross_day"
+    pending.planned_at = planned_at
+    db.commit()
+    db.refresh(pending)
+    return pending
 
 
 def _delete_approvals_for_action_groups(

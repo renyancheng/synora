@@ -7,10 +7,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.domains.memory.service import MemoryService
 from app.domains.search.service import SemanticSearchService
-from app.models import NotificationAudit, ReminderJob, Schedule, User
+from app.models import NotificationAudit, ReminderJob, Schedule
 from app.runtime.approval_gate import ApprovalGate
 from app.runtime.tool_impls import parse_schedule_draft
 from app.schemas.schedule import (
@@ -183,21 +182,10 @@ def compute_schedule_reminder(
     return [offset_minutes], reminder_at
 
 
-def resolve_schedule_webhook(db: Session, *, user_id: int) -> str | None:
-    user = db.scalar(select(User).where(User.id == user_id))
-    if user and (user.wecom_robot_webhook or "").strip():
-        return user.wecom_robot_webhook.strip()
-    return None
-
-
 def _build_reminder_jobs(db: Session, schedule: Schedule) -> list[ReminderJob]:
+    # 通知通道已收敛为仅 system（系统级通知由前端轮询 + FCM 承载）。
     earliest = schedule.reminder_at or schedule.start_at
-    jobs = [ReminderJob(schedule_id=schedule.id, channel="email", scheduled_for=earliest)]
-    settings = get_settings()
-    webhook = resolve_schedule_webhook(db, user_id=schedule.user_id) or settings.wecom_robot_webhook.strip()
-    if webhook:
-        jobs.append(ReminderJob(schedule_id=schedule.id, channel="wecom_robot", scheduled_for=earliest))
-    return jobs
+    return [ReminderJob(schedule_id=schedule.id, channel="system", scheduled_for=earliest)]
 
 
 def create_schedule_draft(db: Session, user_id: int, payload: ScheduleDraftInput) -> tuple[ScheduleEventDraft, str, list[str], list[str], list[str], float]:

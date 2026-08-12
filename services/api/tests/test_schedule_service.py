@@ -114,7 +114,7 @@ class ScheduleServiceTests(unittest.TestCase):
         self.assertEqual(saved_schedule.reminder_preset, "2h_before")
         self.assertEqual(saved_schedule.reminder_offsets_minutes_json, [-120])
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].channel, "email")
+        self.assertEqual(jobs[0].channel, "system")
 
     def test_list_schedules_supports_query_and_user_isolation(self) -> None:
         self.db.add_all(

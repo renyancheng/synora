@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 import json
-import smtplib
 from datetime import datetime, timezone
-from email.message import EmailMessage
-from json import JSONDecodeError
 from zoneinfo import ZoneInfo
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import NotificationAudit, ReminderJob, Schedule, User
+from app.domains.notification.fcm import send_system_push
+from app.models import NotificationAudit, ReminderJob, Schedule
 
 
 def _finalize_notification_audit(db: Session, audit: NotificationAudit) -> NotificationAudit:
@@ -53,91 +50,6 @@ def queue_notification_audit(
     db.commit()
     db.refresh(audit)
     return audit
-
-
-def send_email_notification(db: Session, audit_id: int) -> NotificationAudit:
-    settings = get_settings()
-    audit = db.get(NotificationAudit, audit_id)
-    if not audit:
-        raise ValueError("通知审计记录不存在。")
-
-    payload = json.loads(audit.payload_json)
-    message = EmailMessage()
-    message["From"] = settings.notification_from_email
-    message["To"] = audit.recipient
-    message["Subject"] = audit.subject
-    message.set_content(payload.get("body", ""))
-
-    try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as smtp:
-            if settings.smtp_use_tls:
-                smtp.starttls()
-            if settings.smtp_username and settings.smtp_password:
-                smtp.login(settings.smtp_username, settings.smtp_password)
-            smtp.send_message(message)
-        audit.status = "delivered"
-        audit.delivered_at = datetime.now(timezone.utc)
-        audit.external_id = f"email-{audit.id}"
-    except Exception as exc:
-        audit.status = "failed"
-        audit.error_message = str(exc)
-        audit.retry_count += 1
-    return _finalize_notification_audit(db, audit)
-
-
-def send_wecom_robot_notification(db: Session, audit_id: int) -> NotificationAudit:
-    settings = get_settings()
-    audit = db.get(NotificationAudit, audit_id)
-    if not audit:
-        raise ValueError("通知审计记录不存在。")
-
-    payload = json.loads(audit.payload_json)
-    webhook = None
-    if audit.user_id:
-        user = db.scalar(select(User).where(User.id == audit.user_id))
-        if user and (user.wecom_robot_webhook or "").strip():
-            webhook = user.wecom_robot_webhook.strip()
-    if not webhook:
-        webhook = settings.wecom_robot_webhook.strip()
-    if not webhook:
-        return _fail_notification_audit(db, audit, "未配置企业微信群机器人 Webhook。")
-
-    try:
-        response = httpx.post(
-            webhook,
-            json={
-                "msgtype": "markdown",
-                "markdown": {"content": payload.get("markdown", payload.get("body", ""))},
-            },
-            timeout=15,
-        )
-        response.raise_for_status()
-    except httpx.TimeoutException:
-        return _fail_notification_audit(db, audit, "企业微信群机器人请求超时。")
-    except httpx.HTTPStatusError as exc:
-        status_code = exc.response.status_code if exc.response is not None else "unknown"
-        return _fail_notification_audit(db, audit, f"企业微信群机器人 HTTP 错误：{status_code}")
-    except httpx.RequestError:
-        return _fail_notification_audit(db, audit, "企业微信群机器人网络请求失败。")
-    except Exception:
-        return _fail_notification_audit(db, audit, "企业微信群机器人发送失败。")
-
-    try:
-        response_payload = response.json()
-    except (JSONDecodeError, ValueError):
-        return _fail_notification_audit(db, audit, "企业微信群机器人返回了无法解析的响应。")
-
-    errcode = response_payload.get("errcode")
-    errmsg = str(response_payload.get("errmsg") or "").strip()
-    if errcode != 0:
-        if errmsg:
-            return _fail_notification_audit(db, audit, f"企业微信群机器人返回错误码 {errcode}：{errmsg}")
-        return _fail_notification_audit(db, audit, f"企业微信群机器人返回错误码 {errcode}。")
-
-    audit.status = "delivered"
-    audit.delivered_at = datetime.now(timezone.utc)
-    audit.external_id = f"wecom-{audit.id}"
-    return _finalize_notification_audit(db, audit)
 
 
 def collect_due_jobs(db: Session) -> list[ReminderJob]:
@@ -194,7 +106,6 @@ def build_notification_payload(schedule: Schedule) -> dict[str, str]:
 
 
 def dispatch_notification_core(*, db: Session, reminder_job_id: int) -> dict:
-    settings = get_settings()
     job = db.get(ReminderJob, reminder_job_id)
     if not job:
         raise ValueError("提醒任务不存在。")
@@ -202,29 +113,36 @@ def dispatch_notification_core(*, db: Session, reminder_job_id: int) -> dict:
     if not schedule:
         raise ValueError("提醒任务关联的日程不存在。")
 
-    recipient = settings.notification_to_email if job.channel == "email" else "企业微信群机器人"
-    provider = "smtp" if job.channel == "email" else "wecom_robot"
     payload = build_notification_payload(schedule)
     audit = queue_notification_audit(
         db,
         user_id=schedule.user_id,
         reminder_job_id=job.id,
-        channel=job.channel,
-        provider=provider,
+        channel="system",
+        provider="system",
         subject=f"Synora 提醒：{schedule.title}",
-        recipient=recipient,
+        recipient="system",
         payload=payload,
     )
-    if job.channel == "email":
-        audit = send_email_notification(db, audit.id)
-    else:
-        audit = send_wecom_robot_notification(db, audit.id)
+    # 系统级通知：审计直接标记为已送达（前端轮询消费），FCM 作为增强推送，
+    # 让应用彻底关闭时也能收到。FCM 失败不改变 audit 状态（轮询兜底）。
+    audit.status = "delivered"
+    audit.delivered_at = datetime.now(timezone.utc)
+    audit.external_id = f"system-{audit.id}"
+    _finalize_notification_audit(db, audit)
 
-    if audit.status == "delivered":
-        mark_job_status(db, job, "sent")
-    else:
-        mark_job_status(db, job, "failed", audit.error_message)
+    push_error = send_system_push(
+        db,
+        user_id=schedule.user_id,
+        title=payload.get("title", ""),
+        body=payload.get("body", ""),
+        audit_id=audit.id,
+    )
+    if push_error:
+        audit.error_message = push_error
+        _finalize_notification_audit(db, audit)
 
+    mark_job_status(db, job, "sent")
     return {
         "delivery_id": audit.id,
         "status": audit.status,

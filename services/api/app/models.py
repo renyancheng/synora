@@ -19,7 +19,6 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(120))
     password_hash: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    wecom_robot_webhook: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     sessions: Mapped[list["SessionState"]] = relationship(back_populates="user")
@@ -39,6 +38,10 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
         uselist=False,
+    )
+    device_tokens: Mapped[list["DeviceToken"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
     )
 
 
@@ -313,7 +316,25 @@ class ConversationPendingState(Base):
     attachment_ids_json: Mapped[list[int]] = mapped_column(JSON, default=list)
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     meta_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # 主动推进：cross_day 意图的目标唤醒时间；intent_type 标记意图类型（draft_followup | cross_day）。
+    planned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    intent_type: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
     conversation: Mapped["ConversationThread"] = relationship(back_populates="pending_state")
+
+
+class DeviceToken(Base):
+    """用户设备的推送令牌（FCM）。同一用户可注册多台设备。"""
+
+    __tablename__ = "device_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    token: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    platform: Mapped[str] = mapped_column(String(40), default="unknown")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+    user: Mapped["User"] = relationship(back_populates="device_tokens")

@@ -21,42 +21,44 @@ from app.schemas.conversation import ConversationActionRequest, ConversationSend
 from app.schemas.schedule import ScheduleEventDraft
 
 
-class _FakeGeneralChatAgent:
-    async def astream_events(self, _payload, version="v2"):
-        assert version == "v2"
-        yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="好的，")}}
-        yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="我来帮你一起整理。")}}
-        yield {
-            "event": "on_chain_end",
-            "data": {"output": {"messages": [SimpleNamespace(content="好的，我来帮你一起整理。")]}},
-        }
+def _fake_ainvoke_structured(settings, **kwargs):
+    """图路径 mock：plan/reflect 的结构化调用按 operation 返回固定结果。"""
+    operation = kwargs.get("operation")
+    if operation == "agent_plan":
+        return llm.PlanResult(plan="回答用户")
+    if operation == "agent_reflect":
+        return llm.ReflectDecision(is_complete=True, rationale="信息已充分")
+    raise AssertionError(f"unexpected ainvoke_structured operation: {operation}")
 
 
-class _FakeToolOnlyGeneralChatAgent:
-    async def astream_events(self, _payload, version="v2"):
-        assert version == "v2"
-        yield {
-            "event": "on_chain_end",
-            "data": {"output": {"messages": [object()]}},
-        }
+class _FakeStreamingChatModel:
+    """手动 tool-call 循环的流式模型：bind_tools 直通，astream 产 AIMessageChunk。"""
 
+    def __init__(self, text: str = "", tool_calls: list | None = None, capture: list | None = None) -> None:
+        self._text = text
+        self._tool_calls = tool_calls or []
+        self.capture = capture
 
-class _CapturingGeneralChatAgent:
-    def __init__(self) -> None:
-        self.payloads: list[dict] = []
+    def bind_tools(self, tools):
+        return self
 
-    async def astream_events(self, payload, version="v2"):
-        assert version == "v2"
-        self.payloads.append(payload)
-        yield {
-            "event": "on_chain_end",
-            "data": {"output": {"messages": [SimpleNamespace(content="我已经结合历史上下文整理好了。")]}}
-        }
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        if self.capture is not None:
+            self.capture.append(messages)
+        if self._text:
+            yield AIMessageChunk(content=self._text)
+        for tc in self._tool_calls:
+            yield AIMessageChunk(content="", tool_calls=[tc])
 
 
 class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        # 测试强制 sqlite :memory: checkpointer，隔离 dev postgres checkpoint
+        self._prev_ckpt_backend = get_settings().langgraph_checkpoint_backend
         self._prev_ckpt_path = get_settings().langgraph_checkpoint_sqlite_path
+        get_settings().langgraph_checkpoint_backend = "sqlite"
         get_settings().langgraph_checkpoint_sqlite_path = ":memory:"
         checkpointer_module.reset_checkpointer()
         build_graph.cache_clear()
@@ -77,6 +79,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
+        get_settings().langgraph_checkpoint_backend = self._prev_ckpt_backend
         get_settings().langgraph_checkpoint_sqlite_path = self._prev_ckpt_path
         checkpointer_module.reset_checkpointer()
         build_graph.cache_clear()
@@ -98,16 +101,20 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
-    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeGeneralChatAgent())
+    @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的，我来帮你一起整理。"))
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学安排")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
     async def test_send_general_chat_message(
         self,
+        _extract_mock,
         memory_mock,
         _intent_mock,
         _title_mock,
-        _agent_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
         _tools_mock,
         write_memory_mock,
     ) -> None:
@@ -131,19 +138,35 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.get(type(thread), thread.id).title, "教学安排")
         self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "好的，我来帮你一起整理。")
         self.assertEqual(write_memory_mock.call_count, 0)
+        # 图路径全量显式化：plan→act→observe→reflect 四步落库为 reasoning_step 卡片
+        step_snapshots = [
+            item["data"]["message"]
+            for item in events
+            if item["event"] == "card_snapshot" and item["data"]["message"]["message_type"] == "reasoning_step"
+        ]
+        self.assertEqual(len(step_snapshots), 1)
+        steps = step_snapshots[0]["structured_payload"]["steps"]
+        self.assertEqual([s["step_type"] for s in steps], ["plan", "act", "observe", "reflect"])
+        self.assertTrue(all(s["status"] == "completed" for s in steps))
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.create_chat_model")
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="历史问答")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
     async def test_general_chat_includes_semantic_conversation_history_lines(
         self,
+        _extract_mock,
         history_mock,
         memory_mock,
         _intent_mock,
         _title_mock,
+        _ainvoke_mock,
+        chat_model_mock,
         _tools_mock,
         _write_memory_mock,
     ) -> None:
@@ -152,34 +175,35 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             "用户：上周已经确定答辩地点在信息楼 202",
             "助手：你之前提到答辩安排在周三下午",
         ]
-        agent = _CapturingGeneralChatAgent()
+        captured: list[list] = []
+        chat_model_mock.return_value = _FakeStreamingChatModel(text="我已经结合历史上下文整理好了。", capture=captured)
         thread = create_conversation(self.db, self.user.id)
-        with patch("app.agent.llm.build_general_chat_agent", return_value=agent):
-            _, _, _, agent_run = queue_message(
-                self.db,
-                self.user.id,
-                thread.id,
-                ConversationSendMessageRequest(text_content="那地点还是之前那个吗"),
-            )
-            _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="那地点还是之前那个吗"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
-        self.assertTrue(agent.payloads)
-        messages = agent.payloads[0]["messages"]
+        self.assertTrue(captured)
+        messages = captured[0]
         final_prompt = llm.extract_message_text(messages[-1])
         self.assertIn("同一会话较早相关历史：", final_prompt)
         self.assertIn("信息楼 202", final_prompt)
         self.assertIn("当前输入：\n那地点还是之前那个吗", final_prompt)
 
     async def test_stream_returns_run_failed_when_llm_not_configured(self) -> None:
-        thread = create_conversation(self.db, self.user.id)
-        _, _, assistant_message, agent_run = queue_message(
-            self.db,
-            self.user.id,
-            thread.id,
-            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排"),
-        )
+        with patch.object(get_settings(), "llm_api_key", ""):
+            thread = create_conversation(self.db, self.user.id)
+            _, _, assistant_message, agent_run = queue_message(
+                self.db,
+                self.user.id,
+                thread.id,
+                ConversationSendMessageRequest(text_content="你好，帮我看看今天安排"),
+            )
 
-        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+            events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
         self.assertEqual(events[0]["event"], "run_started")
         self.assertEqual(events[-1]["event"], "run_failed")
@@ -191,16 +215,20 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
-    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeToolOnlyGeneralChatAgent())
+    @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel())
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="测试聊天")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
     async def test_general_chat_does_not_leak_langchain_internal_repr(
         self,
+        _extract_mock,
         memory_mock,
         _intent_mock,
         _title_mock,
-        _agent_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
         _tools_mock,
         _write_memory_mock,
     ) -> None:
@@ -412,18 +440,22 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
     @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
-    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeGeneralChatAgent())
+    @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的，我来帮你一起整理。"))
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学安排")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.upsert_message")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
     async def test_finalize_run_upserts_assistant_text_to_history_index(
         self,
+        _extract_mock,
         upsert_mock,
         memory_mock,
         _intent_mock,
         _title_mock,
-        _agent_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
         _tools_mock,
         _write_memory_mock,
     ) -> None:
@@ -526,7 +558,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                 end_at=datetime.fromisoformat("2026-05-24T08:00:00+00:00"),
                 time_zone="Asia/Shanghai",
             ),
-            [SimpleNamespace(channel="email"), SimpleNamespace(channel="wecom_robot")],
+            [SimpleNamespace(channel="system")],
         )
         thread = create_conversation(self.db, self.user.id)
         _, _, _, agent_run = queue_message(
@@ -632,7 +664,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(schedule)
         jobs = self.db.scalars(select(ReminderJob).where(ReminderJob.schedule_id == schedule.id).order_by(ReminderJob.id.asc())).all()
         self.assertGreaterEqual(len(jobs), 1)
-        self.assertEqual(jobs[0].channel, "email")
+        self.assertEqual(jobs[0].channel, "system")
         refreshed_approval = self.db.get(ApprovalRequest, approval.id)
         self.assertIsNotNone(refreshed_approval)
         self.assertEqual(refreshed_approval.status, "confirmed")
@@ -777,7 +809,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                 time_zone="Asia/Shanghai",
                 reminder_preset="previous_day_1700",
             ),
-            [SimpleNamespace(channel="email")],
+            [SimpleNamespace(channel="system")],
         )
         thread = create_conversation(self.db, self.user.id)
         _, _, _, agent_run = queue_message(
@@ -970,7 +1002,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
         reminder = ReminderJob(
             schedule_id=schedule.id,
-            channel="email",
+            channel="system",
             scheduled_for=datetime.now(timezone.utc),
             status="pending",
         )
@@ -981,12 +1013,12 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         audit = NotificationAudit(
             user_id=self.user.id,
             reminder_job_id=reminder.id,
-            channel="email",
-            recipient="han.teacher@example.com",
+            channel="system",
+            recipient="system",
             subject="提醒",
             payload_json="{}",
             status="queued",
-            provider="smtp",
+            provider="system",
         )
         self.db.add(audit)
         self.db.commit()
@@ -1668,16 +1700,20 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("教学例会", second_tool_payload["context"]["previous_draft_summary"])
 
     @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeGeneralChatAgent())
+    @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的"))
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="测试聊天")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
     async def test_general_chat_excludes_intake_write_tools(
         self,
+        _extract_mock,
         memory_mock,
         _intent_mock,
         _title_mock,
-        _agent_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
         _write_memory_mock,
     ) -> None:
         memory_mock.return_value = SimpleNamespace(summary="", items=[])
@@ -1695,8 +1731,11 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         ) as tools_mock:
             _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
+        # 无工具路径：仅 act 取工具表（observe 无 tool_calls 时跳过）
         self.assertEqual(tools_mock.await_count, 1)
-        self.assertEqual(tools_mock.await_args.kwargs["exclude_names"], GENERAL_CHAT_EXCLUDED_TOOLS)
+        self.assertTrue(
+            all(call.kwargs["exclude_names"] == GENERAL_CHAT_EXCLUDED_TOOLS for call in tools_mock.await_args_list)
+        )
 
 
 if __name__ == "__main__":

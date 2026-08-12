@@ -19,6 +19,15 @@ def _ensure_column(table_name: str, column_name: str, ddl: str) -> None:
         connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
 
 
+def _drop_column(table_name: str, column_name: str) -> None:
+    inspector = inspect(engine)
+    existing = {column["name"] for column in inspector.get_columns(table_name)}
+    if column_name not in existing:
+        return
+    with engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE {table_name} DROP COLUMN {column_name}"))
+
+
 def _reconcile_legacy_schema() -> None:
     Base.metadata.create_all(bind=engine)
     if not str(engine.url).startswith("sqlite"):
@@ -41,7 +50,8 @@ def _reconcile_legacy_schema() -> None:
     _ensure_column("quick_notes", "source_attachment_ids", "JSON NOT NULL DEFAULT '[]'")
     _ensure_column("quick_notes", "topic_tags_json", "JSON NOT NULL DEFAULT '[]'")
     _ensure_column("quick_notes", "source_type", "VARCHAR(40) NOT NULL DEFAULT 'attachment'")
-    _ensure_column("users", "wecom_robot_webhook", "TEXT")
+    # 通知通道已收敛为仅 system，移除历史 wecom 配置列。
+    _drop_column("users", "wecom_robot_webhook")
 
     _ensure_column("approval_requests", "normalized_payload_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column("approval_requests", "evidence_digest_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -53,6 +63,8 @@ def _reconcile_legacy_schema() -> None:
     _ensure_column("conversation_messages", "status", "VARCHAR(30) NOT NULL DEFAULT 'completed'")
     _ensure_column("conversation_messages", "action_group_id", "VARCHAR(64)")
     _ensure_column("conversation_messages", "revision", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column("conversation_pending_states", "planned_at", "TIMESTAMP NULL")
+    _ensure_column("conversation_pending_states", "intent_type", "VARCHAR(40)")
     _ensure_column("schedules", "reminder_preset", "VARCHAR(40) NOT NULL DEFAULT 'previous_day_1700'")
 
     _ensure_column("agent_runs", "conversation_id", "INTEGER")
@@ -82,6 +94,15 @@ def _reconcile_legacy_schema() -> None:
         db.commit()
     finally:
         db.close()
+
+    # 一次性清理：历史 wecom/email 提醒 job 标记 cancelled，避免下线后复活。
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE reminder_jobs SET status='cancelled' "
+                "WHERE channel IN ('wecom_robot', 'email')"
+            )
+        )
 
 
 def init_db() -> None:

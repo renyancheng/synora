@@ -30,16 +30,14 @@ class Settings(BaseSettings):
     bootstrap_password: str = "SynoraMVP123!"
     bootstrap_display_name: str = "韩老师"
 
-    smtp_host: str = "mailhog"
-    smtp_port: int = 1025
-    smtp_username: str = ""
-    smtp_password: str = ""
-    smtp_use_tls: bool = False
-    notification_from_email: str = "synora@example.com"
-    notification_to_email: str = "han.teacher@example.com"
-    wecom_robot_webhook: str = ""
+    # Firebase（FCM）可选：指向 service account JSON；为空时 FCM 推送静默跳过。
+    firebase_service_account_path: str = ""
 
     agent_backend: str = "langgraph"  # "langgraph" | "legacy"
+    agent_max_loop_iterations: int = 4
+    pending_draft_timeout_hours: int = 6
+    pending_nudge_max: int = 2
+    pending_nudge_cooldown_hours: int = 24
     mcp_servers: list[McpServerSettings] = []  # SYNORA_MCP_SERVERS JSON 数组
     langgraph_checkpoint_backend: str = "sqlite"  # "sqlite" | "postgres"
     langgraph_checkpoint_db_url: str = ""

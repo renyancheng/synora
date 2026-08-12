@@ -1,21 +1,30 @@
-import json
 import unittest
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
-import httpx
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import Base
-from app.domains.notification.service import queue_notification_audit, send_wecom_robot_notification
-from app.models import User
+from app.domains.notification.service import (
+    collect_due_jobs,
+    dispatch_notification_core,
+    get_notification_status_core,
+    queue_notification_audit,
+)
+from app.models import NotificationAudit, ReminderJob, Schedule, User
 
 
 class NotificationServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = create_engine("sqlite:///:memory:", future=True)
-        self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
+        self.session_factory = sessionmaker(
+            bind=self.engine,
+            autoflush=False,
+            autocommit=False,
+            expire_on_commit=False,
+            class_=Session,
+        )
         Base.metadata.create_all(self.engine)
         self.db = self.session_factory()
         self.user = User(
@@ -27,120 +36,97 @@ class NotificationServiceTests(unittest.TestCase):
         self.db.add(self.user)
         self.db.commit()
         self.db.refresh(self.user)
+        self.schedule = Schedule(
+            user_id=self.user.id,
+            title="教学例会",
+            details="讨论课程安排",
+            source_text="明天下午三点在学院会议室开教学例会",
+            start_at=datetime(2026, 5, 24, 7, 0, tzinfo=timezone.utc),
+            end_at=datetime(2026, 5, 24, 8, 0, tzinfo=timezone.utc),
+            time_zone="Asia/Shanghai",
+        )
+        self.db.add(self.schedule)
+        self.db.commit()
+        self.db.refresh(self.schedule)
 
     def tearDown(self) -> None:
         self.db.close()
         self.engine.dispose()
 
-    def _create_audit(self):
-        return queue_notification_audit(
+    def _create_job(self, channel: str = "system") -> ReminderJob:
+        job = ReminderJob(
+            schedule_id=self.schedule.id,
+            channel=channel,
+            scheduled_for=datetime.now(timezone.utc),
+        )
+        self.db.add(job)
+        self.db.commit()
+        self.db.refresh(job)
+        return job
+
+    @patch("app.domains.notification.service.send_system_push", return_value=None)
+    def test_dispatch_system_channel_marks_delivered_and_job_sent(self, push_mock) -> None:
+        job = self._create_job()
+
+        result = dispatch_notification_core(db=self.db, reminder_job_id=job.id)
+
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(result["provider"], "system")
+        audit = self.db.get(NotificationAudit, result["delivery_id"])
+        self.assertEqual(audit.channel, "system")
+        self.assertEqual(audit.status, "delivered")
+        self.assertIsNotNone(audit.delivered_at)
+        self.assertEqual(audit.external_id, f"system-{audit.id}")
+        self.db.refresh(job)
+        self.assertEqual(job.status, "sent")
+        push_mock.assert_called_once()
+
+    @patch("app.domains.notification.service.send_system_push", return_value="token 123…: Unregistered")
+    def test_dispatch_records_push_error_but_keeps_delivered(self, _push_mock) -> None:
+        # FCM 失败不应改变 system 审计状态：前端轮询仍是兜底通道。
+        job = self._create_job()
+
+        result = dispatch_notification_core(db=self.db, reminder_job_id=job.id)
+
+        self.assertEqual(result["status"], "delivered")
+        audit = self.db.get(NotificationAudit, result["delivery_id"])
+        self.assertEqual(audit.error_message, "token 123…: Unregistered")
+        self.assertEqual(audit.status, "delivered")
+        self.db.refresh(job)
+        self.assertEqual(job.status, "sent")
+
+    @patch("app.domains.notification.service.send_system_push", return_value=None)
+    def test_collect_due_jobs_finds_past_pending_job(self, _push_mock) -> None:
+        job = self._create_job()
+        job.scheduled_for = datetime.now(timezone.utc) - timedelta(seconds=5)
+        self.db.commit()
+
+        jobs = collect_due_jobs(self.db)
+
+        self.assertEqual([item.id for item in jobs], [job.id])
+
+    @patch("app.domains.notification.service.send_system_push", return_value=None)
+    def test_get_notification_status_after_dispatch(self, _push_mock) -> None:
+        job = self._create_job()
+
+        result = dispatch_notification_core(db=self.db, reminder_job_id=job.id)
+        status = get_notification_status_core(db=self.db, delivery_id=result["delivery_id"])
+
+        self.assertEqual(status["channel_status"], "delivered")
+        self.assertEqual(status["retry_info"]["retry_count"], 0)
+
+    @patch("app.domains.notification.fcm._ensure_firebase", return_value=False)
+    def test_send_system_push_skips_when_firebase_disabled(self, _ensure_mock) -> None:
+        from app.domains.notification.fcm import send_system_push
+
+        error = send_system_push(
             self.db,
             user_id=self.user.id,
-            reminder_job_id=None,
-            channel="wecom_robot",
-            provider="wecom_robot",
-            subject="Synora 提醒：教学例会",
-            recipient="企业微信群机器人",
-            payload={"markdown": "**Synora 日程提醒**", "body": "测试提醒"},
+            title="t",
+            body="b",
+            audit_id=1,
         )
-
-    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook=""))
-    def test_wecom_notification_fails_when_webhook_missing(self, _settings_mock) -> None:
-        audit = self._create_audit()
-
-        updated = send_wecom_robot_notification(self.db, audit.id)
-
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.retry_count, 1)
-        self.assertEqual(updated.error_message, "未配置企业微信群机器人 Webhook。")
-
-    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://example.com/webhook"))
-    @patch("app.domains.notification.service.httpx.post")
-    def test_wecom_notification_marks_delivered_when_errcode_zero(self, post_mock: Mock, _settings_mock) -> None:
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {"errcode": 0, "errmsg": "ok"}
-        post_mock.return_value = response
-        audit = self._create_audit()
-
-        updated = send_wecom_robot_notification(self.db, audit.id)
-
-        self.assertEqual(updated.status, "delivered")
-        self.assertEqual(updated.retry_count, 0)
-        self.assertIsNotNone(updated.delivered_at)
-        self.assertEqual(updated.external_id, f"wecom-{audit.id}")
-        self.assertEqual(post_mock.call_args.args[0], "https://example.com/webhook")
-
-    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://global.example.com/webhook"))
-    @patch("app.domains.notification.service.httpx.post")
-    def test_wecom_notification_prefers_user_webhook(self, post_mock: Mock, _settings_mock) -> None:
-        self.user.wecom_robot_webhook = "https://user.example.com/webhook"
-        self.db.commit()
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {"errcode": 0, "errmsg": "ok"}
-        post_mock.return_value = response
-        audit = self._create_audit()
-
-        updated = send_wecom_robot_notification(self.db, audit.id)
-
-        self.assertEqual(updated.status, "delivered")
-        self.assertEqual(post_mock.call_args.args[0], "https://user.example.com/webhook")
-
-    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://example.com/webhook"))
-    @patch("app.domains.notification.service.httpx.post")
-    def test_wecom_notification_fails_when_errcode_non_zero(self, post_mock: Mock, _settings_mock) -> None:
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {"errcode": 93000, "errmsg": "invalid webhook url"}
-        post_mock.return_value = response
-        audit = self._create_audit()
-
-        updated = send_wecom_robot_notification(self.db, audit.id)
-
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.retry_count, 1)
-        self.assertEqual(updated.error_message, "企业微信群机器人返回错误码 93000：invalid webhook url")
-
-    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://example.com/webhook"))
-    @patch("app.domains.notification.service.httpx.post", side_effect=httpx.TimeoutException("timed out"))
-    def test_wecom_notification_fails_on_timeout(self, _post_mock, _settings_mock) -> None:
-        audit = self._create_audit()
-
-        updated = send_wecom_robot_notification(self.db, audit.id)
-
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.retry_count, 1)
-        self.assertEqual(updated.error_message, "企业微信群机器人请求超时。")
-
-    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://example.com/webhook"))
-    @patch(
-        "app.domains.notification.service.httpx.post",
-        side_effect=httpx.RequestError("boom", request=httpx.Request("POST", "https://example.com/webhook")),
-    )
-    def test_wecom_notification_fails_on_network_error(self, _post_mock, _settings_mock) -> None:
-        audit = self._create_audit()
-
-        updated = send_wecom_robot_notification(self.db, audit.id)
-
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.retry_count, 1)
-        self.assertEqual(updated.error_message, "企业微信群机器人网络请求失败。")
-
-    @patch("app.domains.notification.service.get_settings", return_value=SimpleNamespace(wecom_robot_webhook="https://example.com/webhook"))
-    @patch("app.domains.notification.service.httpx.post")
-    def test_wecom_notification_fails_on_invalid_json(self, post_mock: Mock, _settings_mock) -> None:
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
-        post_mock.return_value = response
-        audit = self._create_audit()
-
-        updated = send_wecom_robot_notification(self.db, audit.id)
-
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.retry_count, 1)
-        self.assertEqual(updated.error_message, "企业微信群机器人返回了无法解析的响应。")
+        self.assertIsNone(error)
 
 
 if __name__ == "__main__":

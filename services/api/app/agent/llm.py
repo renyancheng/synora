@@ -93,6 +93,20 @@ class ConversationTitleResult(BaseModel):
     title: str
 
 
+class PlanResult(BaseModel):
+    """agent 当前回合的行动计划（一句话，面向用户可读）。"""
+
+    plan: str
+
+
+class ReflectDecision(BaseModel):
+    """判断当前工具链是否已完成、是否还需要继续行动。"""
+
+    is_complete: bool
+    rationale: str = ""
+    follow_up_prompt: str | None = None
+
+
 def require_api_key(settings: Settings, *, operation: str) -> None:
     if settings.llm_api_key.strip():
         return

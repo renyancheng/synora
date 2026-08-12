@@ -9,7 +9,7 @@ FastAPI 后端负责：
 - 日程草稿解析、冲突检测、审批创建
 - 快速笔记预览与保存
 - Celery 提醒调度
-- SMTP / 企业微信机器人通知审计
+- 系统通知：FCM 推送 + 前端轮询、通知审计
 
 ## 本地开发
 
@@ -48,8 +48,23 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 对话编排基于 LangGraph `StateGraph`（`app/agent/graph.py`）：意图路由 → 分支节点
 （general_chat / schedule_intake / quick_note_intake / tool_selection_reminder）→ 统一 finalize。
-SSE 事件契约（`run_started / message_delta / tool_call_* / message_completed / card_snapshot / approval_required / run_completed`）
-与历史实现逐字节兼容。
+general_chat 分支走显式的 **plan → act → observe → reflect** 循环（受 `max_iterations` 上限约束，
+reflect 判定完成或达到上限后进入 finalize）；intake 分支保持原卡片流程不进循环。
+
+SSE 事件契约（`run_started / reasoning_step / message_delta / tool_call_* / message_completed / card_snapshot / approval_required / run_completed`）
+与历史实现逐字节兼容，`reasoning_step` 为新增的推理轨迹事件。
+
+## 主动推进（pending）
+
+挂起会话支持两种主动提醒（`app/tasks/pending.py`，Celery beat）：
+
+- **草稿超时追问**：`needs_input` / `approval_pending` 挂起超 `SYNORA_PENDING_DRAFT_TIMEOUT_HOURS`（默认 6h）后，
+  LLM 生成口语化追问 → 追加 assistant 消息 → 写 system 通知。受 `SYNORA_PENDING_NUDGE_MAX`（默认 2）与
+  `SYNORA_PENDING_NUDGE_COOLDOWN_HOURS`（默认 24h）防打扰。
+- **跨天意图唤醒**：通过 `mark_cross_day_intent` 将挂起标记为 `intent_type=cross_day` + `planned_at`，
+  到期后 LLM 主动跟进一次（`meta_json.intent_triggered` 去重，单次触发）。
+
+用户确认/取消走 `_clear_pending_state` 删除行。
 
 可通过环境变量回滚到旧编排：
 

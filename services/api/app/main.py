@@ -9,7 +9,7 @@ from app.bootstrap import init_db
 from app.config import get_settings
 from app.mcp import create_mcp_exact_route, create_mcp_http_app, get_mcp_server
 from app.mcp.server import get_mcp_mount_path
-from app.routers import agent_sessions, approvals, attachments, auth, conversations, health, memory, notifications, quick_notes, schedule, users
+from app.routers import agent_sessions, approvals, attachments, auth, conversations, devices, health, memory, notifications, quick_notes, schedule, users
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -54,5 +54,6 @@ app.include_router(schedule.router)
 app.include_router(quick_notes.router)
 app.include_router(approvals.router)
 app.include_router(notifications.router)
+app.include_router(devices.router)
 app.router.routes.append(create_mcp_exact_route())
 app.mount(f"{get_mcp_mount_path()}/", create_mcp_http_app())

@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,6 +27,7 @@ def list_notifications(
             provider=row.provider,
             recipient=row.recipient,
             subject=row.subject,
+            body=json.loads(row.payload_json).get("body"),
             status=row.status,
             error_message=row.error_message,
             retry_count=row.retry_count,
