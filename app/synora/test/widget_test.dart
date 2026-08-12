@@ -74,13 +74,10 @@ class FakeApiClient extends ApiClient {
   }
 
   @override
-  Future<UserPreferences> fetchUserPreferences() async =>
-      UserPreferences(wecomRobotWebhook: null);
+  Future<UserPreferences> fetchUserPreferences() async => UserPreferences();
 
   @override
-  Future<UserPreferences> updateUserPreferences({
-    required String? wecomRobotWebhook,
-  }) async => UserPreferences(wecomRobotWebhook: wecomRobotWebhook);
+  Future<UserPreferences> updateUserPreferences() async => UserPreferences();
 
   @override
   Future<MemoryListResult> fetchMemory() async {
@@ -183,6 +180,7 @@ class FakeLocalSessionStore extends LocalSessionStore {
 AppController buildTestController({
   List<ConversationMessageItem>? conversationMessages,
 }) {
+  // 外部传入的 controller 随 SynoraApp 拆树时一并 dispose（见 app.dart dispose）。
   return AppController(
     apiClient: FakeApiClient(conversationMessages: conversationMessages),
     sessionStore: FakeLocalSessionStore(),

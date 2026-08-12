@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    // Google Services：android/app/google-services.json -> Firebase 初始化资源。
+    id("com.google.gms.google-services")
 }
 
 val splitPerAbi = (project.findProperty("split-per-abi") as? String)?.toBoolean() == true
@@ -14,6 +16,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // flutter_local_notifications v19 依赖 java.time 等新 API，需要 core library desugaring。
+        isCoreLibraryDesugaringEnabled = true
     }
 
     defaultConfig {
@@ -45,6 +49,10 @@ kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }
 
 flutter {

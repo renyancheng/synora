@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firebase 配置（含 API key），纳入版本控制有泄露风险；用 CI secret 注入
+# （google-services 插件需要该文件存在于 android/app/ 下）。
+android/app/google-services.json

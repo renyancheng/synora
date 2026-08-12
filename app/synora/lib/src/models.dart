@@ -133,22 +133,14 @@ class CurrentSessionInfo {
 }
 
 class UserPreferences {
-  UserPreferences({required this.wecomRobotWebhook});
+  UserPreferences();
 
-  final String? wecomRobotWebhook;
-
+  // 通知通道已收敛为仅 system，无用户可配置的通知偏好。
   factory UserPreferences.fromJson(Map<String, dynamic> json) {
-    return UserPreferences(
-      wecomRobotWebhook:
-          (json['wecom_robot_webhook'] as String?)?.trim().isEmpty == true
-          ? null
-          : json['wecom_robot_webhook'] as String?,
-    );
+    return UserPreferences();
   }
 
-  Map<String, dynamic> toJson() => <String, dynamic>{
-    'wecom_robot_webhook': wecomRobotWebhook,
-  };
+  Map<String, dynamic> toJson() => <String, dynamic>{};
 }
 
 class SessionInfo {
@@ -676,6 +668,7 @@ class NotificationItem {
     required this.status,
     required this.retryCount,
     required this.createdAt,
+    this.body,
     this.errorMessage,
     this.deliveredAt,
   });
@@ -685,6 +678,7 @@ class NotificationItem {
   final String provider;
   final String recipient;
   final String subject;
+  final String? body;
   final String status;
   final int retryCount;
   final String? errorMessage;
@@ -698,6 +692,7 @@ class NotificationItem {
       provider: json['provider'] as String? ?? '',
       recipient: json['recipient'] as String,
       subject: json['subject'] as String,
+      body: json['body'] as String?,
       status: json['status'] as String,
       retryCount: json['retry_count'] as int? ?? 0,
       errorMessage: json['error_message'] as String?,
@@ -903,6 +898,66 @@ class ConversationMessageItem {
       revision: revision ?? this.revision,
       createdAt: createdAt ?? this.createdAt,
       localAttachments: localAttachments ?? this.localAttachments,
+    );
+  }
+}
+
+/// agent 推理轨迹中的单个步骤（plan / act / observe / reflect）。
+class ReasoningStepItem {
+  ReasoningStepItem({
+    required this.stepType,
+    required this.label,
+    required this.content,
+    required this.status,
+    required this.iteration,
+    required this.seq,
+  });
+
+  final String stepType;
+  final String label;
+  final String content;
+  final String status; // running | completed | failed
+  final int iteration;
+  final int seq;
+
+  factory ReasoningStepItem.fromJson(Map<String, dynamic> json) {
+    return ReasoningStepItem(
+      stepType: json['step_type'] as String? ?? '',
+      label: json['label'] as String? ?? '',
+      content: json['content'] as String? ?? '',
+      status: json['status'] as String? ?? 'completed',
+      iteration: json['iteration'] as int? ?? 0,
+      seq: json['seq'] as int? ?? 0,
+    );
+  }
+
+  ReasoningStepItem copyWith({String? status, String? content}) {
+    return ReasoningStepItem(
+      stepType: stepType,
+      label: label,
+      content: content ?? this.content,
+      status: status ?? this.status,
+      iteration: iteration,
+      seq: seq,
+    );
+  }
+}
+
+/// reasoning_step 消息的持久化载荷（可折叠卡片的数据源）。
+class ReasoningTracePayload {
+  ReasoningTracePayload({required this.steps, this.summary});
+
+  final List<ReasoningStepItem> steps;
+  final String? summary;
+
+  factory ReasoningTracePayload.fromStructured(Map<String, dynamic> structured) {
+    final raw = structured['steps'] as List<dynamic>? ?? <dynamic>[];
+    return ReasoningTracePayload(
+      steps: raw
+          .whereType<Map<String, dynamic>>()
+          .map(ReasoningStepItem.fromJson)
+          .toList(),
+      summary: structured['summary'] as String?,
     );
   }
 }

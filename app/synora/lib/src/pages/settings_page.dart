@@ -52,55 +52,6 @@ class SettingsPage extends StatelessWidget {
     }
   }
 
-  Future<void> _editWebhook(BuildContext context) async {
-    final textController = TextEditingController(
-      text: controller.userPreferences.wecomRobotWebhook ?? '',
-    );
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('企业微信机器人 Webhook'),
-        content: TextField(
-          controller: textController,
-          minLines: 2,
-          maxLines: 4,
-          decoration: const InputDecoration(
-            hintText: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...',
-          ),
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text(AppStrings.cancel),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(textController.text),
-            child: const Text(AppStrings.saveChanges),
-          ),
-        ],
-      ),
-    );
-    if (result == null) {
-      return;
-    }
-    try {
-      await controller.updateUserPreferences(
-        wecomRobotWebhook: result.trim().isEmpty ? null : result.trim(),
-      );
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text(AppStrings.saveSuccess)),
-        );
-      }
-    } catch (error) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(error.toString())),
-        );
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final user = controller.session?.user;
@@ -140,19 +91,6 @@ class SettingsPage extends StatelessWidget {
                   title: const Text(AppStrings.memoryManagement),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => _openMemory(context),
-                ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.link_outlined),
-                  title: const Text('企业微信机器人 Webhook'),
-                  subtitle: Text(
-                    controller.userPreferences.wecomRobotWebhook?.trim().isNotEmpty == true
-                        ? controller.userPreferences.wecomRobotWebhook!
-                        : AppStrings.noContent,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  onTap: () => _editWebhook(context),
                 ),
                 const Divider(height: 1),
                 ListTile(

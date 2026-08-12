@@ -414,6 +414,9 @@ class _ChatHomePageState extends State<ChatHomePage> {
         final sending = widget.controller.isMessageSending;
         final composerLocked = sending;
         final statusLabel = widget.controller.streamStatusLabel;
+        final liveSteps = widget.controller.liveReasoningStepsFor(
+          widget.controller.activeConversationId,
+        );
 
         return Scaffold(
           appBar: AppBar(
@@ -541,8 +544,13 @@ class _ChatHomePageState extends State<ChatHomePage> {
                     : ListView.builder(
                         controller: _scrollController,
                         padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                        itemCount: messages.length,
+                        itemCount:
+                            messages.length + (liveSteps.isNotEmpty ? 1 : 0),
                         itemBuilder: (context, index) {
+                          if (liveSteps.isNotEmpty &&
+                              index == messages.length) {
+                            return _LiveReasoningCard(steps: liveSteps);
+                          }
                           final message = messages[index];
                           return _ConversationMessageView(
                             message: message,
@@ -1134,9 +1142,178 @@ class _StructuredMessageCard extends StatelessWidget {
         return _ConflictCard(message: message);
       case 'quick_note_preview_card':
         return _QuickNotePreviewCard(message: message, onAction: onAction);
+      case 'reasoning_step':
+        return _ReasoningTraceCard(message: message);
       default:
         return const SizedBox.shrink();
     }
+  }
+}
+
+/// 已落库的推理轨迹卡片（可折叠）。
+class _ReasoningTraceCard extends StatelessWidget {
+  const _ReasoningTraceCard({required this.message});
+
+  final ConversationMessageItem message;
+
+  @override
+  Widget build(BuildContext context) {
+    final structured = message.structuredPayload;
+    final payload = ReasoningTracePayload.fromStructured(structured);
+    return _ReasoningStepsList(
+      steps: payload.steps,
+      summary: payload.summary ?? AppStrings.reasoningTraceTitle,
+    );
+  }
+}
+
+/// 实时进行中的推理轨迹卡片（发送中尾部展示）。
+class _LiveReasoningCard extends StatelessWidget {
+  const _LiveReasoningCard({required this.steps});
+
+  final List<ReasoningStepItem> steps;
+
+  @override
+  Widget build(BuildContext context) {
+    return _ReasoningStepsList(
+      steps: steps,
+      summary: AppStrings.reasoningTraceRunning,
+    );
+  }
+}
+
+/// 推理步骤列表：实时与持久化共用的可折叠容器。
+class _ReasoningStepsList extends StatelessWidget {
+  const _ReasoningStepsList({required this.steps, required this.summary});
+
+  final List<ReasoningStepItem> steps;
+  final String summary;
+
+  @override
+  Widget build(BuildContext context) {
+    if (steps.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 640),
+        margin: const EdgeInsets.only(bottom: 12),
+        child: Card(
+          margin: EdgeInsets.zero,
+          elevation: 0,
+          color: const Color(0xFFF7FAF9),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: Color(0xFFE2ECE8)),
+          ),
+          child: ExpansionTile(
+            tilePadding: const EdgeInsets.symmetric(horizontal: 14),
+            childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+            leading: const Icon(
+              Icons.psychology_outlined,
+              size: 20,
+              color: Color(0xFF275C52),
+            ),
+            title: Text(
+              summary,
+              style: const TextStyle(fontSize: 13, color: Color(0xFF275C52)),
+            ),
+            children: <Widget>[
+              ...steps.map((step) => _ReasoningStepTile(step: step)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ReasoningStepTile extends StatelessWidget {
+  const _ReasoningStepTile({required this.step});
+
+  final ReasoningStepItem step;
+
+  static String _stepLabel(ReasoningStepItem step) {
+    if (step.label.isNotEmpty) {
+      return step.label;
+    }
+    switch (step.stepType) {
+      case 'plan':
+        return AppStrings.reasoningStepPlan;
+      case 'act':
+        return AppStrings.reasoningStepAct;
+      case 'observe':
+        return AppStrings.reasoningStepObserve;
+      case 'reflect':
+        return AppStrings.reasoningStepReflect;
+      default:
+        return step.stepType;
+    }
+  }
+
+  static IconData _stepIcon(String stepType) {
+    switch (stepType) {
+      case 'plan':
+        return Icons.track_changes;
+      case 'act':
+        return Icons.bolt_outlined;
+      case 'observe':
+        return Icons.visibility_outlined;
+      case 'reflect':
+        return Icons.autorenew;
+      default:
+        return Icons.circle_outlined;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final failed = step.status == 'failed';
+    final running = step.status == 'running';
+    final accent = failed ? const Color(0xFFC25A45) : const Color(0xFF275C52);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(_stepIcon(step.stepType), size: 16, color: accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  _stepLabel(step),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: failed ? accent : const Color(0xFF173C35),
+                  ),
+                ),
+                if (step.content.trim().isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      step.content,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF617B74),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (running)
+            const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+        ],
+      ),
+    );
   }
 }
 

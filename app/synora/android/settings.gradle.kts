@@ -21,6 +21,8 @@ plugins {
     id("dev.flutter.flutter-plugin-loader") version "1.0.0"
     id("com.android.application") version "8.13.2" apply false
     id("org.jetbrains.kotlin.android") version "2.2.21" apply false
+    // Google Services：处理 android/app/google-services.json 生成 Firebase 资源。
+    id("com.google.gms.google-services") version "4.4.2" apply false
 }
 
 include(":app")

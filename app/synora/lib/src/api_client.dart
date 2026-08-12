@@ -81,14 +81,8 @@ class ApiClient {
     return UserPreferences.fromJson(json as Map<String, dynamic>);
   }
 
-  Future<UserPreferences> updateUserPreferences({
-    required String? wecomRobotWebhook,
-  }) async {
-    final json = await _sendJson(
-      'PATCH',
-      '/users/me/preferences',
-      body: <String, dynamic>{'wecom_robot_webhook': wecomRobotWebhook},
-    );
+  Future<UserPreferences> updateUserPreferences() async {
+    final json = await _sendJson('PATCH', '/users/me/preferences');
     return UserPreferences.fromJson(json as Map<String, dynamic>);
   }
 
@@ -171,6 +165,19 @@ class ApiClient {
   Future<List<NotificationItem>> fetchNotifications() async {
     final json = await _sendJson('GET', '/notifications');
     return _asList(json).map(NotificationItem.fromJson).toList();
+  }
+
+  Future<void> registerDeviceToken(String token, String platform) async {
+    await _sendJson('POST', '/devices/register', body: <String, dynamic>{
+      'token': token,
+      'platform': platform,
+    });
+  }
+
+  Future<void> unregisterDeviceToken(String token) async {
+    await _sendJson('POST', '/devices/unregister', body: <String, dynamic>{
+      'token': token,
+    });
   }
 
   Future<MemoryListResult> fetchMemory() async {

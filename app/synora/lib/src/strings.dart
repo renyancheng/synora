@@ -244,10 +244,8 @@ class AppStrings {
 
   static String channelLabel(String channel) {
     switch (channel) {
-      case 'email':
-        return '邮件';
-      case 'wecom_robot':
-        return '企业微信群机器人';
+      case 'system':
+        return '系统通知';
       default:
         return channel;
     }
@@ -278,47 +276,10 @@ class AppStrings {
       return null;
     }
     final message = errorMessage.trim();
-    final lower = message.toLowerCase();
-
-    if (channel == 'wecom_robot') {
-      if (message.contains('未配置企业微信群机器人')) {
-        return '未配置企业微信群机器人，请检查服务端配置。';
-      }
-      if (message.contains('超时') || lower.contains('timed out')) {
-        return '企业微信推送超时，请稍后重试。';
-      }
-      if (message.contains('网络') ||
-          lower.contains('connection') ||
-          lower.contains('network')) {
-        return '企业微信网络请求失败，请检查服务端网络。';
-      }
-      if (message.contains('无法解析') || lower.contains('json')) {
-        return '企业微信返回了异常响应，请稍后重试。';
-      }
-      final match = RegExp(r'(\d{4,6})').firstMatch(message);
-      if (message.contains('错误码') || message.contains('errcode')) {
-        final code = match?.group(1);
-        return code == null
-            ? '企业微信群机器人拒绝了本次消息。'
-            : '企业微信群机器人拒绝了本次消息（错误码 $code）。';
-      }
-      return '企业微信推送失败，请稍后重试。';
+    if (message.length > 120) {
+      return '${message.substring(0, 120)}…';
     }
-
-    if (channel == 'email') {
-      if (lower.contains('timed out')) {
-        return '邮件发送超时，请稍后重试。';
-      }
-      if (lower.contains('authentication')) {
-        return '邮件服务认证失败，请检查 SMTP 配置。';
-      }
-      if (lower.contains('connection') || lower.contains('refused')) {
-        return '邮件服务连接失败，请检查 SMTP 配置。';
-      }
-      return '邮件发送失败，请稍后重试。';
-    }
-
-    return '发送失败，请稍后重试。';
+    return message;
   }
 
   static String chatActionSummary(String resultKind) {
@@ -363,4 +324,11 @@ class AppStrings {
     }
     return '确定删除“$trimmed”这段对话吗？删除后无法恢复。';
   }
+
+  static const reasoningTraceTitle = '思考过程';
+  static const reasoningTraceRunning = '思考进行中';
+  static const reasoningStepPlan = '规划';
+  static const reasoningStepAct = '执行';
+  static const reasoningStepObserve = '观察';
+  static const reasoningStepReflect = '反思';
 }

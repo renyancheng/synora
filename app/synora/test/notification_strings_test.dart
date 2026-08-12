@@ -2,21 +2,27 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synora/src/strings.dart';
 
 void main() {
-  test('企业微信错误原因映射为中文', () {
-    expect(
-      AppStrings.notificationFailureReason('wecom_robot', '企业微信机器人返回错误码 93000: invalid webhook url'),
-      '企业微信群机器人拒绝了本次消息（错误码 93000）。',
-    );
-    expect(
-      AppStrings.notificationFailureReason('wecom_robot', 'timed out'),
-      '企业微信推送超时，请稍后重试。',
-    );
+  test('系统通知 channel 显示为中文', () {
+    expect(AppStrings.channelLabel('system'), '系统通知');
   });
 
-  test('邮件错误原因映射为中文', () {
+  test('通知失败原因为空时不显示原因', () {
+    expect(AppStrings.notificationFailureReason('system', null), isNull);
+    expect(AppStrings.notificationFailureReason('system', '  '), isNull);
+  });
+
+  test('过长的失败原因被截断', () {
+    final longMessage = '错误' * 80;
+    final reason = AppStrings.notificationFailureReason('system', longMessage);
+    expect(reason, isNotNull);
+    expect(reason!.length, lessThanOrEqualTo(121));
+    expect(reason, endsWith('…'));
+  });
+
+  test('短失败原因原样透传', () {
     expect(
-      AppStrings.notificationFailureReason('email', 'Connection refused'),
-      '邮件服务连接失败，请检查 SMTP 配置。',
+      AppStrings.notificationFailureReason('system', 'FCM 未配置'),
+      'FCM 未配置',
     );
   });
 }

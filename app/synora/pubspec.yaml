@@ -47,6 +47,11 @@ dependencies:
   image_picker: ^1.1.2
   flutter_markdown: ^0.7.7+1
   flutter_secure_storage: ^9.2.4
+  # 系统级通知：Windows 桌面 / 安卓运行中由本地通知承载，安卓关闭时由 FCM 补充。
+  # v17 不支持 Windows，需 ≥18（federated flutter_local_notifications_windows）。
+  flutter_local_notifications: 19.0.0
+  firebase_core: ^4.13.0
+  firebase_messaging: ^16.5.0
 
 dev_dependencies:
   flutter_test:

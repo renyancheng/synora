@@ -6,6 +6,7 @@ import 'api_client.dart';
 import 'local_session_store.dart';
 import 'models.dart';
 import 'strings.dart';
+import 'system_notification_service.dart';
 
 const int draftConversationId = 0;
 const Set<String> _nonEditableCardMessageTypes = <String>{
@@ -92,8 +93,16 @@ class AppController extends ChangeNotifier {
   List<NotificationItem> _notifications = <NotificationItem>[];
   String _memorySummary = '';
   List<MemoryItem> _memoryItems = <MemoryItem>[];
-  UserPreferences _userPreferences = UserPreferences(wecomRobotWebhook: null);
+  UserPreferences _userPreferences = UserPreferences();
   List<ConversationThreadItem> _conversations = <ConversationThreadItem>[];
+  // 实时推理轨迹：conversationId -> 进行中的步骤，card_snapshot 落库后清空
+  final Map<int, List<ReasoningStepItem>> _liveReasoningSteps =
+      <int, List<ReasoningStepItem>>{};
+  // 系统通知轮询：每 20s 拉取一次 system 审计，新送达的弹本地通知。
+  Timer? _notificationPollTimer;
+  final Set<int> _seenNotificationIds = <int>{};
+  // FCM 设备令牌：登录后上报 /devices/register，logout 注销。
+  String? _fcmToken;
   final Map<int, ConversationViewState> _conversationStates =
       <int, ConversationViewState>{
         draftConversationId: ConversationViewState.draft(),
@@ -125,6 +134,9 @@ class AppController extends ChangeNotifier {
       ConversationViewState.draft();
   List<ConversationMessageItem> get messages =>
       List<ConversationMessageItem>.unmodifiable(activeState.messages);
+  List<ReasoningStepItem> liveReasoningStepsFor(int conversationId) =>
+      _liveReasoningSteps[conversationId] ?? const <ReasoningStepItem>[];
+
   bool get isConversationLoading => activeState.isLoading;
   bool get isMessageSending => activeState.isSending;
   String? get lastError => activeState.lastError;
@@ -172,7 +184,9 @@ class AppController extends ChangeNotifier {
       );
       _lastKnownUser = restored.user;
       await _sessionStore.saveSession(_session!);
+      _liveReasoningSteps.clear();
       await loadShellData();
+      await _registerPendingFcmToken();
       beginDraftConversation(notify: false);
     } catch (_) {
       _session = null;
@@ -194,7 +208,9 @@ class AppController extends ChangeNotifier {
     try {
       _session = await _apiClient.login(email, password);
       await _persistSession(_session!);
+      _liveReasoningSteps.clear();
       await loadShellData();
+      await _registerPendingFcmToken();
       beginDraftConversation(notify: false);
     } finally {
       _setLoading(false);
@@ -216,6 +232,7 @@ class AppController extends ChangeNotifier {
       );
       await _persistSession(_session!);
       await loadShellData();
+      await _registerPendingFcmToken();
       beginDraftConversation(notify: false);
     } finally {
       _setLoading(false);
@@ -242,6 +259,8 @@ class AppController extends ChangeNotifier {
       _conversations = (results[3] as List<ConversationThreadItem>)
         ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
       _userPreferences = results[4] as UserPreferences;
+      _seedSeenNotificationIds(_notifications);
+      _startNotificationPolling();
       if (!isDraftConversation &&
           !_conversations.any((item) => item.id == _activeConversationId)) {
         beginDraftConversation(notify: false);
@@ -249,6 +268,61 @@ class AppController extends ChangeNotifier {
     } finally {
       _setLoading(false);
     }
+  }
+
+  void _startNotificationPolling() {
+    _notificationPollTimer?.cancel();
+    _notificationPollTimer = Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => _pollNotifications(),
+    );
+  }
+
+  void _stopNotificationPolling() {
+    _notificationPollTimer?.cancel();
+    _notificationPollTimer = null;
+  }
+
+  void _seedSeenNotificationIds(List<NotificationItem> items) {
+    _seenNotificationIds.clear();
+    for (final item in items) {
+      if (item.channel == 'system' && item.status == 'delivered') {
+        _seenNotificationIds.add(item.id);
+      }
+    }
+  }
+
+  /// 拉取 system 审计：新送达的通知弹本地系统通知，避免重复弹出。
+  Future<void> _pollNotifications() async {
+    if (!isAuthenticated) {
+      return;
+    }
+    try {
+      final items = await _apiClient.fetchNotifications();
+      for (final item in items) {
+        if (item.channel == 'system' &&
+            item.status == 'delivered' &&
+            _seenNotificationIds.add(item.id)) {
+          await SystemNotificationService.instance.show(
+            id: item.id,
+            title: item.subject,
+            body: item.body ?? item.subject,
+          );
+        }
+      }
+      if (items.length != _notifications.length) {
+        _notifications = items;
+        notifyListeners();
+      }
+    } catch (_) {
+      // 轮询失败静默，下轮重试。
+    }
+  }
+
+  @override
+  void dispose() {
+    _notificationPollTimer?.cancel();
+    super.dispose();
   }
 
   void beginDraftConversation({bool notify = true}) {
@@ -761,12 +835,8 @@ class AppController extends ChangeNotifier {
     return _apiClient.fetchSchedules(query: query);
   }
 
-  Future<void> updateUserPreferences({
-    required String? wecomRobotWebhook,
-  }) async {
-    _userPreferences = await _apiClient.updateUserPreferences(
-      wecomRobotWebhook: wecomRobotWebhook,
-    );
+  Future<void> updateUserPreferences() async {
+    _userPreferences = await _apiClient.updateUserPreferences();
     notifyListeners();
   }
 
@@ -777,6 +847,7 @@ class AppController extends ChangeNotifier {
     } catch (_) {
       _apiClient.setAccessToken(null);
     }
+    await _unregisterFcmToken();
     await _sessionStore.clearSessionToken();
     _session = null;
     _schedules = <ScheduleItem>[];
@@ -789,8 +860,61 @@ class AppController extends ChangeNotifier {
       ..clear()
       ..[draftConversationId] = ConversationViewState.draft();
     _activeConversationId = draftConversationId;
-    _userPreferences = UserPreferences(wecomRobotWebhook: null);
+    _liveReasoningSteps.clear();
+    _stopNotificationPolling();
+    _seenNotificationIds.clear();
+    SystemNotificationService.instance.resetShownIds();
+    _userPreferences = UserPreferences();
     notifyListeners();
+  }
+
+  /// FCM 令牌更新回调（由 FirebaseMessagingService 注入）。未登录时缓存，
+  /// 登录/会话恢复成功后补注册。
+  Future<void> onFcmTokenChanged(String token) async {
+    _fcmToken = token;
+    if (!isAuthenticated) {
+      return;
+    }
+    try {
+      await _apiClient.registerDeviceToken(token, _pushPlatform);
+    } catch (_) {
+      // 注册失败静默，token 刷新或下次登录重试。
+    }
+  }
+
+  String get _pushPlatform {
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return 'android';
+    }
+    if (defaultTargetPlatform == TargetPlatform.windows) {
+      return 'windows';
+    }
+    return 'unknown';
+  }
+
+  Future<void> _registerPendingFcmToken() async {
+    final token = _fcmToken;
+    if (token == null || token.isEmpty) {
+      return;
+    }
+    try {
+      await _apiClient.registerDeviceToken(token, _pushPlatform);
+    } catch (_) {
+      // 注册失败静默，下轮 token 刷新或下次登录重试。
+    }
+  }
+
+  Future<void> _unregisterFcmToken() async {
+    final token = _fcmToken;
+    if (token == null || token.isEmpty) {
+      return;
+    }
+    try {
+      await _apiClient.unregisterDeviceToken(token);
+    } catch (_) {
+      // 注销失败静默。
+    }
+    _fcmToken = null;
   }
 
   void _handleStreamEvent(
@@ -847,10 +971,40 @@ class AppController extends ChangeNotifier {
           ),
         );
         break;
+      case 'reasoning_step':
+        final stepData = event.data;
+        final liveStep = ReasoningStepItem(
+          stepType: stepData['step_type'] as String? ?? '',
+          label: stepData['label'] as String? ?? '',
+          content: stepData['content'] as String? ?? '',
+          status: stepData['status'] as String? ?? 'running',
+          iteration: stepData['iteration'] as int? ?? 0,
+          seq: stepData['seq'] as int? ?? 0,
+        );
+        final steps = List<ReasoningStepItem>.from(
+          _liveReasoningSteps[conversationId] ?? <ReasoningStepItem>[],
+        );
+        final existingIndex = steps.indexWhere(
+          (item) =>
+              item.stepType == liveStep.stepType &&
+              item.iteration == liveStep.iteration,
+        );
+        if (existingIndex >= 0) {
+          steps[existingIndex] = liveStep;
+        } else {
+          steps.add(liveStep);
+        }
+        steps.sort((a, b) => a.seq.compareTo(b.seq));
+        _liveReasoningSteps[conversationId] = steps;
+        break;
       case 'card_snapshot':
         final messageJson =
             event.data['message'] as Map<String, dynamic>? ??
             <String, dynamic>{};
+        if (messageJson['message_type'] == 'reasoning_step') {
+          // 持久化卡片到达，实时轨迹使命完成
+          _liveReasoningSteps.remove(conversationId);
+        }
         _replaceOrAppendMessage(
           conversationId,
           ConversationMessageItem.fromJson(messageJson),
@@ -901,6 +1055,7 @@ class AppController extends ChangeNotifier {
             isSending: false,
             clearStreamStatusLabel: true,
           );
+          _liveReasoningSteps.remove(conversationId);
         }
         break;
       case 'run_completed':
@@ -918,6 +1073,7 @@ class AppController extends ChangeNotifier {
             clearStreamStatusLabel: true,
             isSending: false,
           );
+          _liveReasoningSteps.remove(conversationId);
         }
         break;
     }
