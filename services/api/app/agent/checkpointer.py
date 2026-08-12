@@ -35,7 +35,8 @@ async def get_checkpointer() -> AsyncPostgresSaver | AsyncSqliteSaver:
         settings = get_settings()
         if settings.langgraph_checkpoint_backend == "postgres":
             dsn = _normalize_postgres_dsn(settings.langgraph_checkpoint_db_url or settings.database_url)
-            conn = await psycopg.AsyncConnection.connect(dsn)
+            # autocommit=True：setup() 的 CREATE INDEX CONCURRENTLY 不能在事务块内执行
+            conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
             _checkpointer = AsyncPostgresSaver(conn)
         else:
             conn = await connect(settings.langgraph_checkpoint_sqlite_path)

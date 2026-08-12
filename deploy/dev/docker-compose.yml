@@ -28,6 +28,9 @@ x-api-common: &api-common
     SYNORA_NOTIFICATION_TO_EMAIL: ${SYNORA_NOTIFICATION_TO_EMAIL:-han.teacher@example.com}
     SYNORA_MCP_BEARER_TOKEN: ${SYNORA_MCP_BEARER_TOKEN:-local-dev-token}
     SYNORA_MCP_MOUNT_PATH: ${SYNORA_MCP_MOUNT_PATH:-/mcp}
+    SYNORA_LANGGRAPH_CHECKPOINT_BACKEND: ${SYNORA_LANGGRAPH_CHECKPOINT_BACKEND:-postgres}
+    SYNORA_LANGGRAPH_CHECKPOINT_DB_URL: ${SYNORA_LANGGRAPH_CHECKPOINT_DB_URL:-postgresql+psycopg://synora:synora@postgres:5432/synora}
+    SYNORA_LANGGRAPH_CHECKPOINT_SQLITE_PATH: ${SYNORA_LANGGRAPH_CHECKPOINT_SQLITE_PATH:-langgraph_checkpoints.db}
   depends_on:
     postgres:
       condition: service_healthy
