@@ -19,13 +19,6 @@ x-api-common: &api-common
     SYNORA_MINIO_ENDPOINT: ${SYNORA_MINIO_ENDPOINT:-minio:9000}
     SYNORA_MINIO_ACCESS_KEY: ${SYNORA_MINIO_ACCESS_KEY:-synora}
     SYNORA_MINIO_SECRET_KEY: ${SYNORA_MINIO_SECRET_KEY:-synora123}
-    SYNORA_SMTP_HOST: ${SYNORA_SMTP_HOST:-mailhog}
-    SYNORA_SMTP_PORT: ${SYNORA_SMTP_PORT:-1025}
-    SYNORA_SMTP_USERNAME: ${SYNORA_SMTP_USERNAME:-}
-    SYNORA_SMTP_PASSWORD: ${SYNORA_SMTP_PASSWORD:-}
-    SYNORA_SMTP_USE_TLS: ${SYNORA_SMTP_USE_TLS:-false}
-    SYNORA_NOTIFICATION_FROM_EMAIL: ${SYNORA_NOTIFICATION_FROM_EMAIL:-synora@example.com}
-    SYNORA_NOTIFICATION_TO_EMAIL: ${SYNORA_NOTIFICATION_TO_EMAIL:-han.teacher@example.com}
     SYNORA_MCP_BEARER_TOKEN: ${SYNORA_MCP_BEARER_TOKEN:-local-dev-token}
     SYNORA_MCP_MOUNT_PATH: ${SYNORA_MCP_MOUNT_PATH:-/mcp}
     SYNORA_LANGGRAPH_CHECKPOINT_BACKEND: ${SYNORA_LANGGRAPH_CHECKPOINT_BACKEND:-postgres}
@@ -38,8 +31,6 @@ x-api-common: &api-common
       condition: service_healthy
     minio:
       condition: service_healthy
-    mailhog:
-      condition: service_started
 
 services:
   postgres:
@@ -84,12 +75,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  mailhog:
-    image: docker.1ms.run/mailhog/mailhog:v1.0.1
-    ports:
-      - "1025:1025"
-      - "8025:8025"
 
   api:
     <<: *api-common

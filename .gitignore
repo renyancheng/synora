@@ -1,0 +1,6 @@
+# 本地答辩演示产物（PPT 布局/预览/渲染，含 node_modules），非 Synora 项目代码
+outputs/
+scripts/generate_defense_artifacts.py
+
+# Android 构建产物
+app/synora/android/build/

@@ -73,7 +73,6 @@ docker compose up --build
 - `postgres`：PostgreSQL + pgvector
 - `redis`
 - `minio`
-- `mailhog`
 
 ### 生产部署
 
@@ -117,14 +116,7 @@ flutter run --dart-define=SYNORA_API_BASE_URL=http://<你的电脑局域网IP>:8
 | `SYNORA_LLM_BASE_URL` | 大模型兼容接口地址 |
 | `SYNORA_LLM_MODEL` | 对话、解析与摘要使用的模型名称 |
 | `SYNORA_MCP_BEARER_TOKEN` | MCP 接口访问令牌 |
-| `SYNORA_NOTIFICATION_FROM_EMAIL` | 邮件提醒发件人地址 |
-| `SYNORA_NOTIFICATION_TO_EMAIL` | 默认邮件提醒收件人 |
-| `SYNORA_SMTP_HOST` | SMTP 主机地址 |
-| `SYNORA_SMTP_PORT` | SMTP 端口 |
-| `SYNORA_SMTP_USERNAME` | SMTP 用户名 |
-| `SYNORA_SMTP_PASSWORD` | SMTP 密码 |
-| `SYNORA_SMTP_USE_TLS` | 是否启用 SMTP TLS |
-| `SYNORA_WECOM_ROBOT_WEBHOOK` | 企业微信群机器人 Webhook |
+| `SYNORA_FIREBASE_SERVICE_ACCOUNT_PATH` | Firebase 服务账号凭据路径，用于 FCM 推送（可选，未配置时降级为前端轮询） |
 | `SYNORA_MINIO_ACCESS_KEY` | MinIO Access Key |
 | `SYNORA_MINIO_SECRET_KEY` | MinIO Secret Key |
 | `SYNORA_MINIO_BUCKET` | 附件存储桶名称 |
