@@ -33,7 +33,14 @@ class ApiClient {
     if (configured.isNotEmpty) {
       return configured;
     }
-    return kIsWeb ? 'http://localhost:8000' : 'http://10.0.2.2:8000';
+    if (kIsWeb) {
+      return 'http://localhost:8000';
+    }
+    // Android 模拟器经 10.0.2.2 访问宿主机；桌面端（Windows/macOS/Linux）直连 localhost
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return 'http://10.0.2.2:8000';
+    }
+    return 'http://localhost:8000';
   }
 
   Future<SessionInfo> login(String email, String password) async {
