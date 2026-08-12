@@ -209,12 +209,18 @@ class AgentRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    tool_call_audits: Mapped[list["AgentToolCallAudit"]] = relationship(
+        back_populates="agent_run",
+        cascade="all, delete-orphan",
+    )
+
 
 class AgentToolCallAudit(Base):
     __tablename__ = "agent_tool_call_audits"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     agent_run_id: Mapped[int] = mapped_column(ForeignKey("agent_runs.id"), index=True)
+    agent_run: Mapped["AgentRun"] = relationship(back_populates="tool_call_audits")
     tool_name: Mapped[str] = mapped_column(String(120), index=True)
     request_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

@@ -395,10 +395,7 @@ def delete_conversation(db: Session, user_id: int, conversation_id: int) -> None
     agent_runs = db.scalars(select(AgentRun).where(AgentRun.conversation_id == conversation_id)).all()
     checkpoint_thread_ids: list[str] = []
     if agent_runs:
-        run_ids = [item.id for item in agent_runs]
-        audits = db.scalars(select(AgentToolCallAudit).where(AgentToolCallAudit.agent_run_id.in_(run_ids))).all()
-        for audit in audits:
-            db.delete(audit)
+        # tool_call_audits 由 AgentRun.tool_call_audits cascade="all, delete-orphan" 级联删除
         for run in agent_runs:
             if run.checkpoint_thread_id:
                 checkpoint_thread_ids.append(run.checkpoint_thread_id)
@@ -465,9 +462,7 @@ def rewind_last_turn(db: Session, user_id: int, conversation_id: int) -> tuple[C
     if agent_run is not None:
         created_message_ids = [int(item) for item in list(agent_run.output_json.get("created_message_ids") or []) if isinstance(item, int)]
         assistant_message_id = agent_run.assistant_message_id
-        audits = db.scalars(select(AgentToolCallAudit).where(AgentToolCallAudit.agent_run_id == agent_run.id)).all()
-        for audit in audits:
-            db.delete(audit)
+        # tool_call_audits 由 AgentRun.tool_call_audits cascade="all, delete-orphan" 级联删除
         if agent_run.checkpoint_thread_id:
             checkpoint_thread_ids.append(agent_run.checkpoint_thread_id)
         db.delete(agent_run)

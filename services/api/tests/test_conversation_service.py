@@ -1101,6 +1101,39 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(self.db.get(ApprovalRequest, approval.id))
 
+    def test_delete_conversation_removes_agent_runs_and_tool_audits(self) -> None:
+        from app.models import AgentRun, AgentToolCallAudit
+
+        thread = create_conversation(self.db, self.user.id)
+        run = AgentRun(
+            user_id=self.user.id,
+            workflow="general_chat",
+            status="completed",
+            conversation_id=thread.id,
+            stream_status="completed",
+            input_json={},
+            output_json={},
+        )
+        self.db.add(run)
+        self.db.flush()
+        self.db.add(
+            AgentToolCallAudit(
+                agent_run_id=run.id,
+                tool_name="dispatch_notification",
+                request_json={},
+                response_json={},
+                status="ok",
+            )
+        )
+        self.db.commit()
+
+        delete_conversation(self.db, self.user.id, thread.id)
+
+        self.assertIsNone(self.db.get(type(thread), thread.id))
+        self.assertIsNone(self.db.get(type(run), run.id))
+        audits = self.db.scalars(select(AgentToolCallAudit)).all()
+        self.assertEqual(audits, [])
+
     def test_rewind_last_turn_restores_user_payload(self) -> None:
         thread = create_conversation(self.db, self.user.id)
         attachment = Attachment(
