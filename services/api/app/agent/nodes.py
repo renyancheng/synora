@@ -22,7 +22,7 @@ def _config_items() -> dict[str, Any]:
 
 
 async def route_intent(state: AgentState) -> dict[str, Any]:
-    from app.domains.conversation.service import _get_pending_state, _prepare_pending_regeneration
+    from app.domains.conversation.service import _get_pending_state, _prepare_pending_regeneration, _resolve_contextual_draft_followup
 
     cfg = _config_items()
     db = cfg["db"]
@@ -58,8 +58,10 @@ async def route_intent(state: AgentState) -> dict[str, Any]:
             },
             attachment_parts=attachment_parts,
         )
-        if not selected_tool and intent in {"schedule_intake", "quick_note_intake"}:
-            intent = f"needs_tool_selection:{intent}"
+        if intent in {"schedule_intake", "quick_note_intake"}:
+            resolved = _resolve_contextual_draft_followup(db, conversation_id, text_content, context)
+            if resolved:
+                intent, context = resolved
 
     agent_run.workflow = intent
     agent_run.output_json = {
@@ -76,22 +78,6 @@ async def route_intent(state: AgentState) -> dict[str, Any]:
         "attachment_ids": attachment_ids,
         "attachment_parts": attachment_parts,
         "context": context,
-    }
-
-
-async def emit_tool_selection_reminder(state: AgentState) -> dict[str, Any]:
-    from app.domains.conversation.service import _emit_text_stream, _tool_selection_reminder
-
-    cfg = _config_items()
-    writer = get_stream_writer()
-    intent = state.get("intent") or ""
-    final_text = _tool_selection_reminder(intent.split(":", 1)[1] if ":" in intent else intent)
-    async for sse in _emit_text_stream(cfg["db"], cfg["assistant_message"], final_text):
-        writer(sse)
-    return {
-        "assistant_text": cfg["assistant_message"].text_content or "",
-        "created_message_ids": [],
-        "requires_approval": None,
     }
 
 

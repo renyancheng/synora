@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,7 +12,7 @@ from app.agent.graph import build_graph
 from app.config import get_settings
 from app.db import Base
 from app.domains.approval.service import create_approval_request
-from app.domains.conversation.service import apply_action, consume_stream, create_conversation, delete_conversation, queue_message, rewind_last_turn, update_conversation_title
+from app.domains.conversation.service import GENERAL_CHAT_EXCLUDED_TOOLS, apply_action, consume_stream, create_conversation, delete_conversation, queue_message, rewind_last_turn, update_conversation_title
 from app.domains.quick_note.service import delete_note
 from app.domains.schedule.service import build_approval_draft_hash, build_draft_hash, delete_schedule
 from app.models import ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
@@ -1452,13 +1453,43 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="创建提醒")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
-    async def test_conversation_without_selected_tool_returns_tool_selection_reminder(
+    async def test_conversation_without_selected_tool_auto_routes_to_schedule_intake(
         self,
         _intent_mock,
         _title_mock,
         invoke_tool_mock,
         _write_memory_mock,
     ) -> None:
+        draft = self._draft()
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": draft.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["明天下午"],
+                    "parse_confidence": 0.92,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash",
+                    },
+                },
+            ),
+        ]
         thread = create_conversation(self.db, self.user.id)
         _, _, assistant_message, agent_run = queue_message(
             self.db,
@@ -1469,11 +1500,170 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
-        self.assertEqual(invoke_tool_mock.await_count, 0)
         self.assertEqual(events[-1]["event"], "run_completed")
-        self.assertIn("请先选择“日程”工具", self.db.get(type(assistant_message), assistant_message.id).text_content or "")
+        self.assertTrue(any(item["event"] == "approval_required" for item in events))
+        self.assertNotIn("请先选择", self.db.get(type(assistant_message), assistant_message.id).text_content or "")
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
-        self.assertIsNone(pending)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.stage, "approval_pending")
+
+    async def test_aroute_conversation_intent_injects_recent_history(self) -> None:
+        with patch(
+            "app.agent.llm.ainvoke_structured",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(workflow="general_chat"),
+        ) as structured_mock:
+            result = await llm.aroute_conversation_intent(
+                get_settings(),
+                {
+                    "text_content": "这周六下午左右吧",
+                    "attachment_ids": [],
+                    "selected_tool": None,
+                    "context": {
+                        "conversation_history_lines": [
+                            "用户：我过几天想去银行办一张万事达卡",
+                            "助手：我已经为你生成日程草稿…",
+                        ]
+                    },
+                },
+            )
+        self.assertEqual(result, "general_chat")
+        call_kwargs = structured_mock.await_args.kwargs
+        payload = json.loads(call_kwargs["user_text"])
+        self.assertEqual(
+            payload["recent_history"],
+            ["用户：我过几天想去银行办一张万事达卡", "助手：我已经为你生成日程草稿…"],
+        )
+        self.assertIn("补充、修正或继续", call_kwargs["system_prompt"])
+        self.assertIn("schedule_intake", call_kwargs["system_prompt"])
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.agent.llm.generate_conversation_title", return_value="创建提醒")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
+    async def test_followup_message_resumes_last_draft_card_without_pending(
+        self,
+        _intent_mock,
+        _title_mock,
+        invoke_tool_mock,
+        _write_memory_mock,
+    ) -> None:
+        original = self._draft()
+        revised = original.model_copy(
+            update={
+                "source_text": "这周六下午去银行办万事达卡",
+                "start": EventDateTimeValue(
+                    dateTime=datetime.fromisoformat("2026-08-15T14:00:00+08:00"),
+                    timeZone="Asia/Shanghai",
+                ),
+                "end": EventDateTimeValue(
+                    dateTime=datetime.fromisoformat("2026-08-15T15:00:00+08:00"),
+                    timeZone="Asia/Shanghai",
+                ),
+            }
+        )
+        invoke_tool_mock.side_effect = [
+            (
+                SimpleNamespace(content="draft"),
+                {
+                    "status": "ok",
+                    "draft": original.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-1",
+                    "missing_fields": ["start_at"],
+                    "ambiguity_flags": ["time_ambiguous"],
+                    "evidence_digest": ["过几天去银行办卡"],
+                    "parse_confidence": 0.7,
+                },
+            ),
+            (
+                SimpleNamespace(content="draft-2"),
+                {
+                    "status": "ok",
+                    "draft": revised.model_dump(mode="json", by_alias=True),
+                    "draft_hash": "draft-hash-2",
+                    "missing_fields": [],
+                    "ambiguity_flags": [],
+                    "evidence_digest": ["周六下午"],
+                    "parse_confidence": 0.9,
+                },
+            ),
+            (
+                SimpleNamespace(content="conflicts-2"),
+                {
+                    "status": "ok",
+                    "conflict_items": [],
+                    "suggestions": [],
+                    "risk_level": "low",
+                    "approval": {
+                        "approval_token": "approval-token-2",
+                        "action": "create_schedule",
+                        "expires_at": datetime.now(timezone.utc).isoformat(),
+                        "draft_hash": "draft-hash-2",
+                    },
+                },
+            ),
+        ]
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, first_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="我过几天想去银行办一张万事达卡", selected_tool="schedule"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, first_run.stream_token)]
+
+        # 模拟 pending 被清理（dismiss/超时），仅剩上一条未决草稿卡
+        pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
+        self.assertIsNotNone(pending)
+        self.db.delete(pending)
+        self.db.commit()
+
+        _, _, _, second_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="这周六下午左右吧"),
+        )
+        second_events = [item async for item in consume_stream(self.db, self.user.id, thread.id, second_run.stream_token)]
+
+        self.assertTrue(any(item["event"] == "approval_required" for item in second_events))
+        self.assertFalse(any("请先选择" in str(item) for item in second_events))
+        # Fix 4 兜底：从草稿卡重建 context，previous_draft_summary 进入 parse_schedule_draft
+        second_tool_payload = invoke_tool_mock.await_args_list[1].args[1]
+        self.assertEqual(second_tool_payload["context"]["pending_regeneration"], "schedule")
+        self.assertEqual(second_tool_payload["context"]["supersede_action_group_id"], second_tool_payload["context"]["pending_action_group_id"])
+        self.assertIn("教学例会", second_tool_payload["context"]["previous_draft_summary"])
+
+    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.agent.llm.build_general_chat_agent", return_value=_FakeGeneralChatAgent())
+    @patch("app.agent.llm.generate_conversation_title", return_value="测试聊天")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    async def test_general_chat_excludes_intake_write_tools(
+        self,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _agent_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="你好"),
+        )
+        with patch(
+            "app.domains.conversation.service.build_agent_tools",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as tools_mock:
+            _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(tools_mock.await_count, 1)
+        self.assertEqual(tools_mock.await_args.kwargs["exclude_names"], GENERAL_CHAT_EXCLUDED_TOOLS)
 
 
 if __name__ == "__main__":

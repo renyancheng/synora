@@ -39,9 +39,10 @@ class AgentGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_route_branch({"intent": "general_chat"}), "general_chat")
         self.assertEqual(_route_branch({"intent": "schedule_intake"}), "schedule_intake")
         self.assertEqual(_route_branch({"intent": "quick_note_intake"}), "quick_note_intake")
+        # needs_tool_selection 拦截门已移除，前缀原样透传（不会进入专用分支）
         self.assertEqual(
             _route_branch({"intent": "needs_tool_selection:schedule_intake"}),
-            "needs_tool_selection",
+            "needs_tool_selection:schedule_intake",
         )
 
     def test_graph_contains_all_nodes(self) -> None:
@@ -53,11 +54,11 @@ class AgentGraphTests(unittest.IsolatedAsyncioTestCase):
                 "general_chat",
                 "schedule_intake",
                 "quick_note_intake",
-                "tool_selection_reminder",
                 "finalize",
             },
             nodes,
         )
+        self.assertNotIn("tool_selection_reminder", nodes)
 
     async def test_custom_events_passthrough(self) -> None:
         async def fake_general_chat(_state):

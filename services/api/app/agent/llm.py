@@ -481,6 +481,19 @@ async def aroute_conversation_intent(
         return "schedule_intake"
     if selected_tool == "quick_note":
         return "quick_note_intake"
+    context = dict(payload.get("context") or {})
+    recent_history = [
+        str(line).strip()
+        for line in (context.get("conversation_history_lines") or [])
+        if str(line).strip()
+    ]
+    user_text_payload: dict[str, object] = {
+        "text_content": payload.get("text_content"),
+        "attachment_ids": payload.get("attachment_ids", []),
+        "context": context,
+    }
+    if recent_history:
+        user_text_payload["recent_history"] = recent_history[-6:]
     result = await ainvoke_structured(
         settings,
         schema=ConversationIntentSelection,
@@ -491,16 +504,12 @@ async def aroute_conversation_intent(
             "如果用户在闲聊、提问、咨询建议，就选 general_chat。"
             "如果核心目标是创建可提醒的日程，就选 schedule_intake。"
             "如果核心目标是保存速记、想法、待办或摘要，就选 quick_note_intake。"
+            "如果用户在补充、修正或继续上一个日程或速记草稿（补时间、补地点、改内容），"
+            "即使本条消息没有明确的关键词，也应归入对应的 intake。"
+            "如果用户表达了需要安排一个行动或事务（即使还没有给出具体时间），归入 schedule_intake。"
             f"{current_time_prompt(settings)}"
         ),
-        user_text=json.dumps(
-            {
-                "text_content": payload.get("text_content"),
-                "attachment_ids": payload.get("attachment_ids", []),
-                "context": payload.get("context", {}),
-            },
-            ensure_ascii=False,
-        ),
+        user_text=json.dumps(user_text_payload, ensure_ascii=False),
         attachment_parts=attachment_parts,
     )
     return result.workflow

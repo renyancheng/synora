@@ -53,6 +53,16 @@ CONVERSATION_REFERENCE_HINTS = (
     "那个",
 )
 
+# general_chat 分支不注入的 intake 写工具：避免 LLM 自主调用这些工具产出
+# 无卡片、无 pending 的“伪草稿”，保证日程/速记创建统一走 intake 节点。
+GENERAL_CHAT_EXCLUDED_TOOLS = {
+    "parse_schedule_draft",
+    "detect_schedule_conflicts",
+    "create_schedule_after_approval",
+    "prepare_quick_note_draft",
+    "create_quick_note_after_approval",
+}
+
 
 def _schedule_checkpoint_cleanup(thread_ids: Iterable[str | None]) -> None:
     """尽力而为地删除孤儿 checkpoint（rewind / delete_conversation 后）。
@@ -160,14 +170,6 @@ def _tool_context(
     if approval_scope:
         tool_context["approval_scope"] = approval_scope
     return tool_context
-
-
-def _tool_selection_reminder(intent: str) -> str:
-    if intent == "schedule_intake":
-        return "看起来你是想创建日程。请先选择“日程”工具后再发送，我再帮你生成待确认卡片。"
-    if intent == "quick_note_intake":
-        return "看起来你是想保存速记。请先选择“速记”工具后再发送，我再帮你生成待确认卡片。"
-    return "如果你要创建日程或速记，请先选择对应工具后再发送。"
 
 
 def _extract_history_query_terms(text: str) -> list[str]:
@@ -731,8 +733,10 @@ async def _consume_stream_legacy(
             },
             attachment_parts=attachment_parts,
         )
-        if not selected_tool and intent in {"schedule_intake", "quick_note_intake"}:
-            intent = f"needs_tool_selection:{intent}"
+        if intent in {"schedule_intake", "quick_note_intake"}:
+            resolved = _resolve_contextual_draft_followup(db, conversation_id, text_content, context)
+            if resolved:
+                intent, context = resolved
     agent_run.workflow = intent
     agent_run.output_json = {
         **dict(agent_run.output_json or {}),
@@ -754,15 +758,6 @@ async def _consume_stream_legacy(
         ):
             yield item
         final_text = assistant_message.text_content or ""
-        _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
-        yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
-        yield {"event": "run_completed", "data": {"stream_id": stream_id}}
-        return
-
-    if intent.startswith("needs_tool_selection:"):
-        final_text = _tool_selection_reminder(intent.split(":", 1)[1])
-        async for item in _emit_text_stream(db, assistant_message, final_text):
-            yield item
         _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[])
         yield {"event": "message_completed", "data": {"message": _message_payload(assistant_message)}}
         yield {"event": "run_completed", "data": {"stream_id": stream_id}}
@@ -945,7 +940,7 @@ async def _stream_general_chat(
         .limit(RECENT_MESSAGE_DB_WINDOW)
     ).all()
     ordered = list(reversed(list(recent_messages)))
-    tools = await build_agent_tools()
+    tools = await build_agent_tools(exclude_names=GENERAL_CHAT_EXCLUDED_TOOLS)
     agent = llm.build_general_chat_agent(get_settings(), tools)
     memory_context = MemoryService().retrieve_context(
         db,
@@ -1791,6 +1786,60 @@ def _schedule_card_payload(
 
 def _get_pending_state(db: Session, conversation_id: int) -> ConversationPendingState | None:
     return db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == conversation_id))
+
+
+def _resolve_contextual_draft_followup(
+    db: Session,
+    conversation_id: int,
+    text_content: str,
+    context: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """无 pending 时，从最近一张未决草稿卡重建续接 context。
+
+    兜底路径：若首条消息未正确进入 intake（历史路由遗漏），第二条“补充/修正”
+    消息借助上一条 schedule_draft_card / quick_note_preview_card 重建与
+    ``_prepare_pending_regeneration`` 同构的 context，驱动 parse_schedule_draft
+    合并上一版草稿 + 本轮更正。命中返回 ``(intent, context)``，否则返回 None。
+    """
+    card = db.scalar(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == conversation_id,
+            ConversationMessage.role == "assistant",
+            ConversationMessage.message_type.in_(["schedule_draft_card", "quick_note_preview_card"]),
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(1)
+    )
+    if not card:
+        return None
+    payload = dict(card.structured_payload_json or {})
+    if payload.get("lifecycle_status") not in {"needs_input", "approval_pending"}:
+        return None
+    action_group_id = str(payload.get("action_group_id") or "")
+    if not action_group_id:
+        return None
+    revision = int(payload.get("revision") or 1)
+
+    previous_context = dict(context)
+    previous_context["pending_action_group_id"] = action_group_id
+    previous_context["pending_revision"] = str(revision + 1)
+    previous_context["supersede_action_group_id"] = action_group_id
+
+    if card.message_type == "schedule_draft_card":
+        try:
+            draft = ScheduleEventDraft.model_validate(payload.get("draft") or {})
+        except Exception:
+            return None
+        previous_context["pending_regeneration"] = "schedule"
+        previous_context["source_history"] = _normalize_source_history(draft.source_text, text_content)
+        previous_context["previous_draft_summary"] = _schedule_draft_summary(draft)
+        return "schedule_intake", previous_context
+
+    previous_context["pending_regeneration"] = "quick_note"
+    previous_context["previous_note_content"] = str(payload.get("normalized_content") or "").strip()
+    previous_context["latest_user_text"] = text_content.strip()
+    return "quick_note_intake", previous_context
 
 
 def _upsert_pending_state(

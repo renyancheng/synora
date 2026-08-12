@@ -25,7 +25,7 @@ class AgentState(TypedDict, total=False):
     conversation_history_lines: list[str]
 
     # 路由结果
-    intent: str  # general_chat | schedule_intake | quick_note_intake | needs_tool_selection:*
+    intent: str  # general_chat | schedule_intake | quick_note_intake
 
     # 输出（finalize 归一化）
     assistant_text: str
