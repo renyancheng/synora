@@ -40,6 +40,19 @@ jobs:
       - name: Run Flutter tests
         run: flutter test
 
+      # google-services.json 不入库（含 Firebase API key，见 app/synora/.gitignore），
+      # 从 repo secret GOOGLE_SERVICES_JSON（base64）解码注入，供 google-services 插件使用。
+      - name: Inject google-services.json
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SERVICES_JSON" ]; then
+            echo "::error::缺少 GOOGLE_SERVICES_JSON secret，请在仓库 Settings → Secrets and variables → Actions 配置（google-services.json 的 base64 编码）。"
+            exit 1
+          fi
+          echo "$GOOGLE_SERVICES_JSON" | base64 --decode > android/app/google-services.json
+          test -s android/app/google-services.json || { echo "::error::解码后的 google-services.json 为空"; exit 1; }
+
       - name: Build Android release APK
         run: flutter build apk --release
 
