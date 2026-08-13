@@ -32,6 +32,11 @@ set(CMAKE_CXX_FLAGS_PROFILE "${CMAKE_CXX_FLAGS_RELEASE}")
 # Use Unicode for all projects.
 add_definitions(-DUNICODE -D_UNICODE)
 
+# MSVC 14.5x（VS 18+）已将 <experimental/coroutine> 从弃用警告升级为 STL1011
+# 静态断言错误；flutter_local_notifications_windows 插件仍使用该头文件。
+# 通过官方建议的宏抑制，保证新 VS 工具链可以正常编译该插件。
+add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+
 # Compilation settings that should be applied to most targets.
 #
 # Be cautious about adding new options here, as plugins use this function by
