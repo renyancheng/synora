@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -211,6 +211,9 @@ class AgentRun(Base):
     checkpoint_thread_id: Mapped[str] = mapped_column(String(96), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    step_metrics: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=True)
+    total_latency_ms: Mapped[int] = mapped_column(Integer, nullable=True)
 
     tool_call_audits: Mapped[list["AgentToolCallAudit"]] = relationship(
         back_populates="agent_run",
@@ -229,6 +232,7 @@ class AgentToolCallAudit(Base):
     response_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(40), default="ok", index=True)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
+    latency_ms: Mapped[float] = mapped_column(Float, nullable=True)  # 毫秒，保留 1 位小数（Postgres 需浮点列）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 

@@ -39,6 +39,8 @@ class AgentState(TypedDict, total=False):
     anti_commitment_used: bool  # 承诺话术护栏：只承诺未执行工具已触发过一次
     # 跨迭代累积的消息（AIMessage / ToolMessage 序列化 dict），用 add reducer 追加
     agent_messages: Annotated[list[dict[str, Any]], add]
+    # 长期记忆上下文（{"summary": str, "items": list}）：act 首轮检索一次，后续轮复用
+    memory_payload: dict
     pending_tool_calls: list[dict[str, Any]]
     observation: str
     tool_failed: bool
@@ -47,6 +49,12 @@ class AgentState(TypedDict, total=False):
     current_aimessage: dict[str, Any] | None
     # 推理轨迹步骤（[{seq, step_type, label, content, status, iteration}]），add reducer 追加
     reasoning_steps: Annotated[list[dict[str, Any]], add]
+
+    # 运行级预算（P0-2）
+    run_started_at: float  # plan 节点写入 time.monotonic()，用于总时长预算
+    budget_exhausted: bool  # 总时长预算已用尽（act 中止时置真，reflect/路由据此收口）
+    total_tokens: int  # 累计 token 用量（act_node 逐轮累加；读取默认 0）
+    step_metrics: list[dict]  # 逐轮 act 运行指标（act_node 追加，供观测与预算追溯）
 
     # 输出（finalize 归一化）
     assistant_text: str

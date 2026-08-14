@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import time
 import unittest
 from unittest.mock import patch
 
+import app.agent.web_search as web_search_module
 from app.agent.tools import build_agent_tools
 from app.agent.web_search import _run_search, web_search
 from app.config import get_settings
@@ -31,11 +34,13 @@ class _FakeHttpClient:
         return False
 
     def post(self, url, *, headers=None, json=None):
+        _FakeHttpClient.call_count += 1
         _FakeHttpClient.last_call = (url, headers or {}, json or {})
         return _FakeHttpClient.last_response
 
     last_call = None
     last_response: _FakeResponse | None = None
+    call_count = 0
 
 
 class _FakeMcpTool:
@@ -44,18 +49,26 @@ class _FakeMcpTool:
 
 
 class WebSearchToolTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        _FakeHttpClient.last_call = None
+        _FakeHttpClient.last_response = None
+        _FakeHttpClient.call_count = 0
+        web_search_module._SEARCH_CACHE.clear()
+
     def tearDown(self) -> None:
         _FakeHttpClient.last_call = None
         _FakeHttpClient.last_response = None
+        _FakeHttpClient.call_count = 0
+        web_search_module._SEARCH_CACHE.clear()
 
     def test_unconfigured_returns_structured_hint(self) -> None:
         with patch.object(get_settings(), "zhipu_web_search_api_key", ""):
             result = _run_search("今天天气")
+            # 工具调用本身不抛异常
+            self.assertIn("unconfigured", web_search.invoke({"query": "今天天气"})["status"])
 
         self.assertEqual(result.status, "unconfigured")
         self.assertIn("SYNORA_ZHIPU_WEB_SEARCH_API_KEY", result.content)
-        # 工具调用本身不抛异常
-        self.assertIn("unconfigured", web_search.invoke({"query": "今天天气"})["status"])
 
     def test_search_success_parses_content_and_references(self) -> None:
         _FakeHttpClient.last_response = _FakeResponse(
@@ -129,6 +142,119 @@ class WebSearchToolTests(unittest.IsolatedAsyncioTestCase):
         names = [item.name for item in tools]
         self.assertIn("get_current_time", names)
         self.assertNotIn("web_search", names)
+
+    def test_cache_returns_same_result_without_second_http_request(self) -> None:
+        _FakeHttpClient.last_response = _FakeResponse(
+            200,
+            {
+                "created": 1786691538,
+                "id": "req-cache-1",
+                "search_intent": [],
+                "search_result": [
+                    {
+                        "content": "缓存命中测试内容。",
+                        "title": "缓存命中",
+                        "link": "https://example.com/cache",
+                    }
+                ],
+            },
+        )
+        with (
+            patch.object(get_settings(), "zhipu_web_search_api_key", "test-key"),
+            patch("app.agent.web_search.httpx.Client", _FakeHttpClient),
+        ):
+            first = web_search.invoke({"query": "缓存命中"})
+            second = web_search.invoke({"query": "缓存命中"})
+
+        self.assertEqual(_FakeHttpClient.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "ok")
+        self.assertIn("缓存命中测试内容", first["content"])
+
+    def test_cache_key_normalizes_whitespace_and_case(self) -> None:
+        _FakeHttpClient.last_response = _FakeResponse(
+            200,
+            {
+                "created": 1786691538,
+                "id": "req-cache-2",
+                "search_intent": [],
+                "search_result": [
+                    {
+                        "content": "归一化键测试内容。",
+                        "title": "归一化",
+                        "link": "https://example.com/normalize",
+                    }
+                ],
+            },
+        )
+        with (
+            patch.object(get_settings(), "zhipu_web_search_api_key", "test-key"),
+            patch("app.agent.web_search.httpx.Client", _FakeHttpClient),
+        ):
+            first = web_search.invoke({"query": "  DeepSeek    R1 缓存 "})
+            second = web_search.invoke({"query": "deepseek r1 缓存"})
+
+        self.assertEqual(_FakeHttpClient.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "ok")
+
+    def test_error_result_is_not_cached(self) -> None:
+        _FakeHttpClient.last_response = _FakeResponse(401, {})
+        with (
+            patch.object(get_settings(), "zhipu_web_search_api_key", "test-key"),
+            patch("app.agent.web_search.httpx.Client", _FakeHttpClient),
+        ):
+            first = web_search.invoke({"query": "失败不缓存"})
+            second = web_search.invoke({"query": "失败不缓存"})
+
+        self.assertEqual(_FakeHttpClient.call_count, 2)
+        self.assertEqual(first["status"], "error")
+        self.assertEqual(second["status"], "error")
+        self.assertNotIn(
+            web_search_module._normalize_query("失败不缓存"),
+            web_search_module._SEARCH_CACHE,
+        )
+
+    def test_expired_cache_entry_triggers_new_request(self) -> None:
+        _FakeHttpClient.last_response = _FakeResponse(
+            200,
+            {
+                "created": 1786691538,
+                "id": "req-cache-3",
+                "search_intent": [],
+                "search_result": [
+                    {
+                        "content": "过期缓存测试内容。",
+                        "title": "过期",
+                        "link": "https://example.com/expire",
+                    }
+                ],
+            },
+        )
+        with (
+            patch.object(get_settings(), "zhipu_web_search_api_key", "test-key"),
+            patch("app.agent.web_search.httpx.Client", _FakeHttpClient),
+        ):
+            first = web_search.invoke({"query": "过期查询"})
+
+        self.assertEqual(_FakeHttpClient.call_count, 1)
+
+        # 直接操纵缓存：把时间戳改旧，模拟 TTL 过期。
+        key = web_search_module._normalize_query("过期查询")
+        with web_search_module._CACHE_LOCK:
+            web_search_module._SEARCH_CACHE[key] = (
+                time.monotonic() - web_search_module.WEB_SEARCH_CACHE_TTL_SECONDS - 1,
+                json.dumps(first, ensure_ascii=False),
+            )
+
+        with (
+            patch.object(get_settings(), "zhipu_web_search_api_key", "test-key"),
+            patch("app.agent.web_search.httpx.Client", _FakeHttpClient),
+        ):
+            second = web_search.invoke({"query": "过期查询"})
+
+        self.assertEqual(_FakeHttpClient.call_count, 2)
+        self.assertEqual(second["status"], "ok")
 
 
 if __name__ == "__main__":

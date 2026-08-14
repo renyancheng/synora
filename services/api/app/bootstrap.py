@@ -72,6 +72,10 @@ def _reconcile_legacy_schema() -> None:
     _ensure_column("agent_runs", "assistant_message_id", "INTEGER")
     _ensure_column("agent_runs", "stream_token", "VARCHAR(64)")
     _ensure_column("agent_runs", "stream_status", "VARCHAR(40) NOT NULL DEFAULT 'pending'")
+    _ensure_column("agent_runs", "step_metrics", "JSON")
+    _ensure_column("agent_runs", "total_tokens", "INTEGER")
+    _ensure_column("agent_runs", "total_latency_ms", "INTEGER")
+    _ensure_column("agent_tool_call_audits", "latency_ms", "FLOAT")
 
     db = SessionLocal()
     try:

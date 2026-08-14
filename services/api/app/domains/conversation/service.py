@@ -13,6 +13,7 @@ import asyncio
 import logging
 import re
 from collections.abc import AsyncGenerator, Callable, Iterable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -81,6 +82,205 @@ DEFAULT_THREAD_TITLE = "新对话"
 
 # 空回答兜底：模型多次重试仍无文本时，以明确文案收口，避免前端出现空气泡。
 EMPTY_ANSWER_FALLBACK_TEXT = "抱歉，这次没有生成有效回答，请点击“重新生成”或稍后再试。"
+
+# --- P1-2 Agent 运行并发与优先级调度基础设施 ---------------------------------
+# 闸门等待期间取消轮询间隔：等待 asyncio.Semaphore 时以短超时反复轮询，
+# 命中取消（进程内 Event / 数据库 cancelling 状态）即抛 AgentRunCancelled，
+# 保证「等待闸门期间用户取消」不会悬挂。
+_GATE_POLL_INTERVAL_SECONDS = 0.2
+
+INTAKE_INTENTS = {"schedule_intake", "quick_note_intake"}
+
+
+class _PriorityRunGate:
+    """进程内并发闸门：全局上限 + intake 优先（intake 高配额 / general_chat 低配额）。
+
+    采用「类配额信号量 + 全局信号量」双信号量模型：
+    - ``_total``：全局同时执行 run 数上限（None=不限制）。
+    - ``_intake``：intake 并发上限（None=不限制）。
+    - ``_general``：general_chat 并发上限（None=不限制）。
+
+    general_chat 先取 ``_general`` 再取 ``_total``：当 general_chat 占满自身配额时，
+    后续 general_chat 会在 ``_general`` 上排队而不占用 ``_total`` 槽位，从而保证
+    intake 仍能从 ``_total`` 的剩余配额进入执行（避免优先级反转）。同一优先级内
+    asyncio.Semaphore 天然 FIFO 公平。
+    """
+
+    def __init__(self, *, total: int, general: int, intake: int) -> None:
+        self._total = asyncio.Semaphore(total) if total > 0 else None
+        self._general = asyncio.Semaphore(general) if general > 0 else None
+        self._intake = asyncio.Semaphore(intake) if intake > 0 else None
+
+    async def acquire(self, *, is_intake: bool) -> None:
+        if is_intake:
+            if self._intake is not None:
+                await self._intake.acquire()
+            if self._total is not None:
+                try:
+                    await self._total.acquire()
+                except BaseException:
+                    if self._intake is not None:
+                        self._intake.release()
+                    raise
+            return
+        if self._general is not None:
+            await self._general.acquire()
+        if self._total is not None:
+            try:
+                await self._total.acquire()
+            except BaseException:
+                if self._general is not None:
+                    self._general.release()
+                raise
+
+    def release(self, *, is_intake: bool) -> None:
+        if self._total is not None:
+            self._total.release()
+        if is_intake:
+            if self._intake is not None:
+                self._intake.release()
+        elif self._general is not None:
+            self._general.release()
+
+
+def _build_run_gate(settings: Any) -> _PriorityRunGate:
+    """按当前 Settings 推导有效并发上限并构建闸门。"""
+    total = int(settings.agent_max_concurrent_runs)
+    intake_limit = int(settings.agent_max_intake_concurrent_runs)
+    general_limit = int(settings.agent_max_general_chat_concurrent_runs)
+
+    if intake_limit <= 0:
+        intake_limit = total if total > 0 else 0
+    if general_limit <= 0:
+        if total > 0:
+            reserve = max(0, int(settings.agent_intake_reserved_slots))
+            general_limit = max(1, total - reserve)
+        else:
+            general_limit = 0
+
+    if total > 0:
+        intake_limit = min(intake_limit, total)
+        general_limit = min(general_limit, total)
+    if intake_limit > 0 and general_limit > intake_limit:
+        general_limit = intake_limit
+    if general_limit < 0:
+        general_limit = 0
+    if intake_limit < 0:
+        intake_limit = 0
+    return _PriorityRunGate(total=total, general=general_limit, intake=intake_limit)
+
+
+def _current_loop_id() -> int:
+    try:
+        return id(asyncio.get_running_loop())
+    except RuntimeError:
+        return 0
+
+
+_run_gate_cache: tuple[tuple[object, ...], _PriorityRunGate] | None = None
+
+
+def _get_run_gate() -> _PriorityRunGate:
+    """惰性构建进程内闸门；按 Settings 字段 + 事件循环 id 缓存，测试跨循环自动重建。"""
+    global _run_gate_cache
+    settings = get_settings()
+    key: tuple[object, ...] = (
+        settings.agent_max_concurrent_runs,
+        settings.agent_max_intake_concurrent_runs,
+        settings.agent_max_general_chat_concurrent_runs,
+        settings.agent_intake_reserved_slots,
+        _current_loop_id(),
+    )
+    if _run_gate_cache is None or _run_gate_cache[0] != key:
+        _run_gate_cache = (key, _build_run_gate(settings))
+    return _run_gate_cache[1]
+
+
+async def _acquire_run_gate(gate: _PriorityRunGate, db: Session, stream_id: str, *, is_intake: bool) -> None:
+    """在闸门等待期间保持可取消：轮询取消状态，命中即抛 AgentRunCancelled。"""
+    while True:
+        raise_if_stream_cancelled(db, stream_id)
+        try:
+            await asyncio.wait_for(gate.acquire(is_intake=is_intake), timeout=_GATE_POLL_INTERVAL_SECONDS)
+            return
+        except asyncio.TimeoutError:
+            continue
+
+
+@asynccontextmanager
+async def _run_gate_slot(db: Session, stream_id: str, *, is_intake: bool) -> AsyncGenerator[None, None]:
+    """获取并持有闸门槽位，退出时释放（成功/失败/取消统一收口）。"""
+    gate = _get_run_gate()
+    await _acquire_run_gate(gate, db, stream_id, is_intake=is_intake)
+    try:
+        yield
+    finally:
+        gate.release(is_intake=is_intake)
+
+
+# 每会话串行化锁注册表：conversation_id -> asyncio.Lock，引用计数回收避免无限增长。
+_conversation_locks: dict[int, asyncio.Lock] = {}
+_conversation_lock_refs: dict[int, int] = {}
+
+
+@asynccontextmanager
+async def _conversation_slot(db: Session, conversation_id: int, stream_id: str) -> AsyncGenerator[None, None]:
+    """同一 conversation 内仅允许一个 run 进入执行主体；等待期间保持可取消。
+
+    第二个 run 在此等待时其 stream_status 仍为 pending（认领发生在获得槽位之后），
+    与前端已有 pending 态契约一致；首个 run 完成/取消/失败后槽位释放，后续 run 继续。
+    """
+    lock = _conversation_locks.get(conversation_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _conversation_locks[conversation_id] = lock
+        _conversation_lock_refs[conversation_id] = 0
+    _conversation_lock_refs[conversation_id] += 1
+    acquired = False
+    try:
+        while True:
+            raise_if_stream_cancelled(db, stream_id)
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=_GATE_POLL_INTERVAL_SECONDS)
+                acquired = True
+                break
+            except asyncio.TimeoutError:
+                continue
+        yield
+    finally:
+        if acquired:
+            lock.release()
+        _conversation_lock_refs[conversation_id] -= 1
+        if _conversation_lock_refs[conversation_id] <= 0:
+            _conversation_locks.pop(conversation_id, None)
+            _conversation_lock_refs.pop(conversation_id, None)
+
+
+def _intent_from_first_update(first_chunk: Any) -> str:
+    """从图首个 super-step（intent_router）的 updates 结果里提取 intent。
+
+    依赖 LangGraph 图结构：intent_router 为入口节点且不产出 custom 事件，
+    首个 updates chunk 即为 ``{"intent_router": {"intent": ...}}``。解析失败
+    （未来图结构调整）时保守退化为 general_chat（低优先级，不影响正确性）。
+    """
+    if first_chunk is None:
+        return "general_chat"
+    mode, payload = first_chunk
+    if mode == "updates" and isinstance(payload, dict):
+        for node_update in payload.values():
+            if isinstance(node_update, dict):
+                intent = node_update.get("intent")
+                if intent:
+                    return str(intent)
+    return "general_chat"
+
+
+def _reset_concurrency_state() -> None:
+    """清空并发调度相关进程内状态（仅测试用）。"""
+    global _run_gate_cache
+    _run_gate_cache = None
+    _conversation_locks.clear()
+    _conversation_lock_refs.clear()
 
 
 def _schedule_checkpoint_cleanup(thread_ids: Iterable[str | None]) -> None:
@@ -536,6 +736,20 @@ def queue_message(
         text_content="",
         structured_payload={},
     )
+    # P1-2 检测：同一 conversation 已有 pending/active run 时，新 run 会被
+    # consume_stream 的每会话串行锁延后执行；这里仅做结构化日志告警便于观测。
+    prior_runs = db.scalars(
+        select(AgentRun.id).where(
+            AgentRun.conversation_id == conversation_id,
+            AgentRun.stream_status.in_(("pending", "active")),
+        )
+    ).all()
+    if prior_runs:
+        logger.warning(
+            "conversation_concurrent_run_detected conversation_id=%s prior_run_ids=%s action=defer_serialized",
+            conversation_id,
+            [int(run_id) for run_id in prior_runs],
+        )
     agent_run = AgentRun(
         user_id=user_id,
         workflow="conversation_stream",
@@ -569,6 +783,30 @@ def _claim_pending_stream(db: Session, agent_run_id: int) -> bool:
     )
     db.commit()
     return result.rowcount == 1
+
+
+def _finalize_cancelled_run(
+    db: Session,
+    agent_run: AgentRun,
+    assistant_message: ConversationMessage,
+    stream_id: str,
+) -> dict:
+    """把 run 收口为 cancelled，返回 run_cancelled SSE 事件载荷。"""
+    assistant_message.status = "completed"
+    agent_run.status = "cancelled"
+    agent_run.stream_status = "cancelled"
+    agent_run.completed_at = datetime.now(timezone.utc)
+    agent_run.output_json = {**dict(agent_run.output_json or {}), "completion_status": "cancelled"}
+    db.commit()
+    clear_stream_cancelled(stream_id)
+    return {
+        "event": "run_cancelled",
+        "data": {
+            "assistant_message_id": assistant_message.id,
+            "stream_id": stream_id,
+            "stream_status": "cancelled",
+        },
+    }
 
 
 async def consume_stream(
@@ -614,101 +852,95 @@ async def consume_stream(
         }
         return
 
-    if not _claim_pending_stream(db, agent_run.id):
-        # 同一 stream 的并发消费者可能已在本次读取后完成抢占，必须以数据库
-        # 当前状态为准，不能依赖当前 Session 中可能过期的 ORM 实例。
-        db.refresh(agent_run)
-        if agent_run.stream_status == "completed":
-            async for item in _replay_completed_run(db, agent_run, assistant_message):
-                yield item
-            return
-        if agent_run.stream_status == "active":
-            raise ValueError("这条消息正在生成中，请稍后再试。")
-        raise ValueError("这条消息无法开始生成，请新建消息后重试。")
-
-    payload = dict(agent_run.input_json or {})
-    text_content = str(payload.get("text_content") or "")
-    attachment_ids = list(payload.get("attachment_ids") or [])
-    selected_tool = payload.get("selected_tool")
-    context = dict(payload.get("context") or {})
-    if agent_run.user_message_id:
-        history_lines = _resolve_conversation_history_lines(
-            db,
-            conversation_id=conversation_id,
-            current_user_message_id=agent_run.user_message_id,
-        )
-        if history_lines:
-            context["conversation_history_lines"] = history_lines
-    assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
-    attachment_parts = [part for asset in assets for part in asset.parts]
-
-    yield {
-        "event": "run_started",
-        "data": {
-            "assistant_message_id": assistant_message.id,
-            "stream_id": stream_id,
-        },
-    }
-
+    # P1-2 每会话串行化：同一 conversation 已有 run 执行时，本 run 保持 pending
+    # 等待（认领发生在获得槽位之后），与前端已有 pending 态契约一致。等待期间
+    # 可取消：命中即抛 AgentRunCancelled，由外层 except 统一收口。
     try:
-        if get_settings().agent_backend == "legacy":
-            async for item in _consume_stream_legacy(
-                db,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                stream_id=stream_id,
-                agent_run=agent_run,
-                assistant_message=assistant_message,
-                thread=thread,
-                text_content=text_content,
-                attachment_ids=attachment_ids,
-                selected_tool=selected_tool,
-                attachment_parts=attachment_parts,
-                context=context,
-            ):
-                yield item
-            return
-        async for item in _consume_stream_graph(
-            db,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            stream_id=stream_id,
-            agent_run=agent_run,
-            assistant_message=assistant_message,
-            thread=thread,
-            text_content=text_content,
-            attachment_ids=attachment_ids,
-            selected_tool=selected_tool,
-            attachment_parts=attachment_parts,
-            context=context,
-        ):
-            yield item
+        async with _conversation_slot(db, conversation_id, stream_id):
+            if not _claim_pending_stream(db, agent_run.id):
+                # 同一 stream 的并发消费者可能已在本次读取后完成抢占，必须以数据库
+                # 当前状态为准，不能依赖当前 Session 中可能过期的 ORM 实例。
+                db.refresh(agent_run)
+                if agent_run.stream_status == "completed":
+                    async for item in _replay_completed_run(db, agent_run, assistant_message):
+                        yield item
+                    return
+                if agent_run.stream_status == "active":
+                    raise ValueError("这条消息正在生成中，请稍后再试。")
+                raise ValueError("这条消息无法开始生成，请新建消息后重试。")
+
+            payload = dict(agent_run.input_json or {})
+            text_content = str(payload.get("text_content") or "")
+            attachment_ids = list(payload.get("attachment_ids") or [])
+            selected_tool = payload.get("selected_tool")
+            context = dict(payload.get("context") or {})
+            if agent_run.user_message_id:
+                history_lines = _resolve_conversation_history_lines(
+                    db,
+                    conversation_id=conversation_id,
+                    current_user_message_id=agent_run.user_message_id,
+                )
+                if history_lines:
+                    context["conversation_history_lines"] = history_lines
+            assets = build_attachment_prompt_assets(db, user_id=user_id, attachment_ids=attachment_ids)
+            attachment_parts = [part for asset in assets for part in asset.parts]
+
+            yield {
+                "event": "run_started",
+                "data": {
+                    "assistant_message_id": assistant_message.id,
+                    "stream_id": stream_id,
+                },
+            }
+
+            try:
+                if get_settings().agent_backend == "legacy":
+                    async for item in _consume_stream_legacy(
+                        db,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        stream_id=stream_id,
+                        agent_run=agent_run,
+                        assistant_message=assistant_message,
+                        thread=thread,
+                        text_content=text_content,
+                        attachment_ids=attachment_ids,
+                        selected_tool=selected_tool,
+                        attachment_parts=attachment_parts,
+                        context=context,
+                    ):
+                        yield item
+                    return
+                async for item in _consume_stream_graph(
+                    db,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    stream_id=stream_id,
+                    agent_run=agent_run,
+                    assistant_message=assistant_message,
+                    thread=thread,
+                    text_content=text_content,
+                    attachment_ids=attachment_ids,
+                    selected_tool=selected_tool,
+                    attachment_parts=attachment_parts,
+                    context=context,
+                ):
+                    yield item
+            except AgentRunCancelled as exc:
+                # 发送中停止：保留已流出的文本，run_cancelled 收口，不视为失败
+                yield _finalize_cancelled_run(db, agent_run, assistant_message, exc.stream_id)
+            except Exception as exc:
+                agent_run.status = "failed"
+                agent_run.stream_status = "failed"
+                agent_run.error_message = exc.message if isinstance(exc, LLMServiceError) else str(exc)
+                agent_run.completed_at = datetime.now(timezone.utc)
+                assistant_message.status = "failed"
+                agent_run.output_json = {**dict(agent_run.output_json or {}), "completion_status": "failed"}
+                db.commit()
+                yield {"event": "run_failed", "data": _error_payload(exc, assistant_message_id=assistant_message.id)}
     except AgentRunCancelled as exc:
-        # 发送中停止：保留已流出的文本，run_cancelled 收口，不视为失败
-        assistant_message.status = "completed"
-        agent_run.status = "cancelled"
-        agent_run.stream_status = "cancelled"
-        agent_run.completed_at = datetime.now(timezone.utc)
-        agent_run.output_json = {**dict(agent_run.output_json or {}), "completion_status": "cancelled"}
-        db.commit()
-        clear_stream_cancelled(exc.stream_id)
-        yield {
-            "event": "run_cancelled",
-            "data": {
-                "assistant_message_id": assistant_message.id,
-                "stream_id": stream_id,
-                "stream_status": "cancelled",
-            },
-        }
-    except Exception as exc:
-        agent_run.status = "failed"
-        agent_run.stream_status = "failed"
-        agent_run.error_message = exc.message if isinstance(exc, LLMServiceError) else str(exc)
-        agent_run.completed_at = datetime.now(timezone.utc)
-        assistant_message.status = "failed"
-        agent_run.output_json = {**dict(agent_run.output_json or {}), "completion_status": "failed"}
-        db.commit()
-        yield {"event": "run_failed", "data": _error_payload(exc, assistant_message_id=assistant_message.id)}
+        # 等待每会话串行槽位期间被取消（尚未认领，stream_status 仍为 pending/cancelling）。
+        yield _finalize_cancelled_run(db, agent_run, assistant_message, exc.stream_id)
 
 
 async def _consume_stream_legacy(
@@ -763,77 +995,78 @@ async def _consume_stream_legacy(
     }
     db.commit()
 
-    if intent == "general_chat":
-        async for item in stream_general_chat(
-            db,
-            thread,
-            assistant_message,
-            agent_run,
-            user_message=text_content,
-            attachment_parts=attachment_parts,
-            conversation_history_lines=list(context.get("conversation_history_lines") or []),
-            stream_id=stream_id,
-        ):
+    async with _run_gate_slot(db, stream_id, is_intake=intent in INTAKE_INTENTS):
+        if intent == "general_chat":
+            async for item in stream_general_chat(
+                db,
+                thread,
+                assistant_message,
+                agent_run,
+                user_message=text_content,
+                attachment_parts=attachment_parts,
+                conversation_history_lines=list(context.get("conversation_history_lines") or []),
+                stream_id=stream_id,
+            ):
+                yield item
+            final_text = assistant_message.text_content or ""
+            degradations: list[dict] = []
+            if not final_text.strip():
+                final_text = EMPTY_ANSWER_FALLBACK_TEXT
+                degradations.append({"operation": "empty_answer_fallback", "reason": "empty_stream"})
+            _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[], degradations=degradations)
+            yield {"event": "message_completed", "data": {"message": message_payload(assistant_message)}}
+            yield {"event": "run_completed", "data": {"stream_id": stream_id}}
+            return
+
+        if intent == "schedule_intake":
+            final_text, created_ids, requires_approval, tool_events = await process_schedule_intake(
+                db,
+                user_id,
+                thread,
+                agent_run,
+                text_content=text_content,
+                attachment_ids=attachment_ids,
+                context=context,
+                action_group_id=context.get("pending_action_group_id") or None,
+                revision=int(context.get("pending_revision") or 1),
+                stream_id=stream_id,
+            )
+        else:
+            final_text, created_ids, requires_approval, tool_events = await process_quick_note_intake(
+                db,
+                user_id,
+                thread,
+                agent_run,
+                text_content=text_content,
+                attachment_ids=attachment_ids,
+                context=context,
+                action_group_id=context.get("pending_action_group_id") or None,
+                revision=int(context.get("pending_revision") or 1),
+                stream_id=stream_id,
+            )
+
+        for tool_event in tool_events:
+            yield tool_event
+        # 卡片前置说明：先发一句感知说明，再输出最终文案（emit_text_stream 追加语义）
+        preamble = (
+            "我注意到你想安排日程，我来整理一下。"
+            if intent == "schedule_intake"
+            else "我帮你记一条速记。"
+        )
+        assistant_message.text_content = (assistant_message.text_content or "") + preamble
+        db.commit()
+        yield {"event": "message_delta", "data": {"assistant_message_id": assistant_message.id, "delta": preamble}}
+        async for item in emit_text_stream(db, assistant_message, final_text, stream_id=stream_id):
             yield item
-        final_text = assistant_message.text_content or ""
-        degradations: list[dict] = []
-        if not final_text.strip():
-            final_text = EMPTY_ANSWER_FALLBACK_TEXT
-            degradations.append({"operation": "empty_answer_fallback", "reason": "empty_stream"})
-        _finalize_run(db, agent_run, assistant_message, assistant_text=final_text, created_message_ids=[], degradations=degradations)
+        _finalize_run(db, agent_run, assistant_message, assistant_text=assistant_message.text_content or "", created_message_ids=created_ids)
         yield {"event": "message_completed", "data": {"message": message_payload(assistant_message)}}
+        for message_id in created_ids:
+            message = db.get(ConversationMessage, message_id)
+            if message:
+                yield {"event": "card_snapshot", "data": {"message": message_payload(message)}}
+        if requires_approval:
+            yield {"event": "approval_required", "data": requires_approval}
         yield {"event": "run_completed", "data": {"stream_id": stream_id}}
-        return
-
-    if intent == "schedule_intake":
-        final_text, created_ids, requires_approval, tool_events = await process_schedule_intake(
-            db,
-            user_id,
-            thread,
-            agent_run,
-            text_content=text_content,
-            attachment_ids=attachment_ids,
-            context=context,
-            action_group_id=context.get("pending_action_group_id") or None,
-            revision=int(context.get("pending_revision") or 1),
-            stream_id=stream_id,
-        )
-    else:
-        final_text, created_ids, requires_approval, tool_events = await process_quick_note_intake(
-            db,
-            user_id,
-            thread,
-            agent_run,
-            text_content=text_content,
-            attachment_ids=attachment_ids,
-            context=context,
-            action_group_id=context.get("pending_action_group_id") or None,
-            revision=int(context.get("pending_revision") or 1),
-            stream_id=stream_id,
-        )
-
-    for tool_event in tool_events:
-        yield tool_event
-    # 卡片前置说明：先发一句感知说明，再输出最终文案（emit_text_stream 追加语义）
-    preamble = (
-        "我注意到你想安排日程，我来整理一下。"
-        if intent == "schedule_intake"
-        else "我帮你记一条速记。"
-    )
-    assistant_message.text_content = (assistant_message.text_content or "") + preamble
-    db.commit()
-    yield {"event": "message_delta", "data": {"assistant_message_id": assistant_message.id, "delta": preamble}}
-    async for item in emit_text_stream(db, assistant_message, final_text, stream_id=stream_id):
-        yield item
-    _finalize_run(db, agent_run, assistant_message, assistant_text=assistant_message.text_content or "", created_message_ids=created_ids)
-    yield {"event": "message_completed", "data": {"message": message_payload(assistant_message)}}
-    for message_id in created_ids:
-        message = db.get(ConversationMessage, message_id)
-        if message:
-            yield {"event": "card_snapshot", "data": {"message": message_payload(message)}}
-    if requires_approval:
-        yield {"event": "approval_required", "data": requires_approval}
-    yield {"event": "run_completed", "data": {"stream_id": stream_id}}
 
 
 async def _consume_stream_graph(
@@ -885,13 +1118,29 @@ async def _consume_stream_graph(
         }
     }
     final_update: dict[str, Any] = {}
-    async for mode, chunk in graph.astream(initial, config, stream_mode=["updates", "custom"]):
-        # 图事件边界检查持久化取消状态，跨 worker 的 abort 也会在此收口。
-        raise_if_stream_cancelled(db, stream_id)
-        if mode == "custom":
-            yield chunk
-        elif isinstance(chunk, dict):
-            final_update = chunk.get("finalize") or {}
+    stream = graph.astream(initial, config, stream_mode=["updates", "custom"])
+    # 先推进 intent_router 首个 super-step 确定 intent，据此按优先级进入并发闸门；
+    # 路由（LLM 前置）属于轻量编排，不计入闸门，也避免重复路由。
+    try:
+        first_chunk = await stream.__anext__()
+    except StopAsyncIteration:
+        first_chunk = None
+    intent = _intent_from_first_update(first_chunk)
+
+    async with _run_gate_slot(db, stream_id, is_intake=intent in INTAKE_INTENTS):
+        if first_chunk is not None:
+            mode, chunk = first_chunk
+            if mode == "custom":
+                yield chunk
+            elif isinstance(chunk, dict):
+                final_update = chunk.get("finalize") or {}
+        async for mode, chunk in stream:
+            # 图事件边界检查持久化取消状态，跨 worker 的 abort 也会在此收口。
+            raise_if_stream_cancelled(db, stream_id)
+            if mode == "custom":
+                yield chunk
+            elif isinstance(chunk, dict):
+                final_update = chunk.get("finalize") or {}
 
     # 图节点使用短生命周期 Session；外层流 Session 必须刷新，避免以过期 ORM
     # 实例覆盖节点已提交的文本、卡片或 run 状态。

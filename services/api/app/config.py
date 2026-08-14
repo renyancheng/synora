@@ -35,6 +35,22 @@ class Settings(BaseSettings):
 
     agent_backend: str = "langgraph"  # "langgraph" | "legacy"
     agent_max_loop_iterations: int = 4
+    # 运行级预算：单 run 总 wall-clock 时长（秒，0 关闭）。
+    agent_max_run_seconds: int = 120
+    # 单轮 token 上限（0 不限制）：create_chat_model 未显式传 max_tokens 时注入。
+    agent_max_tokens_per_round: int = 0
+    # 单 run 总 token 上限（0 关闭）：当前仅由 _route_loop 读取，usage 记账由后续任务实现。
+    agent_max_run_tokens: int = 0
+    # --- P1-2 Agent 运行并发与优先级调度 ---
+    # 全局并发闸门：进程内同时执行的 agent run 数上限（0=不限制）。
+    agent_max_concurrent_runs: int = 8
+    # intake（schedule_intake / quick_note_intake）并发上限（0=等于全局上限）。
+    agent_max_intake_concurrent_runs: int = 0
+    # general_chat 并发上限（0=由全局上限与保留槽位推导：全局上限 - agent_intake_reserved_slots）。
+    agent_max_general_chat_concurrent_runs: int = 0
+    # intake 保留槽位：general_chat 最多占用（全局上限 - 保留槽位）个并发槽位，
+    # 保证日程/速记这类秒级确定性卡片流程在 general_chat 占满闸门时仍能进入执行。
+    agent_intake_reserved_slots: int = 2
     pending_draft_timeout_hours: int = 6
     pending_nudge_max: int = 2
     pending_nudge_cooldown_hours: int = 24

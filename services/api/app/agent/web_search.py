@@ -4,10 +4,16 @@
 - 模型固定为 search_std；API Key 通过环境变量 SYNORA_ZHIPU_WEB_SEARCH_API_KEY 配置。
 - 未配置 / 超时 / 非 200 时返回结构化错误文本，工具自身不抛异常，保证 agent 流程
   不因搜索不可用而中断；调用审计由 conversation 服务统一记录。
+- 进程内 TTL 缓存：仅缓存成功结果（status == "ok"），键为归一化 query。多进程
+  部署下为每进程独立缓存；如需跨进程共享，可升级为 Redis（key=归一化 query，
+  value=结果 JSON 字符串，TTL=WEB_SEARCH_CACHE_TTL_SECONDS）。
 """
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -15,6 +21,13 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+
+# 进程内搜索缓存：query(归一化) -> (写入时间戳 monotonic, 结果 JSON 字符串)。
+# 仅缓存成功结果；错误结果（未配置 / 超时 / 非 200 / 解析失败）不缓存。
+WEB_SEARCH_CACHE_TTL_SECONDS = 300
+WEB_SEARCH_CACHE_MAX_ENTRIES = 128
+_SEARCH_CACHE: dict[str, tuple[float, str]] = {}
+_CACHE_LOCK = threading.Lock()
 
 
 class WebSearchQuery(BaseModel):
@@ -117,7 +130,46 @@ def _run_search(query: str) -> WebSearchResult:
     return WebSearchResult(status="ok", content=content, references=references)
 
 
+def _normalize_query(query: str) -> str:
+    """缓存键归一化：strip + 小写 + 连续空白压缩为单个空格。"""
+    return " ".join(str(query or "").strip().lower().split())
+
+
+def _cache_get(key: str) -> str | None:
+    """命中且未过期则返回缓存字符串；过期条目就地清理。"""
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        entry = _SEARCH_CACHE.get(key)
+        if entry is None:
+            return None
+        if now - entry[0] >= WEB_SEARCH_CACHE_TTL_SECONDS:
+            _SEARCH_CACHE.pop(key, None)
+            return None
+        return entry[1]
+
+
+def _cache_put(key: str, value: str) -> None:
+    """写入缓存；超出容量上限时淘汰时间戳最小（最旧）的一条。"""
+    with _CACHE_LOCK:
+        _SEARCH_CACHE[key] = (time.monotonic(), value)
+        if len(_SEARCH_CACHE) > WEB_SEARCH_CACHE_MAX_ENTRIES:
+            oldest_key = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
+            _SEARCH_CACHE.pop(oldest_key, None)
+
+
 @tool("web_search", args_schema=WebSearchQuery)
 def web_search(query: str) -> dict[str, Any]:
     """联网搜索：当需要最新信息、外部资料或核查不确定的事实时使用。"""
-    return _run_search(query).model_dump(mode="json")
+    cache_key = _normalize_query(query)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        try:
+            return json.loads(cached)
+        except ValueError:
+            # 缓存内容异常时回退到真实搜索，保证对外行为不受缓存损坏影响。
+            pass
+    result = _run_search(query)
+    result_dict = result.model_dump(mode="json")
+    if result.status == "ok":
+        _cache_put(cache_key, json.dumps(result_dict, ensure_ascii=False))
+    return result_dict

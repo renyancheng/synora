@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from langgraph.config import get_config, get_stream_writer
@@ -127,6 +128,7 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
         resources.close()
     return {
         "plan": result.get("plan") or "",
+        "run_started_at": time.monotonic(),
         "iteration_count": 0,
         "max_iterations": get_settings().agent_max_loop_iterations,
         "loop_decision": "continue",
@@ -135,15 +137,65 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
 
 
 async def act_node(state: AgentState) -> dict[str, Any]:
-    """act：astream 流式吐文本，捕获 tool_calls（general_chat 不绑定任何工具）。"""
+    """act：astream 流式吐文本，捕获 tool_calls（general_chat 不绑定任何工具）。
+
+    运行时长预算：plan 写入 run_started_at 后，若距启动已超出预算则跳过 act_step，
+    写入一条失败推理步骤并置 budget_exhausted，交由 reflect/路由安全收口（不抛异常）。
+    """
     resources = _load_resources(state)
     writer = get_stream_writer()
+    settings = get_settings()
+    run_started_at = float(state.get("run_started_at") or 0.0)
+    if (
+        settings.agent_max_run_seconds > 0
+        and run_started_at > 0
+        and (time.monotonic() - run_started_at) >= settings.agent_max_run_seconds
+    ):
+        assistant_text = resources.assistant_message.text_content or ""
+        step: dict[str, Any] = {
+            "seq": len(list(state.get("reasoning_steps") or [])) + 1,
+            "step_type": "act",
+            "label": "行动",
+            "content": "运行时长预算已用尽，中止本轮行动",
+            "status": "failed",
+            "iteration": int(state.get("iteration_count") or 0),
+        }
+        try:
+            writer(build_reasoning_step_event(resources.assistant_message.id, step))
+        finally:
+            resources.close()
+        return {
+            "agent_messages": [],
+            "pending_tool_calls": [],
+            "current_aimessage": None,
+            "iteration_count": int(state.get("iteration_count") or 0),
+            "assistant_text": assistant_text,
+            "budget_exhausted": True,
+            "reasoning_steps": [step],
+        }
+    current_iteration = int(state.get("iteration_count") or 0)
     try:
         result = await act_step(resources.db, resources.thread, resources.assistant_message, resources.agent_run, state=dict(state), emit=writer)
         assistant_text = resources.assistant_message.text_content or ""
     finally:
         resources.close()
     aimessage = result.get("aimessage")
+    # token 记账：本轮 round_tokens 累加进 state.total_tokens，并把本轮指标追加进 step_metrics。
+    round_tokens = result.get("round_tokens") or {}
+    round_prompt = int(round_tokens.get("prompt_tokens") or 0)
+    round_completion = int(round_tokens.get("completion_tokens") or 0)
+    round_latency = int(round_tokens.get("latency_ms") or 0)
+    total_tokens = int(state.get("total_tokens") or 0) + round_prompt + round_completion
+    step_metrics = list(state.get("step_metrics") or [])
+    step_metrics.append(
+        {
+            "iteration": current_iteration,
+            "step_type": "act",
+            "prompt_tokens": round_prompt,
+            "completion_tokens": round_completion,
+            "latency_ms": round_latency,
+        }
+    )
     return {
         "agent_messages": [aimessage] if aimessage else [],
         "pending_tool_calls": list(result.get("pending_tool_calls") or []),
@@ -151,6 +203,9 @@ async def act_node(state: AgentState) -> dict[str, Any]:
         "iteration_count": int(result.get("iteration") or 1),
         "assistant_text": assistant_text,
         "reasoning_steps": list(result.get("steps") or []),
+        "memory_payload": result.get("memory_payload") or {"summary": "", "items": []},
+        "total_tokens": total_tokens,
+        "step_metrics": step_metrics,
     }
 
 
@@ -173,16 +228,25 @@ async def observe_node(state: AgentState) -> dict[str, Any]:
 
 
 async def reflect_node(state: AgentState) -> dict[str, Any]:
-    """reflect：启发式短路 + LLM 评估，产出 loop_decision。"""
+    """reflect：启发式短路 + LLM 评估，产出 loop_decision。
+
+    运行时长预算：若 act 已因预算中止（budget_exhausted）且 reflect_step 仍判定
+    continue，则覆盖为 done 并给出安全收口说明，避免预算中止后继续空转。
+    """
     resources = _load_resources(state)
     writer = get_stream_writer()
     try:
         result = await reflect_step(resources.db, resources.thread, resources.assistant_message, resources.agent_run, state=dict(state), emit=writer)
     finally:
         resources.close()
+    loop_decision = result.get("loop_decision") or "done"
+    reflection = result.get("reflection") or ""
+    if state.get("budget_exhausted") and loop_decision == "continue":
+        loop_decision = "done"
+        reflection = "已达运行时长预算，安全收口"
     return {
-        "loop_decision": result.get("loop_decision") or "done",
-        "reflection": result.get("reflection") or "",
+        "loop_decision": loop_decision,
+        "reflection": reflection,
         "follow_up_prompt": result.get("follow_up_prompt"),
         "anti_repeat_used": bool(result.get("anti_repeat_used")),
         "anti_empty_retries": int(result.get("anti_empty_retries") or 0),

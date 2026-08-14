@@ -148,22 +148,29 @@ def create_chat_model(
     temperature: float,
     streaming: bool = False,
     enable_thinking: bool | None = None,
+    max_tokens: int | None = None,
 ) -> ChatOpenAI:
     require_api_key(settings, operation="create_chat_model")
     extra_body: dict[str, object] | None = None
     if is_qwen_model(settings) and enable_thinking is not None:
         extra_body = {"enable_thinking": bool(enable_thinking)}
-    return ChatOpenAI(
-        model=settings.llm_model,
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        timeout=float(settings.llm_timeout_seconds),
-        temperature=temperature,
-        streaming=streaming,
-        max_retries=0,
-        use_responses_api=False,
-        extra_body=extra_body,
-    )
+    chat_kwargs: dict[str, object] = {
+        "model": settings.llm_model,
+        "api_key": settings.llm_api_key,
+        "base_url": settings.llm_base_url,
+        "timeout": float(settings.llm_timeout_seconds),
+        "temperature": temperature,
+        "streaming": streaming,
+        "max_retries": 0,
+        "use_responses_api": False,
+        "extra_body": extra_body,
+    }
+    # 单轮 token 上限：调用方显式传入时以调用方为准；未传且设置 > 0 时注入默认上限。
+    if max_tokens is not None:
+        chat_kwargs["max_tokens"] = max_tokens
+    elif settings.agent_max_tokens_per_round > 0:
+        chat_kwargs["max_tokens"] = settings.agent_max_tokens_per_round
+    return ChatOpenAI(**chat_kwargs)
 
 
 def build_message_content(*, user_text: str, attachment_parts: list[dict] | None = None) -> list[dict]:

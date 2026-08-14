@@ -24,6 +24,7 @@ from app.agent.nodes import (
     schedule_intake_node,
 )
 from app.agent.state import AgentState
+from app.config import get_settings
 
 
 def _route_branch(state: AgentState) -> str:
@@ -31,7 +32,15 @@ def _route_branch(state: AgentState) -> str:
 
 
 def _route_loop(state: AgentState) -> str:
-    """reflect 条件边：continue 且未达最大迭代次数则回 act，否则 finalize。"""
+    """reflect 条件边：continue 且未达最大迭代次数则回 act，否则 finalize。
+
+    除轮次上限外，运行时长预算（budget_exhausted）与总 token 预算命中时直接收口。
+    """
+    if state.get("budget_exhausted"):
+        return "finalize"
+    settings = get_settings()
+    if settings.agent_max_run_tokens > 0 and int(state.get("total_tokens") or 0) >= settings.agent_max_run_tokens:
+        return "finalize"
     if state.get("loop_decision") == "continue" and int(state.get("iteration_count") or 0) < int(
         state.get("max_iterations") or 4
     ):

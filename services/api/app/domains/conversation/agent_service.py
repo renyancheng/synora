@@ -7,9 +7,11 @@ legacy 路径（``_consume_stream_legacy``）与 LangGraph 节点（``app.agent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
@@ -56,6 +58,14 @@ RECENT_MESSAGE_LLM_WINDOW = 8
 # 确定性 plan 阈值：简单问答（无工具倾向、无时间/日程/速记锚点、较短输入）
 # 直接采用确定性计划，不再发起额外 LLM 调用。
 DETERMINISTIC_PLAN_MAX_INPUT_CHARS = 40
+
+# observe 阶段真实工具并发上限（asyncio.Semaphore），避免多工具同时打爆下游。
+GENERAL_CHAT_TOOL_CONCURRENCY = 4
+
+# 工具结果写入 ToolMessage 前的压缩阈值：超长结果截断，完整结果仍进审计。
+TOOL_RESULT_MAX_CHARS = 800
+WEB_SEARCH_MAX_REFERENCES = 3
+TOOL_RESULT_TRUNCATED_SUFFIX = "（内容过长已截断）"
 
 
 def _extract_model_chunk_delta(chunk: Any) -> str:
@@ -180,6 +190,51 @@ def serialize_tool_result(result: Any) -> str:
         return str(result)
 
 
+def _safe_int(value: Any) -> int:
+    """容错转 int：缺失 / 非法值一律记 0，绝不抛异常。"""
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_chunk_usage(chunk: Any) -> tuple[int, int]:
+    """从流式 chunk 提取 (prompt_tokens, completion_tokens)。
+
+    优先 langchain 的 usage_metadata，兼容 input_tokens/output_tokens 与
+    prompt_tokens/completion_tokens 两套命名；拿不到就记 0，绝不因缺失报错。
+    """
+    usage_metadata = getattr(chunk, "usage_metadata", None)
+    prompt = completion = 0
+    if isinstance(usage_metadata, dict):
+        prompt = _safe_int(usage_metadata.get("input_tokens") or usage_metadata.get("prompt_tokens"))
+        completion = _safe_int(usage_metadata.get("output_tokens") or usage_metadata.get("completion_tokens"))
+    elif usage_metadata is not None:
+        prompt = _safe_int(getattr(usage_metadata, "input_tokens", None) or getattr(usage_metadata, "prompt_tokens", None))
+        completion = _safe_int(getattr(usage_metadata, "output_tokens", None) or getattr(usage_metadata, "completion_tokens", None))
+    if not prompt:
+        prompt = _safe_int(getattr(chunk, "input_tokens", None) or getattr(chunk, "prompt_tokens", None))
+    if not completion:
+        completion = _safe_int(getattr(chunk, "output_tokens", None) or getattr(chunk, "completion_tokens", None))
+    return prompt, completion
+
+
+def _prepare_tool_content(name: str, result: Any) -> str:
+    """组装写入 ToolMessage 的文本：web_search 的 references 最多保留前 N 条，
+    超长结果截断并追加标记。完整结果仍由调用方写入审计 response_json。"""
+    display = result
+    if name == "web_search" and isinstance(result, dict) and isinstance(result.get("references"), list):
+        references = result.get("references")
+        if len(references) > WEB_SEARCH_MAX_REFERENCES:
+            display = {**result, "references": references[:WEB_SEARCH_MAX_REFERENCES]}
+    content_text = serialize_tool_result(display)
+    if len(content_text) > TOOL_RESULT_MAX_CHARS:
+        content_text = content_text[:TOOL_RESULT_MAX_CHARS] + TOOL_RESULT_TRUNCATED_SUFFIX
+    return content_text
+
+
 def sanitize_follow_up_prompt(value: Any) -> str | None:
     prompt = re.sub(r"\s+", " ", str(value or "")).strip()
     if not prompt:
@@ -220,6 +275,7 @@ def build_general_chat_messages(
     agent_messages: list[dict] | None = None,
     follow_up_prompt: str | None = None,
     plan: str | None = None,
+    memory_context: dict | None = None,
 ) -> list[Any]:
     recent_messages = db.scalars(
         select(ConversationMessage)
@@ -228,8 +284,13 @@ def build_general_chat_messages(
         .limit(RECENT_MESSAGE_DB_WINDOW)
     ).all()
     ordered = list(reversed(list(recent_messages)))
-    memory_context = MemoryService().retrieve_context(db, user_id=thread.user_id, query_text=user_message)
-    memory_text = ContextAssembler.build_memory_context(memory_summary=memory_context.summary, memory_items=memory_context.items)
+    # 记忆只检索一次：act_step 首轮检索后经 memory_context 传入，多轮复用，
+    # 不再每轮重复向量检索。传入 None（旧调用方）时按空记忆处理，保持兼容。
+    memory_context = memory_context or {"summary": "", "items": []}
+    memory_text = ContextAssembler.build_memory_context(
+        memory_summary=str(memory_context.get("summary") or ""),
+        memory_items=list(memory_context.get("items") or []),
+    )
     history_text = ContextAssembler.build_conversation_history_context(conversation_history_lines)
     prompt_parts = [part for part in (memory_text, history_text, f"当前输入：\n{user_message}".strip()) if part]
     # plan 进入模型上下文，约束当前执行目标；plan 只用于展示的伪计划已废弃。
@@ -430,10 +491,30 @@ async def plan_step(db: Session, thread: ConversationThread, assistant_message: 
 
 
 async def act_step(db: Session, thread: ConversationThread, assistant_message: ConversationMessage, agent_run: AgentRun, *, state: dict[str, Any], emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
-    del agent_run
     iteration = int(state.get("iteration_count") or 0)
     running_step = {"seq": len(list(state.get("reasoning_steps") or [])) + 1, "step_type": "act", "label": "行动", "content": "", "status": "running", "iteration": iteration}
     emit(build_reasoning_step_event(assistant_message.id, running_step))
+    # 记忆只检索一次：首轮（iteration 0）且 state 无 memory_payload 时检索一次，
+    # 后续轮次从 state 复用，避免多轮向量检索重复浪费。检索失败按空记忆降级。
+    memory_payload = state.get("memory_payload")
+    if memory_payload is None and iteration == 0:
+        try:
+            memory_context = MemoryService().retrieve_context(
+                db,
+                user_id=thread.user_id,
+                query_text=state.get("user_message") or "",
+            )
+            memory_payload = {"summary": str(memory_context.summary or ""), "items": list(memory_context.items or [])}
+        except Exception as exc:
+            logger.warning(
+                "agent_memory_retrieval_degraded run_id=%s conversation_id=%s reason=%s fallback=empty",
+                state.get("agent_run_id"),
+                state.get("conversation_id"),
+                type(exc).__name__,
+            )
+            memory_payload = {"summary": "", "items": []}
+    if memory_payload is None:
+        memory_payload = {"summary": "", "items": []}
     execution_plan = str(state.get("plan") or "").strip() if iteration == 0 else ""
     messages = build_general_chat_messages(
         db,
@@ -445,6 +526,7 @@ async def act_step(db: Session, thread: ConversationThread, assistant_message: C
         agent_messages=list(state.get("agent_messages") or []),
         follow_up_prompt=state.get("follow_up_prompt"),
         plan=execution_plan or None,
+        memory_context=memory_payload,
     )
     model = llm.create_chat_model(get_settings(), temperature=0.6, streaming=True, enable_thinking=False)
     act_tools = await build_agent_tools(include_names=GENERAL_CHAT_ACTIVE_TOOLS)
@@ -456,6 +538,8 @@ async def act_step(db: Session, thread: ConversationThread, assistant_message: C
         db.commit()
         emit({"event": "message_reset", "data": {"assistant_message_id": assistant_message.id}})
     final_text, iteration_text, raw_tool_calls = assistant_message.text_content or "", "", []
+    prompt_tokens = completion_tokens = 0
+    started_at = time.monotonic()
     text_buffer = MessageTextBuffer(db, assistant_message)
     try:
         async for chunk in bound_model.astream(messages):
@@ -471,16 +555,46 @@ async def act_step(db: Session, thread: ConversationThread, assistant_message: C
             # 流式工具调用按完整列表或部分增量（tool_call_chunks）合并累积，
             # 避免名称为空的残缺调用被当成“未知工具”空转。
             raw_tool_calls = _merge_streamed_tool_calls(chunk, raw_tool_calls)
+            # 流式 chunk 的 usage 只在最后/聚合 chunk 带总量：取最大值而非逐块累加。
+            chunk_prompt, chunk_completion = _extract_chunk_usage(chunk)
+            if chunk_prompt:
+                prompt_tokens = max(prompt_tokens, chunk_prompt)
+            if chunk_completion:
+                completion_tokens = max(completion_tokens, chunk_completion)
     finally:
         # 完成 / 取消 / 失败统一强制刷新，避免 DB 文本落后于客户端已显示文本。
         text_buffer.flush()
+    latency_ms = int(round((time.monotonic() - started_at) * 1000))
+    round_tokens = {"prompt_tokens": int(prompt_tokens), "completion_tokens": int(completion_tokens), "latency_ms": latency_ms}
+    # 持久化本轮运行指标：token 记账 + 逐轮 step_metrics（JSON 列表追加）。
+    # 无 usage 时 total_tokens 保持 None（不伪造 0），step_metrics 仍记录本轮耗时。
+    step_metric = {
+        "iteration": iteration,
+        "step_type": "act",
+        "prompt_tokens": int(prompt_tokens),
+        "completion_tokens": int(completion_tokens),
+        "latency_ms": latency_ms,
+    }
+    existing_metrics = list(getattr(agent_run, "step_metrics", None) or [])
+    setattr(agent_run, "step_metrics", existing_metrics + [step_metric])
+    if prompt_tokens or completion_tokens:
+        current_total = getattr(agent_run, "total_tokens", None) or 0
+        setattr(agent_run, "total_tokens", current_total + prompt_tokens + completion_tokens)
+    db.commit()
     # args 经序列化归一为 dict（合并缓冲中可能是 JSON 字符串或空串），
     # 避免 AIMessage 的 pydantic 校验失败。
     normalized_tool_calls = serialize_tool_calls(raw_tool_calls)
     aimessage = make_aimessage(iteration_text, normalized_tool_calls)
     completed_step = {**running_step, "content": iteration_text or "（无文本输出）", "status": "completed"}
     emit(build_reasoning_step_event(assistant_message.id, completed_step))
-    return {"aimessage": serialize_aimessage(aimessage), "pending_tool_calls": normalized_tool_calls, "iteration": iteration + 1, "steps": [completed_step]}
+    return {
+        "aimessage": serialize_aimessage(aimessage),
+        "pending_tool_calls": normalized_tool_calls,
+        "iteration": iteration + 1,
+        "steps": [completed_step],
+        "memory_payload": memory_payload,
+        "round_tokens": round_tokens,
+    }
 
 
 async def observe_step(db: Session, thread: ConversationThread, assistant_message: ConversationMessage, agent_run: AgentRun, *, state: dict[str, Any], emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
@@ -492,13 +606,18 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
         completed_step = {**running_step, "content": "本轮无工具调用", "status": "completed"}
         emit(build_reasoning_step_event(assistant_message.id, completed_step))
         return {"tool_messages": [], "observation": "本轮无工具调用", "tool_failed": False, "tool_failed_all": False, "pending_tool_calls": [], "steps": [completed_step]}
+    raise_if_stream_cancelled(db, state.get("stream_id"), force_database_check=True)
     tool_map = {tool.name: tool for tool in await build_agent_tools(include_names=GENERAL_CHAT_ACTIVE_TOOLS)}
-    tool_messages: list[dict[str, Any]] = []
-    summaries: list[str] = []
+    # 用 index 槽位回填结果，保证 tool_messages/summaries 与原始 tool_calls 顺序一致
+    # （并发完成顺序可能与调用顺序不同，错位会破坏模型对工具结果的理解）。
+    tool_messages: list[dict[str, Any]] = [{} for _ in tool_calls]
+    summaries: list[str] = ["" for _ in tool_calls]
     tool_failed = False
     failures = 0
-    for call in tool_calls:
-        raise_if_stream_cancelled(db, state.get("stream_id"), force_database_check=True)
+    real_jobs: list[dict[str, Any]] = []
+
+    # 第一遍：空名 / 未知工具等廉价失败路径保持同步处理；真实工具收集起来并发执行。
+    for idx, call in enumerate(tool_calls):
         name = str(call.get("name") or "").strip()
         args, call_id = call.get("args") or {}, str(call.get("id") or mint_token())
         if not name:
@@ -507,8 +626,8 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
             failures += 1
             content_text = "模型尝试调用工具但未给出工具名，已忽略。"
             emit({"event": "tool_call_failed", "data": {"tool_name": "", "call_id": call_id, "message": content_text}})
-            tool_messages.append({"role": "tool", "content": content_text, "name": "", "tool_call_id": call_id})
-            summaries.append(f"{content_text[:80]}")
+            tool_messages[idx] = {"role": "tool", "content": content_text, "name": "", "tool_call_id": call_id}
+            summaries[idx] = content_text[:80]
             continue
         if name == "web_search" and not str(args.get("query") or "").strip():
             # 部分模型会以空参数调用联网搜索：回退用本轮用户消息作为搜索词。
@@ -519,23 +638,50 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
         emit({"event": "tool_call_started", "data": {"tool_name": name, "call_id": call_id}})
         audit = start_tool_audit(db, agent_run_id=agent_run.id, tool_name=name, request_json={"arguments": args})
         if tool is None:
-            tool_failed, content_text = True, f"未知工具：{name}"
+            tool_failed = True
             failures += 1
+            content_text = f"未知工具：{name}"
             finish_tool_audit(db, audit, status="failed", response_json={}, error_message=content_text)
             emit({"event": "tool_call_failed", "data": {"tool_name": name, "call_id": call_id, "message": content_text}})
+            tool_messages[idx] = {"role": "tool", "content": content_text, "name": name, "tool_call_id": call_id}
+            summaries[idx] = f"{name}: {content_text[:80]}"
         else:
-            try:
-                result = await tool.ainvoke(args)
-                content_text = serialize_tool_result(result)
+            real_jobs.append({"idx": idx, "name": name, "args": args, "call_id": call_id, "tool": tool, "audit": audit})
+
+    # 第二遍：真实工具经 asyncio.gather + Semaphore 并发执行；每个工具独立 try/except，
+    # 单个失败不影响其他工具。计时与结果收集在纯异步协程内完成，不触碰 DB 会话，
+    # 审计/SSE 回填统一在 gather 之后按原始顺序进行。
+    if real_jobs:
+        semaphore = asyncio.Semaphore(GENERAL_CHAT_TOOL_CONCURRENCY)
+
+        async def _invoke(job: dict[str, Any]) -> dict[str, Any]:
+            started = time.monotonic()
+            async with semaphore:
+                try:
+                    result = await job["tool"].ainvoke(job["args"])
+                    return {"result": result, "error": None, "elapsed_ms": round((time.monotonic() - started) * 1000, 1)}
+                except Exception as exc:
+                    return {"result": None, "error": exc, "elapsed_ms": round((time.monotonic() - started) * 1000, 1)}
+
+        outcomes = await asyncio.gather(*(_invoke(job) for job in real_jobs))
+
+        for job, outcome in zip(real_jobs, outcomes):
+            idx, name, call_id, audit = job["idx"], job["name"], job["call_id"], job["audit"]
+            audit.latency_ms = outcome["elapsed_ms"]
+            if outcome["error"] is None:
+                result = outcome["result"]
+                content_text = _prepare_tool_content(name, result)
                 finish_tool_audit(db, audit, status="ok", response_json=serialize_any(result))
                 emit({"event": "tool_call_completed", "data": {"tool_name": name, "call_id": call_id}})
-            except Exception as exc:
-                tool_failed, content_text = True, f"工具执行失败：{exc}"
+            else:
+                tool_failed = True
                 failures += 1
-                finish_tool_audit(db, audit, status="failed", response_json={}, error_message=str(exc))
-                emit({"event": "tool_call_failed", "data": {"tool_name": name, "call_id": call_id, "message": str(exc)}})
-        tool_messages.append({"role": "tool", "content": content_text, "name": name, "tool_call_id": call_id})
-        summaries.append(f"{name}: {content_text[:80]}")
+                content_text = f"工具执行失败：{outcome['error']}"
+                finish_tool_audit(db, audit, status="failed", response_json={}, error_message=str(outcome["error"]))
+                emit({"event": "tool_call_failed", "data": {"tool_name": name, "call_id": call_id, "message": str(outcome["error"])}})
+            tool_messages[idx] = {"role": "tool", "content": content_text, "name": name, "tool_call_id": call_id}
+            summaries[idx] = f"{name}: {content_text[:80]}"
+
     observation = "；".join(summaries)[:120] or "本轮无工具调用"
     completed_step = {**running_step, "content": observation, "status": "completed"}
     emit(build_reasoning_step_event(assistant_message.id, completed_step))
