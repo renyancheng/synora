@@ -337,6 +337,17 @@ class ApiClient {
     }
   }
 
+  /// 中断一个正在进行的 SSE 流（发送中点击停止时调用）。
+  Future<void> abortConversationStream({
+    required int conversationId,
+    required String streamId,
+  }) async {
+    await _sendJson(
+      'POST',
+      '/agent/conversations/$conversationId/streams/$streamId/abort',
+    );
+  }
+
   Future<ConversationActionResult> performConversationAction({
     required int conversationId,
     required String action,

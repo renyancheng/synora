@@ -98,6 +98,17 @@ class AppController extends ChangeNotifier {
   // 实时推理轨迹：conversationId -> 进行中的步骤，card_snapshot 落库后清空
   final Map<int, List<ReasoningStepItem>> _liveReasoningSteps =
       <int, List<ReasoningStepItem>>{};
+  // 当前激活的 SSE 流（供 stop 中断）：conversationId + streamId + subscription
+  StreamSubscription<ConversationStreamEvent>? _activeStreamSubscription;
+  int? _activeStreamConversationId;
+  String? _activeStreamId;
+  // 已请求中断的会话：中断后不再让 run_completed 等收尾事件清掉"生成中断"状态。
+  final Set<int> _interruptedConversationIds = <int>{};
+  // 最新一次生成留下的规划/感知文本（按会话隔离）：生成完成后静态常驻在气泡上方。
+  final Map<int, String> _finalPlanText = <int, String>{};
+  // 无障碍语义播报：仅在状态切换时更新（发送/生成/工具/完成/取消/失败），
+  // 不随 message_delta 逐 token 更新，避免读屏器逐字播报。
+  String? _streamAnnouncement;
   // 系统通知轮询：每 20s 拉取一次 system 审计，新送达的弹本地通知。
   Timer? _notificationPollTimer;
   final Set<int> _seenNotificationIds = <int>{};
@@ -136,11 +147,15 @@ class AppController extends ChangeNotifier {
       List<ConversationMessageItem>.unmodifiable(activeState.messages);
   List<ReasoningStepItem> liveReasoningStepsFor(int conversationId) =>
       _liveReasoningSteps[conversationId] ?? const <ReasoningStepItem>[];
+  /// 最新一次生成留下的规划/感知文本（生成完成后静态常驻），按会话隔离。
+  String? finalPlanTextFor(int conversationId) => _finalPlanText[conversationId];
 
   bool get isConversationLoading => activeState.isLoading;
   bool get isMessageSending => activeState.isSending;
   String? get lastError => activeState.lastError;
   String? get streamStatusLabel => activeState.streamStatusLabel;
+  /// 无障碍语义播报文案（状态切换时更新，供 liveRegion 语义节点使用）。
+  String? get streamAnnouncement => _streamAnnouncement;
   String get draftText => activeState.draftText;
   List<ComposerAttachment> get draftAttachments =>
       List<ComposerAttachment>.unmodifiable(activeState.draftAttachments);
@@ -471,8 +486,65 @@ class AppController extends ChangeNotifier {
     return true;
   }
 
+  /// 失败回答可重试、已完成回答可重新生成。
+  /// 只允许当前会话最后一轮的最后一条 assistant 文本消息：绑定会话与消息，
+  /// 避免误操作其他会话或历史轮次；生成中/取消中不提供操作。
+  bool canRetryOrRegenerate(ConversationMessageItem message) {
+    if (!message.isAssistant || message.messageType != 'text') {
+      return false;
+    }
+    if (isDraftConversation) {
+      return false;
+    }
+    final messages = activeState.messages;
+    if (messages.isEmpty || messages.last.id != message.id) {
+      return false;
+    }
+    return message.status == 'failed' || message.status == 'completed';
+  }
+
+  /// 重试失败回答 / 重新生成已完成回答：撤回最后一轮（后端删除该 assistant
+  /// 与对应用户消息并恢复原文），恢复原文到输入框后立即自动重发。
+  Future<void> retryOrRegenerateMessage(ConversationMessageItem message) async {
+    if (!canRetryOrRegenerate(message)) {
+      return;
+    }
+    final conversationId = _activeConversationId;
+    final result = await _apiClient.rewindConversationLastTurn(conversationId);
+    final restored = result.restoredMessage;
+    final attachments = restored.attachmentRefs
+        .map(ComposerAttachment.remote)
+        .toList();
+    _upsertConversation(result.conversation);
+    final refreshed = await _apiClient.fetchConversationMessages(
+      conversationId,
+    );
+    _conversationStates[conversationId] =
+        (_conversationStates[conversationId] ??
+                ConversationViewState(
+                  messages: const <ConversationMessageItem>[],
+                ))
+            .copyWith(
+              messages: refreshed.$2,
+              draftText: restored.textContent ?? '',
+              draftAttachments: attachments,
+              draftTool: restored.selectedTool,
+              isDraft: false,
+              clearLastError: true,
+              clearStreamStatusLabel: true,
+            );
+    _finalPlanText.remove(conversationId);
+    await _refreshCollectionsOnly();
+    notifyListeners();
+    await sendChatMessage();
+  }
+
   Future<void> sendChatMessage() async {
     if (!isAuthenticated) {
+      return;
+    }
+    if (isMessageSending) {
+      // 幂等守卫：Ctrl+Enter / 重复点击时忽略，防止重复发送
       return;
     }
     final state = activeState;
@@ -496,6 +568,9 @@ class AppController extends ChangeNotifier {
       _activeConversationId = conversationId;
       _conversationStates.remove(draftConversationId);
     }
+    // 新一轮生成开始：解除该会话之前的"已中断"标记并让旧规划行让位。
+    _interruptedConversationIds.remove(conversationId);
+    _finalPlanText.remove(conversationId);
 
     final tempUserId = _nextTempMessageId--;
     final tempPayload = <String, dynamic>{
@@ -548,6 +623,7 @@ class AppController extends ChangeNotifier {
               clearDraftTool: true,
               isDraft: false,
             );
+    _streamAnnouncement = AppStrings.streamAnnounceSending;
     notifyListeners();
 
     int? assistantMessageId;
@@ -586,56 +662,159 @@ class AppController extends ChangeNotifier {
       );
       notifyListeners();
 
-      await for (final event in _apiClient.streamConversation(
-        conversationId: conversationId,
-        streamId: accepted.streamId,
-      )) {
-        _handleStreamEvent(
-          conversationId,
-          event,
-          assistantMessageId: assistantMessageId,
-        );
-      }
-      await _refreshCollectionsOnly();
-    } catch (error) {
-      final failureText = AppStrings.chatFailureReason(null, error.toString());
-      _markMessageFailed(conversationId, tempUserId);
-      if (assistantMessageId != null) {
-        _replaceOrAppendMessage(
-          conversationId,
-          ConversationMessageItem.local(
-            id: assistantMessageId,
-            role: 'assistant',
-            messageType: 'text',
-            status: 'failed',
-            textContent: failureText,
-          ),
-        );
-      }
-      _setStateFor(
-        conversationId,
-        (_conversationStates[conversationId] ??
-                ConversationViewState(
-                  messages: const <ConversationMessageItem>[],
-                ))
-            .copyWith(
-              lastError: failureText,
-              isSending: false,
-              clearStreamStatusLabel: true,
+      // 订阅 SSE：改为监听式以便 stop 中断（subscription 可 cancel + 后端 abort）
+      final streamId = accepted.streamId;
+      final assistantId = assistantMessageId;
+      _activeStreamConversationId = conversationId;
+      _activeStreamId = streamId;
+      _activeStreamSubscription = _apiClient
+          .streamConversation(
+            conversationId: conversationId,
+            streamId: streamId,
+          )
+          .listen(
+            (event) => _handleStreamEvent(
+              conversationId,
+              event,
+              assistantMessageId: assistantId,
             ),
+            onError: (Object error) {
+              _finishStreamFailed(
+                conversationId,
+                tempUserId,
+                assistantMessageId,
+                error,
+              );
+            },
+            onDone: () {
+              _clearActiveStream();
+              unawaited(_refreshCollectionsOnly());
+            },
+          );
+    } catch (error) {
+      _finishStreamFailed(
+        conversationId,
+        tempUserId,
+        assistantMessageId,
+        error,
       );
-      notifyListeners();
       rethrow;
-    } finally {
-      final current = _conversationStates[conversationId];
-      if (current != null) {
-        _conversationStates[conversationId] = current.copyWith(
-          isSending: false,
-          clearStreamStatusLabel: true,
-        );
-      }
-      notifyListeners();
     }
+  }
+
+  /// 停止当前正在生成的消息：通知后端 abort + 取消本地订阅 + 复位状态。
+  Future<void> stopCurrentGeneration() async {
+    final conversationId = _activeStreamConversationId;
+    final streamId = _activeStreamId;
+    final subscription = _activeStreamSubscription;
+    if (conversationId == null) {
+      return;
+    }
+    if (streamId != null) {
+      try {
+        await _apiClient.abortConversationStream(
+          conversationId: conversationId,
+          streamId: streamId,
+        );
+      } catch (_) {
+        // abort 失败不阻塞本地中断；后端检查点仍会自行收口。
+      }
+    }
+    // 取消订阅是清理操作，fire-and-forget 即可：立即复位本地状态让停止更即时，
+    // 订阅取消完成时 onDone 的幂等收口（_clearActiveStream + 刷新）无害。
+    unawaited(subscription?.cancel());
+    _clearActiveStream();
+    // 标记该会话已中断：后续 run_completed 等收尾事件不得清掉"生成中断"状态。
+    _interruptedConversationIds.add(conversationId);
+    _streamAnnouncement = AppStrings.streamAnnounceStopped;
+    _markCurrentConversationInterrupted(conversationId);
+    notifyListeners();
+  }
+
+  void _clearActiveStream() {
+    _activeStreamSubscription = null;
+    _activeStreamConversationId = null;
+    _activeStreamId = null;
+  }
+
+  void _finishStreamFailed(
+    int conversationId,
+    int tempUserId,
+    int? assistantMessageId,
+    Object error,
+  ) {
+    final failureText = AppStrings.chatFailureReason(null, error.toString());
+    _streamAnnouncement = AppStrings.streamAnnounceFailed;
+    _markMessageFailed(conversationId, tempUserId);
+    if (assistantMessageId != null) {
+      _replaceOrAppendMessage(
+        conversationId,
+        ConversationMessageItem.local(
+          id: assistantMessageId,
+          role: 'assistant',
+          messageType: 'text',
+          status: 'failed',
+          textContent: failureText,
+        ),
+      );
+    }
+    _setStateFor(
+      conversationId,
+      (_conversationStates[conversationId] ??
+              ConversationViewState(
+                messages: const <ConversationMessageItem>[],
+              ))
+          .copyWith(
+            lastError: failureText,
+            isSending: false,
+            clearStreamStatusLabel: true,
+          ),
+    );
+    _liveReasoningSteps.remove(conversationId);
+    _clearActiveStream();
+    notifyListeners();
+  }
+
+  /// 从实时步骤中提取最新一条规划/感知文本（生成完成后静态常驻展示）。
+  String? _latestPlanTextFrom(List<ReasoningStepItem> steps) {
+    for (final step in steps.reversed) {
+      if (step.stepType == 'plan' || step.stepType == 'perceive') {
+        final text = step.content.trim();
+        if (text.isNotEmpty) {
+          return text;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// 中断后的本地收口：保留已流出的文本，标记生成中断，清空实时轨迹。
+  void _markCurrentConversationInterrupted(int conversationId) {
+    final current = _conversationStates[conversationId];
+    if (current == null) {
+      return;
+    }
+    final messages = List<ConversationMessageItem>.from(current.messages);
+    for (var i = messages.length - 1; i >= 0; i--) {
+      final item = messages[i];
+      if (!item.isUser && item.status == 'streaming') {
+        messages[i] = item.copyWith(status: 'completed');
+        break;
+      }
+    }
+    _conversationStates[conversationId] = current.copyWith(
+      messages: messages,
+      isSending: false,
+      // 中断不再显示状态文字：stop 按钮复位即为最直接的提示。
+      clearStreamStatusLabel: true,
+    );
+    final plan = _latestPlanTextFrom(
+      _liveReasoningSteps[conversationId] ?? const <ReasoningStepItem>[],
+    );
+    if (plan != null) {
+      _finalPlanText[conversationId] = plan;
+    }
+    _liveReasoningSteps.remove(conversationId);
   }
 
   Future<void> performConversationAction({
@@ -861,6 +1040,8 @@ class AppController extends ChangeNotifier {
       ..[draftConversationId] = ConversationViewState.draft();
     _activeConversationId = draftConversationId;
     _liveReasoningSteps.clear();
+    _interruptedConversationIds.clear();
+    _finalPlanText.clear();
     _stopNotificationPolling();
     _seenNotificationIds.clear();
     SystemNotificationService.instance.resetShownIds();
@@ -924,6 +1105,7 @@ class AppController extends ChangeNotifier {
   }) {
     switch (event.event) {
       case 'run_started':
+        _streamAnnouncement = AppStrings.streamAnnounceStarted;
         _replaceOrAppendMessage(
           conversationId,
           ConversationMessageItem.local(
@@ -956,6 +1138,26 @@ class AppController extends ChangeNotifier {
           );
         }
         break;
+      case 'message_reset':
+        // 后端反重复重跑：先清空已流式文本，再以新 delta 重建回答。
+        final current = _conversationStates[conversationId];
+        if (current == null) {
+          break;
+        }
+        final messages = List<ConversationMessageItem>.from(current.messages);
+        final index = messages.indexWhere(
+          (item) => item.id == assistantMessageId,
+        );
+        if (index >= 0) {
+          messages[index] = messages[index].copyWith(
+            status: 'streaming',
+            textContent: '',
+          );
+          _conversationStates[conversationId] = current.copyWith(
+            messages: messages,
+          );
+        }
+        break;
       case 'message_completed':
         final messageJson =
             event.data['message'] as Map<String, dynamic>? ??
@@ -964,10 +1166,19 @@ class AppController extends ChangeNotifier {
           conversationId,
           ConversationMessageItem.fromJson(messageJson),
         );
+        // 快速完成时立刻捕获 plan 文本，避免横幅在“完成事件→推理卡片事件”
+        // 之间闪失（保证 plan 至少持续展示，不闪断）。
+        final completedPlan = _latestPlanTextFrom(
+          _liveReasoningSteps[conversationId] ?? const <ReasoningStepItem>[],
+        );
+        if (completedPlan != null) {
+          _finalPlanText[conversationId] = completedPlan;
+        }
         _setStateFor(
           conversationId,
           _conversationStates[conversationId]!.copyWith(
-            clearStreamStatusLabel: true,
+            clearStreamStatusLabel:
+                !_interruptedConversationIds.contains(conversationId),
           ),
         );
         break;
@@ -980,6 +1191,8 @@ class AppController extends ChangeNotifier {
           status: stepData['status'] as String? ?? 'running',
           iteration: stepData['iteration'] as int? ?? 0,
           seq: stepData['seq'] as int? ?? 0,
+          degraded: stepData['degraded'] as bool? ?? false,
+          planSource: stepData['plan_source'] as String?,
         );
         final steps = List<ReasoningStepItem>.from(
           _liveReasoningSteps[conversationId] ?? <ReasoningStepItem>[],
@@ -1002,7 +1215,13 @@ class AppController extends ChangeNotifier {
             event.data['message'] as Map<String, dynamic>? ??
             <String, dynamic>{};
         if (messageJson['message_type'] == 'reasoning_step') {
-          // 持久化卡片到达，实时轨迹使命完成
+          // 持久化卡片到达，实时轨迹使命完成：先落袋规划文本，供完成后的静态常驻行。
+          final plan = _latestPlanTextFrom(
+            _liveReasoningSteps[conversationId] ?? const <ReasoningStepItem>[],
+          );
+          if (plan != null) {
+            _finalPlanText[conversationId] = plan;
+          }
           _liveReasoningSteps.remove(conversationId);
         }
         _replaceOrAppendMessage(
@@ -1011,6 +1230,9 @@ class AppController extends ChangeNotifier {
         );
         break;
       case 'tool_call_started':
+        _streamAnnouncement = _toolStatusLabel(
+          event.data['tool_name'] as String?,
+        );
         _setStateFor(
           conversationId,
           _conversationStates[conversationId]!.copyWith(
@@ -1025,11 +1247,51 @@ class AppController extends ChangeNotifier {
         _setStateFor(
           conversationId,
           _conversationStates[conversationId]!.copyWith(
-            clearStreamStatusLabel: true,
+            clearStreamStatusLabel:
+                !_interruptedConversationIds.contains(conversationId),
           ),
         );
         break;
+      case 'run_cancelled':
+        _streamAnnouncement = AppStrings.streamAnnounceStopped;
+        final current = _conversationStates[conversationId];
+        if (current != null) {
+          final messages = List<ConversationMessageItem>.from(current.messages);
+          final index = messages.indexWhere(
+            (item) => item.id == assistantMessageId,
+          );
+          if (index >= 0) {
+            messages[index] = messages[index].copyWith(status: 'completed');
+          }
+          _conversationStates[conversationId] = current.copyWith(
+            messages: messages,
+            isSending: false,
+            // 中断后不显示状态文字（同 stop 本地收口）。
+            clearStreamStatusLabel: true,
+          );
+          final plan = _latestPlanTextFrom(
+            _liveReasoningSteps[conversationId] ?? const <ReasoningStepItem>[],
+          );
+          if (plan != null) {
+            _finalPlanText[conversationId] = plan;
+          }
+          _liveReasoningSteps.remove(conversationId);
+        }
+        break;
       case 'run_failed':
+        if (event.data['stream_status'] == 'cancelled') {
+          // 后端 abort 自行收口（与 run_cancelled 等效），避免显示为失败
+          _handleStreamEvent(
+            conversationId,
+            ConversationStreamEvent(
+              event: 'run_cancelled',
+              data: const <String, dynamic>{},
+            ),
+            assistantMessageId: assistantMessageId,
+          );
+          break;
+        }
+        _streamAnnouncement = AppStrings.streamAnnounceFailed;
         final failureText = AppStrings.chatFailureReason(
           event.data['code'] as String?,
           event.data['message'] as String?,
@@ -1053,7 +1315,8 @@ class AppController extends ChangeNotifier {
             messages: messages,
             lastError: failureText,
             isSending: false,
-            clearStreamStatusLabel: true,
+            clearStreamStatusLabel:
+                !_interruptedConversationIds.contains(conversationId),
           );
           _liveReasoningSteps.remove(conversationId);
         }
@@ -1070,14 +1333,42 @@ class AppController extends ChangeNotifier {
           }
           _conversationStates[conversationId] = current.copyWith(
             messages: messages,
-            clearStreamStatusLabel: true,
+            clearStreamStatusLabel:
+                !_interruptedConversationIds.contains(conversationId),
             isSending: false,
           );
+          final plan = _latestPlanTextFrom(
+            _liveReasoningSteps[conversationId] ?? const <ReasoningStepItem>[],
+          );
+          if (plan != null) {
+            _finalPlanText[conversationId] = plan;
+          }
           _liveReasoningSteps.remove(conversationId);
+          // 完成播报：若最后落库的是待确认卡片，则提示需要用户确认。
+          _streamAnnouncement =
+              _lastMessageNeedsApproval(messages)
+              ? AppStrings.streamAnnounceApproval
+              : AppStrings.streamAnnounceCompleted;
         }
+        break;
+      case 'approval_required':
+        _streamAnnouncement = AppStrings.streamAnnounceApproval;
         break;
     }
     notifyListeners();
+  }
+
+  /// 最新一条消息是否为可操作的待确认卡片（审批语义状态用）。
+  bool _lastMessageNeedsApproval(List<ConversationMessageItem> messages) {
+    if (messages.isEmpty) {
+      return false;
+    }
+    final last = messages.last;
+    if (last.messageType != 'schedule_draft_card' &&
+        last.messageType != 'quick_note_preview_card') {
+      return false;
+    }
+    return last.structuredPayload['is_actionable'] == true;
   }
 
   String _toolStatusLabel(String? toolName) {

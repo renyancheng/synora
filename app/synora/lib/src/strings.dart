@@ -43,6 +43,7 @@ class AppStrings {
   static const sending = '发送中';
   static const streaming = '生成中…';
   static const sendFailed = '发送失败';
+  static const stopGenerating = '停止生成';
   static const loading = '处理中…';
   static const loadFailed = '加载失败，请稍后重试。';
   static const networkRequestFailed = '当前无法连接服务端，请检查网络后重试。';
@@ -54,8 +55,10 @@ class AppStrings {
   static const emptyNotifications = '还没有提醒记录。';
   static const noContent = '暂无内容';
   static const sendEmptyMessage = '请输入内容或先添加附件。';
+  static const jumpToBottom = '回到底部';
   static const copy = '复制';
   static const editResend = '编辑重发';
+  static const regenerate = '重新生成';
   static const copied = '已复制。';
   static const copiedToComposer = '已回填到输入框，可继续编辑后发送。';
   static const nothingToCopy = '这条消息没有可复制的文字。';
@@ -149,6 +152,14 @@ class AppStrings {
   static const retryCountField = '重试次数';
   static const generatingInterrupted = '生成中断';
   static const timeFormatHint = '请输入如 2026-05-23 14:30 的时间';
+
+  // 无障碍语义状态（读屏播报）：只在状态切换时更新，不随 token 逐字播报。
+  static const streamAnnounceSending = '正在发送';
+  static const streamAnnounceStarted = '开始生成回答';
+  static const streamAnnounceCompleted = '回答已生成';
+  static const streamAnnounceApproval = '回答已生成，需要你的确认';
+  static const streamAnnounceStopped = '已停止生成';
+  static const streamAnnounceFailed = '回答生成失败';
 
   static String toolLabel(String? tool) {
     switch (tool) {
@@ -331,4 +342,14 @@ class AppStrings {
   static const reasoningStepAct = '执行';
   static const reasoningStepObserve = '观察';
   static const reasoningStepReflect = '反思';
+  static const reasoningStepPerceive = '感知';
+  static const reasoningStepUnknown = '步骤';
+  static const reasoningTraceExpand = '展开推理轨迹';
+  static const reasoningTraceCollapse = '收起推理轨迹';
+  static const reasoningDegraded = '降级';
+  static const reasoningDeterministicPlan = '内置计划';
+  static const reasoningStepCompleted = '完成';
+  static const reasoningStepRunning = '进行中';
+  static const reasoningTraceEmpty = '没有可展示的推理步骤。';
+  static String thinkingSteps(int n) => '已思考 $n 步';
 }

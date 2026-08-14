@@ -1,20 +1,26 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 
 import '../app_controller.dart';
 import '../attachment_picker.dart';
-import '../date_utils.dart';
 import '../models.dart';
 import '../strings.dart';
-import '../tag_palette.dart';
-import 'event_date_time_field.dart';
+import 'chat/chat_composer.dart';
+import 'chat/chat_message_list.dart';
+import 'chat/chat_sidebar.dart';
 import 'quick_note_list_page.dart';
 import 'schedule_list_page.dart';
 import 'settings_page.dart';
 
+/// 聊天主页：只负责布局编排（侧边栏 / 消息列表 / 输入器）与页面级交互
+/// （导航、发送、复制、重试、滚动跟随）。
+///
+/// 组件拆分：
+/// - ChatSidebar：侧边栏（抽屉 / 宽屏常驻）
+/// - ChatMessageList：消息列表 + 回到底部按钮
+/// - ChatComposer：输入器与工具/附件菜单
+/// - ChatMessageView / StructuredMessageCard / ReasoningTraceCard：消息气泡、
+///   审批卡片与推理轨迹
 class ChatHomePage extends StatefulWidget {
   const ChatHomePage({super.key, required this.controller});
 
@@ -27,10 +33,22 @@ class ChatHomePage extends StatefulWidget {
 class _ChatHomePageState extends State<ChatHomePage> {
   late final TextEditingController _textController;
   late final ScrollController _scrollController;
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int? _boundConversationId;
-  int _lastMessageCount = 0;
   String? _lastShownError;
   bool _isSyncingComposer = false;
+  /// 是否跟随流式内容滚动（用户靠近底部时自动跟随；主动上滑后暂停跟随）。
+  bool _followStream = true;
+  /// 用户离开底部后显示“回到底部”按钮。
+  bool _showJumpToBottom = false;
+
+  /// 仅当窄屏抽屉处于打开状态时关闭它；宽屏常驻侧边栏下为 no-op。
+  void _closeDrawerIfOpen() {
+    final scaffold = _scaffoldKey.currentState;
+    if (scaffold != null && scaffold.isDrawerOpen) {
+      Navigator.of(context).pop();
+    }
+  }
 
   @override
   void initState() {
@@ -48,6 +66,34 @@ class _ChatHomePageState extends State<ChatHomePage> {
       ..dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// 是否已接近列表底部（阈值内视为“跟随”）。
+  bool _isNearBottom() {
+    if (!_scrollController.hasClients) {
+      return true;
+    }
+    final position = _scrollController.position;
+    return position.maxScrollExtent - position.pixels < 96;
+  }
+
+  /// 仅在用户滚动（拖动/滚轮/键盘）更新期间重新评估跟随状态。
+  /// 流式内容增高只产生 ScrollMetricsNotification，不会误判为用户离开底部；
+  /// 程序化 jumpTo 虽会产生 ScrollUpdateNotification，但位置始终在底部，
+  /// 评估结果不变（跟随 + 无按钮），因此无副作用。
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification is ScrollUpdateNotification &&
+        (notification.dragDetails != null ||
+            notification.scrollDelta != null)) {
+      final near = _isNearBottom();
+      if (near != _followStream || _showJumpToBottom == near) {
+        setState(() {
+          _followStream = near;
+          _showJumpToBottom = !near;
+        });
+      }
+    }
+    return false;
   }
 
   Future<void> _bootstrap() async {
@@ -90,9 +136,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 
   Future<void> _openSettings() async {
-    if (Navigator.of(context).canPop()) {
-      Navigator.of(context).pop();
-    }
+    _closeDrawerIfOpen();
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => SettingsPage(controller: widget.controller),
@@ -101,7 +145,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 
   Future<void> _openSchedules() async {
-    Navigator.of(context).pop();
+    _closeDrawerIfOpen();
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => ScheduleListPage(controller: widget.controller),
@@ -110,7 +154,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 
   Future<void> _openQuickNotes() async {
-    Navigator.of(context).pop();
+    _closeDrawerIfOpen();
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => QuickNoteListPage(controller: widget.controller),
@@ -122,14 +166,14 @@ class _ChatHomePageState extends State<ChatHomePage> {
     if (widget.controller.isDraftConversation) {
       return;
     }
-    Navigator.of(context).pop();
+    _closeDrawerIfOpen();
     widget.controller.beginDraftConversation();
     _syncComposerFromController(force: true);
     _scrollToBottom();
   }
 
   Future<void> _selectConversation(int conversationId) async {
-    Navigator.of(context).pop();
+    _closeDrawerIfOpen();
     try {
       await widget.controller.selectConversation(conversationId);
       _syncComposerFromController(force: true);
@@ -265,22 +309,22 @@ class _ChatHomePageState extends State<ChatHomePage> {
   }
 
   Future<void> _openComposerMenu() async {
-    final result = await showModalBottomSheet<_ComposerMenuResult>(
+    final result = await showModalBottomSheet<ComposerMenuResult>(
       context: context,
       showDragHandle: true,
       builder: (context) =>
-          _ComposerMenu(selectedTool: widget.controller.draftTool),
+          ComposerMenu(selectedTool: widget.controller.draftTool),
     );
     if (result == null || !mounted) {
       return;
     }
-    if (result.type == _ComposerMenuResultType.selectTool) {
+    if (result.type == ComposerMenuResultType.selectTool) {
       widget.controller.setDraftTool(result.tool);
       return;
     }
     try {
       switch (result.type) {
-        case _ComposerMenuResultType.gallery:
+        case ComposerMenuResultType.gallery:
           final files = await AttachmentPicker.pickGalleryImages();
           if (files.isNotEmpty && mounted) {
             widget.controller.addDraftAttachments(
@@ -288,7 +332,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
             );
           }
           break;
-        case _ComposerMenuResultType.camera:
+        case ComposerMenuResultType.camera:
           final file = await AttachmentPicker.pickPhoto();
           if (file != null && mounted) {
             widget.controller.addDraftAttachments(<ComposerAttachment>[
@@ -296,7 +340,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
             ]);
           }
           break;
-        case _ComposerMenuResultType.file:
+        case ComposerMenuResultType.file:
           final files = await AttachmentPicker.pickFiles();
           if (files.isNotEmpty && mounted) {
             widget.controller.addDraftAttachments(
@@ -304,7 +348,7 @@ class _ChatHomePageState extends State<ChatHomePage> {
             );
           }
           break;
-        case _ComposerMenuResultType.selectTool:
+        case ComposerMenuResultType.selectTool:
           break;
       }
     } catch (error) {
@@ -346,6 +390,17 @@ class _ChatHomePageState extends State<ChatHomePage> {
     await Clipboard.setData(ClipboardData(text: text));
   }
 
+  /// 重试失败回答 / 重新生成已完成回答（仅当前会话最后一轮 assistant 文本消息）。
+  Future<void> _retryOrRegenerate(ConversationMessageItem message) async {
+    try {
+      await widget.controller.retryOrRegenerateMessage(message);
+      _syncComposerFromController(force: true);
+      _scrollToBottom();
+    } catch (error) {
+      _showMessage(error.toString());
+    }
+  }
+
   void _editResendMessage(ConversationMessageItem message) {
     widget.controller
         .editResendMessage(message)
@@ -370,16 +425,39 @@ class _ChatHomePageState extends State<ChatHomePage> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// 回到列表底部：恢复跟随状态（供用户主动操作与页面级跳转使用）。
   void _scrollToBottom() {
+    final changed = !_followStream || _showJumpToBottom;
+    _followStream = true;
+    _showJumpToBottom = false;
+    if (changed && mounted) {
+      setState(() {});
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scrollController.hasClients) {
+      if (!mounted || !_scrollController.hasClients) {
         return;
       }
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOut,
-      );
+      final position = _scrollController.position;
+      if (position.maxScrollExtent - position.pixels > 1) {
+        _scrollController.jumpTo(position.maxScrollExtent);
+      }
+    });
+  }
+
+  /// 流式内容变化时的跟随：仅在用户仍处于底部附近时把新内容滚进视野，
+  /// 用户主动上滑后不再强制拉回底部。
+  void _followStreamContent() {
+    if (!_followStream || !_scrollController.hasClients) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_followStream || !_scrollController.hasClients) {
+        return;
+      }
+      final position = _scrollController.position;
+      if (position.maxScrollExtent - position.pixels > 1) {
+        _scrollController.jumpTo(position.maxScrollExtent);
+      }
     });
   }
 
@@ -390,12 +468,10 @@ class _ChatHomePageState extends State<ChatHomePage> {
       builder: (context, _) {
         _syncComposerFromController();
         final user = widget.controller.session?.user;
-        final messages = widget.controller.messages;
         final latestError = widget.controller.lastError;
-        if (messages.length != _lastMessageCount) {
-          _lastMessageCount = messages.length;
-          _scrollToBottom();
-        }
+        // 新消息、流式 delta、卡片插入与消息完成都会触发 rebuild：只要用户仍
+        // 在底部附近就跟随滚动；用户主动上滑后由 _followStream 门控不再拉回。
+        _followStreamContent();
         if (latestError == null || latestError.isEmpty) {
           _lastShownError = null;
         } else if (latestError != _lastShownError) {
@@ -414,1456 +490,121 @@ class _ChatHomePageState extends State<ChatHomePage> {
         final sending = widget.controller.isMessageSending;
         final composerLocked = sending;
         final statusLabel = widget.controller.streamStatusLabel;
-        final liveSteps = widget.controller.liveReasoningStepsFor(
-          widget.controller.activeConversationId,
-        );
 
-        return Scaffold(
-          appBar: AppBar(
-            leading: Builder(
-              builder: (context) => IconButton(
-                onPressed: () => Scaffold.of(context).openDrawer(),
-                icon: const Icon(Icons.menu),
-                tooltip: '打开侧边栏',
-              ),
-            ),
-            title: const Text(AppStrings.appTitle),
-          ),
-          drawer: Drawer(
-            child: SafeArea(
-              child: Column(
-                children: <Widget>[
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 16, 8, 12),
-                    child: Row(
-                      children: <Widget>[
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: <Widget>[
-                              Text(
-                                user?.displayName ?? AppStrings.noContent,
-                                style: Theme.of(context).textTheme.titleLarge,
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                user?.email ?? '',
-                                style: Theme.of(context).textTheme.bodySmall,
-                              ),
-                            ],
-                          ),
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            // R4：宽屏（>=1000px）侧边栏常驻，窄屏退回抽屉
+            final wide = constraints.maxWidth >= 1000;
+            final sidebar = _buildSidebar(user: user);
+            final chatBody = _buildChatBody(
+              sending: sending,
+              composerLocked: composerLocked,
+              statusLabel: statusLabel,
+              selectedTool: selectedTool,
+              attachments: attachments,
+              hasInput: hasInput,
+            );
+            return Scaffold(
+              key: _scaffoldKey,
+              // R4：宽屏侧边栏常驻，无需顶部 AppBar；窄屏抽屉入口仍保留。
+              appBar: wide
+                  ? null
+                  : AppBar(
+                      leading: Builder(
+                        builder: (context) => IconButton(
+                          onPressed: () => Scaffold.of(context).openDrawer(),
+                          icon: const Icon(Icons.menu),
+                          tooltip: '打开侧边栏',
                         ),
-                        IconButton(
-                          onPressed: _openSettings,
-                          icon: const Icon(Icons.settings_outlined),
-                          tooltip: AppStrings.settings,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const Divider(height: 1),
-                  ListTile(
-                    leading: const Icon(Icons.calendar_month_outlined),
-                    title: const Text(AppStrings.mySchedules),
-                    onTap: _openSchedules,
-                  ),
-                  ListTile(
-                    leading: const Icon(Icons.sticky_note_2_outlined),
-                    title: const Text(AppStrings.myQuickNotes),
-                    onTap: _openQuickNotes,
-                  ),
-                  const Divider(height: 1),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                    child: Row(
-                      children: <Widget>[
-                        Expanded(
-                          child: Text(
-                            AppStrings.conversationHistory,
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                        ),
-                        FilledButton.tonalIcon(
-                          onPressed: widget.controller.isDraftConversation
-                              ? null
-                              : _createNewConversation,
-                          icon: const Icon(Icons.add),
-                          label: const Text(AppStrings.newConversation),
-                        ),
-                      ],
-                    ),
-                  ),
-                  Expanded(
-                    child: widget.controller.conversations.isEmpty
-                        ? const Center(
-                            child: Text(AppStrings.emptyConversationHistory),
-                          )
-                        : ListView.builder(
-                            itemCount: widget.controller.conversations.length,
-                            itemBuilder: (context, index) {
-                              final item =
-                                  widget.controller.conversations[index];
-                              final selected =
-                                  item.id ==
-                                  widget.controller.activeConversationId;
-                              return ListTile(
-                                selected: selected,
-                                leading: const Icon(Icons.chat_bubble_outline),
-                                title: Text(
-                                  item.title,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                trailing: Builder(
-                                  builder: (itemContext) => IconButton(
-                                    icon: const Icon(Icons.more_horiz),
-                                    tooltip: AppStrings.conversationMenu,
-                                    onPressed: () => _showConversationMenu(
-                                      itemContext,
-                                      item,
-                                    ),
-                                  ),
-                                ),
-                                onTap: () => _selectConversation(item.id),
-                              );
-                            },
-                          ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          body: Column(
-            children: <Widget>[
-              Expanded(
-                child:
-                    widget.controller.isConversationLoading && messages.isEmpty
-                    ? const Center(child: CircularProgressIndicator())
-                    : messages.isEmpty
-                    ? const Center(child: Text(AppStrings.emptyConversation))
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                        itemCount:
-                            messages.length + (liveSteps.isNotEmpty ? 1 : 0),
-                        itemBuilder: (context, index) {
-                          if (liveSteps.isNotEmpty &&
-                              index == messages.length) {
-                            return _LiveReasoningCard(steps: liveSteps);
-                          }
-                          final message = messages[index];
-                          return _ConversationMessageView(
-                            message: message,
-                            onAction: _performAction,
-                            onCopy: message.isUser
-                                ? () => _copyMessage(message)
-                                : null,
-                            onEditResend:
-                                widget.controller.canEditMessage(message)
-                                ? () => _editResendMessage(message)
-                                : null,
-                          );
-                        },
                       ),
-              ),
-              SafeArea(
-                top: false,
-                child: Container(
-                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    border: Border(top: BorderSide(color: Color(0xFFE2ECE8))),
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      if (statusLabel != null) ...<Widget>[
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: Text(
-                            statusLabel,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: const Color(0xFF4A6C63)),
-                          ),
+                      title: const Text(AppStrings.appTitle),
+                    ),
+              drawer: wide
+                  ? null
+                  : Drawer(child: SafeArea(child: sidebar)),
+              body: wide
+                  ? Row(
+                      children: <Widget>[
+                        SizedBox(
+                          width: 300,
+                          child: SafeArea(child: sidebar),
                         ),
-                      ],
-                      if (selectedTool != null) ...<Widget>[
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: InputChip(
-                            label: Text(
-                              '${AppStrings.selectedToolPrefix}：${AppStrings.toolLabel(selectedTool.apiValue)}',
-                            ),
-                            onDeleted: composerLocked
-                                ? null
-                                : () => widget.controller.setDraftTool(null),
-                          ),
+                        const VerticalDivider(
+                          width: 1,
+                          color: Color(0xFFE2ECE8),
                         ),
+                        Expanded(child: chatBody),
                       ],
-                      if (attachments.isNotEmpty) ...<Widget>[
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: attachments.asMap().entries.map((entry) {
-                            return InputChip(
-                              label: Text(entry.value.fileName),
-                              onDeleted: composerLocked
-                                  ? null
-                                  : () => widget.controller
-                                        .removeDraftAttachmentAt(entry.key),
-                            );
-                          }).toList(),
-                        ),
-                        const SizedBox(height: 10),
-                      ],
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: <Widget>[
-                          SizedBox(
-                            width: 48,
-                            height: 48,
-                            child: IconButton(
-                              onPressed: composerLocked
-                                  ? null
-                                  : _openComposerMenu,
-                              tooltip: AppStrings.attach,
-                              icon: const Icon(Icons.add_circle_outline),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(minHeight: 76),
-                              child: Align(
-                                alignment: Alignment.center,
-                                child: TextField(
-                                  controller: _textController,
-                                  minLines: 1,
-                                  maxLines: 6,
-                                  textAlignVertical: TextAlignVertical.center,
-                                  textInputAction: TextInputAction.newline,
-                                  decoration: const InputDecoration(
-                                    hintText: AppStrings.composerHint,
-                                    isDense: false,
-                                    contentPadding: EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 18,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          SizedBox(
-                            width: 48,
-                            height: 48,
-                            child: Center(
-                              child: AnimatedSwitcher(
-                                duration: const Duration(milliseconds: 220),
-                                transitionBuilder: (child, animation) =>
-                                    ScaleTransition(
-                                      scale: animation,
-                                      child: child,
-                                    ),
-                                child: sending
-                                    ? const SizedBox(
-                                        key: ValueKey('loading'),
-                                        width: 48,
-                                        height: 48,
-                                        child: Center(
-                                          child: SizedBox(
-                                            width: 20,
-                                            height: 20,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2.2,
-                                            ),
-                                          ),
-                                        ),
-                                      )
-                                    : hasInput
-                                    ? IconButton.filled(
-                                        key: const ValueKey('send'),
-                                        onPressed: _sendMessage,
-                                        icon: const Icon(
-                                          Icons.send_rounded,
-                                          size: 20,
-                                        ),
-                                        tooltip: AppStrings.send,
-                                      )
-                                    : IconButton.filled(
-                                        key: const ValueKey('send-disabled'),
-                                        onPressed: hasInput
-                                            ? _sendMessage
-                                            : null,
-                                        icon: const Icon(
-                                          Icons.send_rounded,
-                                          size: 20,
-                                        ),
-                                        tooltip: AppStrings.send,
-                                      ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
+                    )
+                  : chatBody,
+            );
+          },
         );
       },
     );
   }
-}
 
-enum _ComposerMenuResultType { gallery, camera, file, selectTool }
-
-class _ComposerMenuResult {
-  const _ComposerMenuResult({required this.type, this.tool});
-
-  final _ComposerMenuResultType type;
-  final ConversationTool? tool;
-}
-
-class _ComposerMenu extends StatelessWidget {
-  const _ComposerMenu({required this.selectedTool});
-
-  final ConversationTool? selectedTool;
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: _AttachmentActionButton(
-                    icon: Icons.photo_library_outlined,
-                    label: AppStrings.attachmentGallery,
-                    onTap: () => Navigator.of(context).pop(
-                      const _ComposerMenuResult(
-                        type: _ComposerMenuResultType.gallery,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _AttachmentActionButton(
-                    icon: Icons.photo_camera_outlined,
-                    label: AppStrings.attachmentCamera,
-                    onTap: () => Navigator.of(context).pop(
-                      const _ComposerMenuResult(
-                        type: _ComposerMenuResultType.camera,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _AttachmentActionButton(
-                    icon: Icons.folder_open_outlined,
-                    label: AppStrings.attachmentFile,
-                    onTap: () => Navigator.of(context).pop(
-                      const _ComposerMenuResult(
-                        type: _ComposerMenuResultType.file,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Text(
-              AppStrings.toolsSectionTitle,
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            const SizedBox(height: 8),
-            _ToolListTile(
-              icon: Icons.calendar_month_outlined,
-              title: AppStrings.scheduleTool,
-              subtitle: AppStrings.scheduleToolDescription,
-              selected: selectedTool == ConversationTool.schedule,
-              onTap: () => Navigator.of(context).pop(
-                const _ComposerMenuResult(
-                  type: _ComposerMenuResultType.selectTool,
-                  tool: ConversationTool.schedule,
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            _ToolListTile(
-              icon: Icons.sticky_note_2_outlined,
-              title: AppStrings.quickNoteTool,
-              subtitle: AppStrings.quickNoteToolDescription,
-              selected: selectedTool == ConversationTool.quickNote,
-              onTap: () => Navigator.of(context).pop(
-                const _ComposerMenuResult(
-                  type: _ComposerMenuResultType.selectTool,
-                  tool: ConversationTool.quickNote,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+  /// 侧边栏内容：窄屏抽屉与宽屏常驻栏共用。
+  Widget _buildSidebar({required UserProfile? user}) {
+    return ChatSidebar(
+      controller: widget.controller,
+      user: user,
+      onOpenSettings: _openSettings,
+      onOpenSchedules: _openSchedules,
+      onOpenQuickNotes: _openQuickNotes,
+      onCreateConversation: _createNewConversation,
+      onSelectConversation: _selectConversation,
+      onShowConversationMenu: _showConversationMenu,
     );
   }
-}
 
-class _AttachmentActionButton extends StatelessWidget {
-  const _AttachmentActionButton({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: const Color(0xFFF4F8F7),
-      borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(icon, size: 28, color: const Color(0xFF176B5A)),
-              const SizedBox(height: 10),
-              Text(label),
-            ],
+  /// 聊天区：消息列表 + 输入区（窄屏/宽屏共用）。
+  Widget _buildChatBody({
+    required bool sending,
+    required bool composerLocked,
+    required String? statusLabel,
+    required ConversationTool? selectedTool,
+    required List<ComposerAttachment> attachments,
+    required bool hasInput,
+  }) {
+    return Column(
+      children: <Widget>[
+        // 无障碍语义播报：liveRegion 仅在状态切换（发送/生成/工具/审批/完成/
+        // 取消/失败）时更新标签，不随流式 delta 逐 token 播报。
+        Semantics(
+          liveRegion: true,
+          container: true,
+          label: widget.controller.streamAnnouncement ?? '',
+          child: const SizedBox.shrink(),
+        ),
+        Expanded(
+          child: ChatMessageList(
+            controller: widget.controller,
+            scrollController: _scrollController,
+            showJumpToBottom: _showJumpToBottom,
+            onJumpToBottom: _scrollToBottom,
+            onScrollNotification: _handleScrollNotification,
+            onAction: _performAction,
+            onCopyMessage: _copyMessage,
+            onEditResend: _editResendMessage,
+            onRetryOrRegenerate: _retryOrRegenerate,
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _ToolListTile extends StatelessWidget {
-  const _ToolListTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: selected ? const Color(0xFFEAF5F1) : const Color(0xFFF8FBFA),
-      borderRadius: BorderRadius.circular(18),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(18),
-        child: Padding(
-          padding: const EdgeInsets.all(14),
-          child: Row(
-            children: <Widget>[
-              Icon(icon, color: const Color(0xFF176B5A)),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(title, style: Theme.of(context).textTheme.titleSmall),
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-              ),
-              if (selected)
-                const Icon(Icons.check_circle, color: Color(0xFF176B5A)),
-            ],
-          ),
+        ChatComposer(
+          textController: _textController,
+          statusLabel: statusLabel,
+          selectedTool: selectedTool,
+          attachments: attachments,
+          composerLocked: composerLocked,
+          sending: sending,
+          hasInput: hasInput,
+          onOpenMenu: _openComposerMenu,
+          onSend: _sendMessage,
+          onStop: widget.controller.stopCurrentGeneration,
+          onRemoveTool: () => widget.controller.setDraftTool(null),
+          onRemoveAttachmentAt: widget.controller.removeDraftAttachmentAt,
         ),
-      ),
-    );
-  }
-}
-
-class _ConversationMessageView extends StatelessWidget {
-  const _ConversationMessageView({
-    required this.message,
-    required this.onAction,
-    this.onCopy,
-    this.onEditResend,
-  });
-
-  final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload})
-  onAction;
-  final VoidCallback? onCopy;
-  final VoidCallback? onEditResend;
-
-  @override
-  Widget build(BuildContext context) {
-    final isUser = message.isUser;
-    if (message.messageType == 'text') {
-      return Align(
-        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: Column(
-          crossAxisAlignment: isUser
-              ? CrossAxisAlignment.end
-              : CrossAxisAlignment.start,
-          children: <Widget>[
-            Container(
-              constraints: const BoxConstraints(maxWidth: 580),
-              margin: const EdgeInsets.only(bottom: 6),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: isUser ? const Color(0xFF176B5A) : Colors.white,
-                borderRadius: BorderRadius.circular(18),
-                boxShadow: const <BoxShadow>[
-                  BoxShadow(
-                    color: Color(0x14000000),
-                    blurRadius: 12,
-                    offset: Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  if ((message.textContent ?? '').trim().isNotEmpty)
-                    if (isUser)
-                      SelectableText(
-                        message.textContent ?? '',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          height: 1.55,
-                        ),
-                      )
-                    else
-                      MarkdownBody(
-                        data: message.textContent ?? '',
-                        selectable: true,
-                        styleSheet:
-                            MarkdownStyleSheet.fromTheme(
-                              Theme.of(context),
-                            ).copyWith(
-                              p: const TextStyle(
-                                color: Color(0xFF173C35),
-                                height: 1.55,
-                              ),
-                              listBullet: const TextStyle(
-                                color: Color(0xFF173C35),
-                              ),
-                              code: const TextStyle(
-                                color: Color(0xFF173C35),
-                                fontFamily: 'monospace',
-                              ),
-                              codeblockDecoration: BoxDecoration(
-                                color: const Color(0xFFF3F6F5),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                      ),
-                  if (message.isUser &&
-                      (message.attachmentRefs.isNotEmpty ||
-                          message.localAttachments.isNotEmpty ||
-                          message.selectedTool != null)) ...<Widget>[
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: <Widget>[
-                        ...message.attachmentRefs.map(
-                          (item) => _MetaChip(
-                            label: item.fileName,
-                            icon: Icons.attach_file,
-                            dark: isUser,
-                          ),
-                        ),
-                        ...message.localAttachments.map(
-                          (item) => _MetaChip(
-                            label: item.fileName,
-                            icon: Icons.attach_file,
-                            dark: isUser,
-                          ),
-                        ),
-                        if (message.selectedTool != null)
-                          _MetaChip(
-                            label: AppStrings.toolLabel(
-                              message.selectedTool!.apiValue,
-                            ),
-                            icon:
-                                message.selectedTool ==
-                                    ConversationTool.schedule
-                                ? Icons.calendar_month_outlined
-                                : Icons.sticky_note_2_outlined,
-                            dark: isUser,
-                          ),
-                      ],
-                    ),
-                  ],
-                  if (_statusLabel(message.status) != null) ...<Widget>[
-                    const SizedBox(height: 8),
-                    Text(
-                      _statusLabel(message.status)!,
-                      style: TextStyle(
-                        color: isUser
-                            ? Colors.white70
-                            : const Color(0xFF617B74),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            if (message.isUser && (onCopy != null || onEditResend != null))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12, right: 4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    if (onCopy != null)
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        iconSize: 18,
-                        tooltip: AppStrings.copy,
-                        onPressed: onCopy,
-                        icon: const Icon(Icons.content_copy_outlined),
-                      ),
-                    if (onEditResend != null)
-                      IconButton(
-                        visualDensity: VisualDensity.compact,
-                        iconSize: 18,
-                        tooltip: AppStrings.editResend,
-                        onPressed: onEditResend,
-                        icon: const Icon(Icons.edit_outlined),
-                      ),
-                  ],
-                ),
-              ),
-          ],
-        ),
-      );
-    }
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 640),
-        margin: const EdgeInsets.only(bottom: 12),
-        child: _StructuredMessageCard(message: message, onAction: onAction),
-      ),
-    );
-  }
-
-  String? _statusLabel(String status) {
-    switch (status) {
-      case 'sending':
-        return AppStrings.sending;
-      case 'streaming':
-        return AppStrings.streaming;
-      case 'failed':
-        return AppStrings.sendFailed;
-      default:
-        return null;
-    }
-  }
-}
-
-class _MetaChip extends StatelessWidget {
-  const _MetaChip({
-    required this.label,
-    required this.icon,
-    required this.dark,
-  });
-
-  final String label;
-  final IconData icon;
-  final bool dark;
-
-  @override
-  Widget build(BuildContext context) {
-    final backgroundColor = dark
-        ? const Color(0x1FFFFFFF)
-        : const Color(0xFFF0F5F3);
-    final foregroundColor = dark ? Colors.white : const Color(0xFF275C52);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: backgroundColor,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Icon(icon, size: 14, color: foregroundColor),
-          const SizedBox(width: 6),
-          Text(label, style: TextStyle(color: foregroundColor, fontSize: 12)),
-        ],
-      ),
-    );
-  }
-}
-
-class _StructuredMessageCard extends StatelessWidget {
-  const _StructuredMessageCard({required this.message, required this.onAction});
-
-  final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload})
-  onAction;
-
-  @override
-  Widget build(BuildContext context) {
-    switch (message.messageType) {
-      case 'schedule_draft_card':
-        return _ScheduleDraftCard(message: message, onAction: onAction);
-      case 'conflict_card':
-        return _ConflictCard(message: message);
-      case 'quick_note_preview_card':
-        return _QuickNotePreviewCard(message: message, onAction: onAction);
-      case 'reasoning_step':
-        return _ReasoningTraceCard(message: message);
-      default:
-        return const SizedBox.shrink();
-    }
-  }
-}
-
-/// 已落库的推理轨迹卡片（可折叠）。
-class _ReasoningTraceCard extends StatelessWidget {
-  const _ReasoningTraceCard({required this.message});
-
-  final ConversationMessageItem message;
-
-  @override
-  Widget build(BuildContext context) {
-    final structured = message.structuredPayload;
-    final payload = ReasoningTracePayload.fromStructured(structured);
-    return _ReasoningStepsList(
-      steps: payload.steps,
-      summary: payload.summary ?? AppStrings.reasoningTraceTitle,
-    );
-  }
-}
-
-/// 实时进行中的推理轨迹卡片（发送中尾部展示）。
-class _LiveReasoningCard extends StatelessWidget {
-  const _LiveReasoningCard({required this.steps});
-
-  final List<ReasoningStepItem> steps;
-
-  @override
-  Widget build(BuildContext context) {
-    return _ReasoningStepsList(
-      steps: steps,
-      summary: AppStrings.reasoningTraceRunning,
-    );
-  }
-}
-
-/// 推理步骤列表：实时与持久化共用的可折叠容器。
-class _ReasoningStepsList extends StatelessWidget {
-  const _ReasoningStepsList({required this.steps, required this.summary});
-
-  final List<ReasoningStepItem> steps;
-  final String summary;
-
-  @override
-  Widget build(BuildContext context) {
-    if (steps.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 640),
-        margin: const EdgeInsets.only(bottom: 12),
-        child: Card(
-          margin: EdgeInsets.zero,
-          elevation: 0,
-          color: const Color(0xFFF7FAF9),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: const BorderSide(color: Color(0xFFE2ECE8)),
-          ),
-          child: ExpansionTile(
-            tilePadding: const EdgeInsets.symmetric(horizontal: 14),
-            childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
-            leading: const Icon(
-              Icons.psychology_outlined,
-              size: 20,
-              color: Color(0xFF275C52),
-            ),
-            title: Text(
-              summary,
-              style: const TextStyle(fontSize: 13, color: Color(0xFF275C52)),
-            ),
-            children: <Widget>[
-              ...steps.map((step) => _ReasoningStepTile(step: step)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _ReasoningStepTile extends StatelessWidget {
-  const _ReasoningStepTile({required this.step});
-
-  final ReasoningStepItem step;
-
-  static String _stepLabel(ReasoningStepItem step) {
-    if (step.label.isNotEmpty) {
-      return step.label;
-    }
-    switch (step.stepType) {
-      case 'plan':
-        return AppStrings.reasoningStepPlan;
-      case 'act':
-        return AppStrings.reasoningStepAct;
-      case 'observe':
-        return AppStrings.reasoningStepObserve;
-      case 'reflect':
-        return AppStrings.reasoningStepReflect;
-      default:
-        return step.stepType;
-    }
-  }
-
-  static IconData _stepIcon(String stepType) {
-    switch (stepType) {
-      case 'plan':
-        return Icons.track_changes;
-      case 'act':
-        return Icons.bolt_outlined;
-      case 'observe':
-        return Icons.visibility_outlined;
-      case 'reflect':
-        return Icons.autorenew;
-      default:
-        return Icons.circle_outlined;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final failed = step.status == 'failed';
-    final running = step.status == 'running';
-    final accent = failed ? const Color(0xFFC25A45) : const Color(0xFF275C52);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Icon(_stepIcon(step.stepType), size: 16, color: accent),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  _stepLabel(step),
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: failed ? accent : const Color(0xFF173C35),
-                  ),
-                ),
-                if (step.content.trim().isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(
-                      step.content,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF617B74),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          if (running)
-            const SizedBox(
-              width: 12,
-              height: 12,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ScheduleDraftCard extends StatefulWidget {
-  const _ScheduleDraftCard({required this.message, required this.onAction});
-
-  final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload})
-  onAction;
-
-  @override
-  State<_ScheduleDraftCard> createState() => _ScheduleDraftCardState();
-}
-
-class _ScheduleDraftCardState extends State<_ScheduleDraftCard> {
-  late final TextEditingController _titleController;
-  late final TextEditingController _locationController;
-  late final TextEditingController _detailsController;
-  late DateTime? _startValue;
-  late DateTime? _endValue;
-  late String _reminderPreset;
-  bool _busy = false;
-
-  Map<String, dynamic> get _payload => widget.message.structuredPayload;
-  Map<String, dynamic> get _draft =>
-      (_payload['draft'] as Map<String, dynamic>? ?? <String, dynamic>{});
-
-  @override
-  void initState() {
-    super.initState();
-    _titleController = TextEditingController(
-      text: _draft['title'] as String? ?? '',
-    );
-    _locationController = TextEditingController(
-      text: _draft['location'] as String? ?? '',
-    );
-    _detailsController = TextEditingController(
-      text: _draft['details'] as String? ?? '',
-    );
-    final start = _draft['start'] as Map<String, dynamic>?;
-    final end = _draft['end'] as Map<String, dynamic>?;
-    _startValue = start == null
-        ? null
-        : DateTime.tryParse(start['dateTime'] as String? ?? '')?.toLocal();
-    _endValue = end == null
-        ? null
-        : DateTime.tryParse(end['dateTime'] as String? ?? '')?.toLocal();
-    _reminderPreset =
-        _draft['reminder_preset'] as String? ?? 'previous_day_1700';
-  }
-
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _locationController.dispose();
-    _detailsController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _submitMissingFields() async {
-    final parsedStart = _startValue;
-    final parsedEnd = _endValue;
-    setState(() => _busy = true);
-    try {
-      await widget.onAction(
-        'submit_missing_fields',
-        payload: <String, dynamic>{
-          'title': _titleController.text.trim(),
-          'start_at': parsedStart?.toLocal().toIso8601String(),
-          'end_at': parsedEnd?.toLocal().toIso8601String(),
-          'location': _locationController.text.trim(),
-          'details': _detailsController.text.trim(),
-          'reminder_preset': _reminderPreset,
-        },
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  Future<void> _confirm() async {
-    setState(() => _busy = true);
-    try {
-      await widget.onAction(
-        'confirm_schedule_draft',
-        payload: <String, dynamic>{'reminder_preset': _reminderPreset},
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  Future<void> _dismiss() async {
-    setState(() => _busy = true);
-    try {
-      await widget.onAction('dismiss_pending_action');
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final missingFields =
-        (_payload['missing_fields'] as List<dynamic>? ?? <dynamic>[])
-            .cast<String>();
-    final ambiguityFlags =
-        (_payload['ambiguity_flags'] as List<dynamic>? ?? <dynamic>[])
-            .cast<String>();
-    final evidenceDigest =
-        (_payload['evidence_digest'] as List<dynamic>? ?? <dynamic>[])
-            .cast<String>();
-    final parseConfidence =
-        (_payload['parse_confidence'] as num?)?.toDouble() ?? 0;
-    final stage = _payload['stage'] as String? ?? 'approval_pending';
-    final isActionable = _payload['is_actionable'] as bool? ?? false;
-    final lifecycle = _payload['lifecycle_status'] as String? ?? stage;
-    final recurrence = (_draft['recurrence'] as List<dynamic>? ?? <dynamic>[])
-        .cast<String>();
-    final isEditing = stage == 'needs_input' && isActionable;
-    final terminalSummary = _payload['terminal_summary'] as String?;
-
-    return _CardShell(
-      title: AppStrings.scheduleDraft,
-      lifecycle: lifecycle,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          TextField(
-            controller: _titleController,
-            enabled: isEditing && !_busy,
-            decoration: const InputDecoration(labelText: AppStrings.titleField),
-          ),
-          const SizedBox(height: 12),
-          EventDateTimeField(
-            label: AppStrings.startField,
-            value: _startValue,
-            isAllDay: false,
-            enabled: isEditing && !_busy,
-            onChanged: (value) {
-              if (value == null) {
-                return;
-              }
-              setState(() {
-                _startValue = value;
-                if (_endValue == null || !_endValue!.isAfter(value)) {
-                  _endValue = value.add(const Duration(hours: 1));
-                }
-              });
-            },
-          ),
-          const SizedBox(height: 12),
-          EventDateTimeField(
-            label: AppStrings.endField,
-            value: _endValue,
-            isAllDay: false,
-            enabled: isEditing && !_busy,
-            onChanged: (value) {
-              if (value == null) {
-                return;
-              }
-              setState(() {
-                _endValue = value.isAfter(_startValue ?? value)
-                    ? value
-                    : (_startValue ?? value).add(const Duration(hours: 1));
-              });
-            },
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _locationController,
-            enabled: isEditing && !_busy,
-            decoration: const InputDecoration(
-              labelText: AppStrings.locationField,
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _detailsController,
-            enabled: isEditing && !_busy,
-            minLines: 2,
-            maxLines: 4,
-            decoration: const InputDecoration(
-              labelText: AppStrings.detailsField,
-            ),
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            initialValue: _reminderPreset,
-            decoration: const InputDecoration(
-              labelText: AppStrings.reminderField,
-            ),
-            items: reminderPresetOptions
-                .map(
-                  (item) => DropdownMenuItem<String>(
-                    value: item,
-                    child: Text(formatReminderPreset(item)),
-                  ),
-                )
-                .toList(),
-            onChanged: isActionable && !_busy
-                ? (value) {
-                    if (value == null) {
-                      return;
-                    }
-                    setState(() => _reminderPreset = value);
-                  }
-                : null,
-          ),
-          const SizedBox(height: 12),
-          _SectionChips(
-            title: AppStrings.missingFieldsField,
-            values: missingFields.map(AppStrings.missingFieldLabel).toList(),
-          ),
-          _SectionChips(
-            title: AppStrings.ambiguityField,
-            values: ambiguityFlags.map(AppStrings.ambiguityLabel).toList(),
-          ),
-          _SectionList(title: AppStrings.evidenceField, values: evidenceDigest),
-          _SectionList(
-            title: AppStrings.recurrenceField,
-            values: <String>[formatRecurrence(recurrence)],
-          ),
-          if (terminalSummary != null &&
-              terminalSummary.trim().isNotEmpty) ...<Widget>[
-            Text(terminalSummary),
-            const SizedBox(height: 8),
-          ],
-          Text(
-            '${AppStrings.reminderField}：${formatReminderPreset(_reminderPreset)}',
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '${AppStrings.parseConfidenceField}：${(parseConfidence * 100).toStringAsFixed(0)}%',
-          ),
-          if (isActionable) ...<Widget>[
-            const SizedBox(height: 16),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: _busy ? null : _dismiss,
-                    child: const Text(AppStrings.cancelPendingAction),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _busy
-                        ? null
-                        : (isEditing ? _submitMissingFields : _confirm),
-                    child: Text(
-                      _busy
-                          ? AppStrings.loading
-                          : (isEditing
-                                ? AppStrings.submitMissingFields
-                                : AppStrings.confirmSave),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _ConflictCard extends StatelessWidget {
-  const _ConflictCard({required this.message});
-
-  final ConversationMessageItem message;
-
-  @override
-  Widget build(BuildContext context) {
-    final payload = message.structuredPayload;
-    final conflicts =
-        (payload['conflict_items'] as List<dynamic>? ?? <dynamic>[])
-            .map((item) => Map<String, dynamic>.from(item as Map))
-            .toList();
-    final suggestions =
-        (payload['suggestions'] as List<dynamic>? ?? <dynamic>[])
-            .map((item) => Map<String, dynamic>.from(item as Map))
-            .toList();
-    final riskLevel = payload['risk_level'] as String? ?? 'low';
-    final lifecycle =
-        payload['lifecycle_status'] as String? ?? 'conflict_review';
-
-    return _CardShell(
-      title: AppStrings.conflictCheck,
-      lifecycle: lifecycle,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(
-            '${AppStrings.riskLevelField}：${AppStrings.riskLevelLabel(riskLevel)}',
-          ),
-          const SizedBox(height: 12),
-          _SectionList(
-            title: AppStrings.conflictItemsField,
-            values: conflicts.isEmpty
-                ? const <String>['未发现冲突']
-                : conflicts.map((item) {
-                    final start = EventDateTimeValue.fromJson(
-                      item['start'] as Map<String, dynamic>,
-                    );
-                    final end = EventDateTimeValue.fromJson(
-                      item['end'] as Map<String, dynamic>,
-                    );
-                    return '${item['title']}：${formatEventRange(start: start, end: end, isAllDay: false)}';
-                  }).toList(),
-          ),
-          _SectionList(
-            title: AppStrings.suggestionsField,
-            values: suggestions.isEmpty
-                ? const <String>['暂无建议时段']
-                : suggestions.map((item) {
-                    final start = EventDateTimeValue.fromJson(
-                      item['start'] as Map<String, dynamic>,
-                    );
-                    final end = EventDateTimeValue.fromJson(
-                      item['end'] as Map<String, dynamic>,
-                    );
-                    return '${item['label']}：${formatEventRange(start: start, end: end, isAllDay: false)}';
-                  }).toList(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _QuickNotePreviewCard extends StatefulWidget {
-  const _QuickNotePreviewCard({required this.message, required this.onAction});
-
-  final ConversationMessageItem message;
-  final Future<void> Function(String action, {Map<String, dynamic> payload})
-  onAction;
-
-  @override
-  State<_QuickNotePreviewCard> createState() => _QuickNotePreviewCardState();
-}
-
-class _QuickNotePreviewCardState extends State<_QuickNotePreviewCard> {
-  bool _busy = false;
-
-  Future<void> _confirm() async {
-    setState(() => _busy = true);
-    try {
-      await widget.onAction('confirm_quick_note');
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  Future<void> _dismiss() async {
-    setState(() => _busy = true);
-    try {
-      await widget.onAction('dismiss_pending_action');
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final payload = widget.message.structuredPayload;
-    final tags = (payload['preview_tags'] as List<dynamic>? ?? <dynamic>[])
-        .cast<String>();
-    final evidenceDigest =
-        (payload['evidence_digest'] as List<dynamic>? ?? <dynamic>[])
-            .cast<String>();
-    final lifecycle =
-        payload['lifecycle_status'] as String? ?? 'approval_pending';
-    final isActionable = payload['is_actionable'] as bool? ?? false;
-    final terminalSummary = payload['terminal_summary'] as String?;
-
-    return _CardShell(
-      title: AppStrings.quickNotePreview,
-      lifecycle: lifecycle,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(payload['normalized_content'] as String? ?? ''),
-          const SizedBox(height: 12),
-          if (terminalSummary != null &&
-              terminalSummary.trim().isNotEmpty) ...<Widget>[
-            Text(terminalSummary),
-            const SizedBox(height: 12),
-          ],
-          _SectionChips(
-            title: AppStrings.tagsField,
-            values: tags,
-            colored: true,
-          ),
-          _SectionList(title: AppStrings.evidenceField, values: evidenceDigest),
-          if (isActionable) ...<Widget>[
-            const SizedBox(height: 16),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: _busy ? null : _dismiss,
-                    child: const Text(AppStrings.cancelPendingAction),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: _busy ? null : _confirm,
-                    child: Text(
-                      _busy ? AppStrings.loading : AppStrings.confirmSave,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _CardShell extends StatelessWidget {
-  const _CardShell({
-    required this.title,
-    required this.lifecycle,
-    required this.child,
-  });
-
-  final String title;
-  final String lifecycle;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      color: switch (lifecycle) {
-        'confirmed' => const Color(0xFFF0FAF3),
-        'cancelled' => const Color(0xFFFFF6EF),
-        'superseded' => const Color(0xFFF4F6F8),
-        _ => null,
-      },
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: Text(
-                    title,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ),
-                Chip(label: Text(AppStrings.lifecycleLabel(lifecycle))),
-              ],
-            ),
-            const SizedBox(height: 12),
-            child,
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SectionChips extends StatelessWidget {
-  const _SectionChips({
-    required this.title,
-    required this.values,
-    this.colored = false,
-  });
-
-  final String title;
-  final List<String> values;
-  final bool colored;
-
-  @override
-  Widget build(BuildContext context) {
-    if (values.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(title, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: values.map((item) {
-              if (!colored) {
-                return Chip(label: Text(item));
-              }
-              final colors = TagPalette.resolve(item);
-              return Chip(
-                label: Text(item, style: TextStyle(color: colors.foreground)),
-                backgroundColor: colors.background,
-                side: BorderSide(color: colors.border),
-              );
-            }).toList(),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SectionList extends StatelessWidget {
-  const _SectionList({required this.title, required this.values});
-
-  final String title;
-  final List<String> values;
-
-  @override
-  Widget build(BuildContext context) {
-    if (values.isEmpty) {
-      return const SizedBox.shrink();
-    }
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(title, style: Theme.of(context).textTheme.labelLarge),
-          const SizedBox(height: 8),
-          ...values.map(
-            (item) => Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Text('• $item'),
-            ),
-          ),
-        ],
-      ),
+      ],
     );
   }
 }

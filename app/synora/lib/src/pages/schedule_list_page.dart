@@ -257,89 +257,96 @@ class _MonthCalendar extends StatelessWidget {
 
     const weekLabels = <String>['一', '二', '三', '四', '五', '六', '日'];
 
-    return Column(
-      children: <Widget>[
-        Row(
-          children: weekLabels
-              .map(
-                (label) => Expanded(
-                  child: Center(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Text(
-                        label,
-                        style: Theme.of(context).textTheme.bodySmall,
+    // PC/平板适配：日历整体限制最大宽度并居中，格子高度固定，
+    // 避免宽屏下日期格子随页面宽度被拉伸得巨大。
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720),
+        child: Column(
+          children: <Widget>[
+            Row(
+              children: weekLabels
+                  .map(
+                    (label) => Expanded(
+                      child: Center(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Text(
+                            label,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+            const SizedBox(height: 4),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: totalCells,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 7,
+                mainAxisExtent: 80,
+              ),
+              itemBuilder: (context, index) {
+                final dayNumber = index - startOffset + 1;
+                if (dayNumber < 1 || dayNumber > daysInMonth) {
+                  return const SizedBox.shrink();
+                }
+                final day = DateTime(
+                  visibleMonth.year,
+                  visibleMonth.month,
+                  dayNumber,
+                );
+                final normalizedDay = DateTime(day.year, day.month, day.day);
+                final selected = isSameDay(day, selectedDay);
+                final hasSchedule = scheduleDays.contains(normalizedDay);
+                return Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: () => onDaySelected(day),
+                    child: Ink(
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? Theme.of(context).colorScheme.primaryContainer
+                            : null,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: <Widget>[
+                          Text('$dayNumber'),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            height: 8,
+                            child: hasSchedule
+                                ? Center(
+                                    child: Container(
+                                      width: 6,
+                                      height: 6,
+                                      decoration: BoxDecoration(
+                                        color: Theme.of(
+                                          context,
+                                        ).colorScheme.primary,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                  )
+                                : const SizedBox.shrink(),
+                          ),
+                        ],
                       ),
                     ),
                   ),
-                ),
-              )
-              .toList(),
+                );
+              },
+            ),
+          ],
         ),
-        const SizedBox(height: 4),
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: totalCells,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 7,
-            childAspectRatio: 1.05,
-          ),
-          itemBuilder: (context, index) {
-            final dayNumber = index - startOffset + 1;
-            if (dayNumber < 1 || dayNumber > daysInMonth) {
-              return const SizedBox.shrink();
-            }
-            final day = DateTime(
-              visibleMonth.year,
-              visibleMonth.month,
-              dayNumber,
-            );
-            final normalizedDay = DateTime(day.year, day.month, day.day);
-            final selected = isSameDay(day, selectedDay);
-            final hasSchedule = scheduleDays.contains(normalizedDay);
-            return Padding(
-              padding: const EdgeInsets.all(4),
-              child: InkWell(
-                borderRadius: BorderRadius.circular(14),
-                onTap: () => onDaySelected(day),
-                child: Ink(
-                  decoration: BoxDecoration(
-                    color: selected
-                        ? Theme.of(context).colorScheme.primaryContainer
-                        : null,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: <Widget>[
-                      Text('$dayNumber'),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                        height: 8,
-                        child: hasSchedule
-                            ? Center(
-                                child: Container(
-                                  width: 6,
-                                  height: 6,
-                                  decoration: BoxDecoration(
-                                    color: Theme.of(
-                                      context,
-                                    ).colorScheme.primary,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                              )
-                            : const SizedBox.shrink(),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-      ],
+      ),
     );
   }
 }

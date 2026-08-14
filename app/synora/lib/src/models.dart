@@ -911,6 +911,8 @@ class ReasoningStepItem {
     required this.status,
     required this.iteration,
     required this.seq,
+    this.degraded = false,
+    this.planSource,
   });
 
   final String stepType;
@@ -919,6 +921,10 @@ class ReasoningStepItem {
   final String status; // running | completed | failed
   final int iteration;
   final int seq;
+  /// 该步骤是否走了降级路径（例如 plan LLM 失败用确定性兜底）。
+  final bool degraded;
+  /// plan 步骤的来源：llm | deterministic。
+  final String? planSource;
 
   factory ReasoningStepItem.fromJson(Map<String, dynamic> json) {
     return ReasoningStepItem(
@@ -928,6 +934,8 @@ class ReasoningStepItem {
       status: json['status'] as String? ?? 'completed',
       iteration: json['iteration'] as int? ?? 0,
       seq: json['seq'] as int? ?? 0,
+      degraded: json['degraded'] as bool? ?? false,
+      planSource: json['plan_source'] as String?,
     );
   }
 
@@ -939,6 +947,8 @@ class ReasoningStepItem {
       status: status ?? this.status,
       iteration: iteration,
       seq: seq,
+      degraded: degraded,
+      planSource: planSource,
     );
   }
 }
@@ -1035,7 +1045,7 @@ class ConversationRewindResult {
 }
 
 class ConversationStreamEvent {
-  ConversationStreamEvent({required this.event, required this.data});
+  const ConversationStreamEvent({required this.event, required this.data});
 
   final String event;
   final Map<String, dynamic> data;
