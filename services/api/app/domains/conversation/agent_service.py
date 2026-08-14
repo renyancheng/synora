@@ -584,9 +584,16 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
     else:
         try:
             evidence = {"user_goal": str(state.get("user_message") or "")[:1200], "plan": str(state.get("plan") or "")[:600], "iteration": iteration, "max_iterations": max_iter, "current_assistant_output": assistant_output[:2000], "observation": observation[:1600], "tool_failed": tool_failed, "tool_messages": [{"name": str(item.get("name") or "")[:120], "content": str(item.get("content") or "")[:1200]} for item in list(state.get("agent_messages") or []) if item.get("role") == "tool"][-4:]}
-            result = await llm.ainvoke_structured(settings, schema=llm.ReflectDecision, system_prompt="你是 Synora 的执行评估器。根据提供的执行证据判断是否需要下一轮行动。只有当前没有面向用户的回答且工具结果明确不足时才令 is_complete=false。follow_up_prompt 只能是给模型的简短任务指引，不得包含密钥、令牌、完整附件、用户隐私原文或工具内部错误详情。", user_text=json.dumps(evidence, ensure_ascii=False), operation="agent_reflect")
+            result = await llm.ainvoke_structured(settings, schema=llm.ReflectDecision, system_prompt="你是 Synora 的执行评估器。根据提供的执行证据判断是否需要下一轮行动。只有当「已有面向用户的回答文本」时才可令 is_complete=true；如果工具结果已经充分，但还没有生成面向用户的回答文本，必须令 is_complete=false，并给出生成最终回答的任务指引。follow_up_prompt 只能是给模型的简短任务指引，不得包含密钥、令牌、完整附件、用户隐私原文或工具内部错误详情。", user_text=json.dumps(evidence, ensure_ascii=False), operation="agent_reflect")
             if result.is_complete:
-                rationale = result.rationale or "信息已充分"
+                if not assistant_output:
+                    # LLM 判定“信息已充分”但当前还没有面向用户的回答文本：
+                    # 强制再跑一轮 act 生成回答，避免“工具成功但空气泡”收尾。
+                    decision = "continue"
+                    rationale = "信息已充分但尚未生成回答文本，要求基于工具结果作答"
+                    follow_up_prompt = "基于已获得的工具结果，直接针对用户当前输入整理出简洁的最终回答文本，必须输出非空内容。"
+                else:
+                    rationale = result.rationale or "信息已充分"
             else:
                 decision, rationale = "continue", result.rationale or "需要继续行动"
                 follow_up_prompt = sanitize_follow_up_prompt(result.follow_up_prompt)

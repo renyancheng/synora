@@ -439,6 +439,32 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(serialized[0]["args"], {"query": "DeepSeek API 价格 2026"})
         self.assertEqual(serialized[0]["id"], "call-1")
 
+    async def test_reflect_llm_complete_without_text_forces_answer_round(self) -> None:
+        """LLM 判定信息已充分但没有面向用户的回答文本时，必须强制再跑一轮生成回答。"""
+        with patch(
+            "app.agent.llm.ainvoke_structured",
+            new_callable=AsyncMock,
+            return_value=llm.ReflectDecision(is_complete=True, rationale="信息已充分"),
+        ) as llm_mock:
+            result = await reflect_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(),
+                state=self._state(
+                    user_message="帮我搜一下 deepseek 价格",
+                    iteration_count=1,
+                    max_iterations=3,
+                    current_aimessage={"content": "", "tool_calls": [{"name": "web_search"}]},
+                    observation="web_search: 搜索结果已返回",
+                    agent_messages=[{"role": "tool", "name": "web_search", "content": "搜索结果内容"}],
+                ),
+                emit=self.events.append,
+            )
+
+        self.assertEqual(result["loop_decision"], "continue")
+        self.assertIn("最终回答文本", result["follow_up_prompt"] or "")
+
     async def test_observe_web_search_falls_back_to_user_message_query(self) -> None:
         captured: dict = {}
 

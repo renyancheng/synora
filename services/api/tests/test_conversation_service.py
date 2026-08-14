@@ -730,6 +730,71 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock)
+    @patch(
+        "app.agent.llm.create_chat_model",
+        return_value=_WebSearchFragmentedModel(final_text="根据搜索结果，DeepSeek API 输入价格 1 元/百万 tokens。"),
+    )
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock)
+    @patch("app.agent.llm.generate_conversation_title", return_value="搜索问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_search_llm_complete_without_text_forces_answer_round(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        """搜索成功后 reflect 判定“信息已充分”但没有回答文本：
+        必须强制再跑一轮 act 生成回答，避免“工具成功但空气泡”收尾。"""
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        captured: dict = {}
+        tools_mock.return_value = [_FakeWebSearchTool(captured)]
+        reflect_calls = {"n": 0}
+
+        async def _reflect_side_effect(settings, **kwargs):
+            if kwargs.get("operation") == "agent_plan":
+                return llm.PlanResult(plan="联网搜索 DeepSeek API 价格")
+            if kwargs.get("operation") == "agent_reflect":
+                reflect_calls["n"] += 1
+                # 第一次就判定“信息已充分”（复刻线上真实行为）
+                return llm.ReflectDecision(is_complete=True, rationale="信息已充分")
+            raise AssertionError(f"unexpected operation: {kwargs.get('operation')}")
+
+        _ainvoke_mock.side_effect = _reflect_side_effect
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="帮我搜一下 deepseek 现在的 api 价格"),
+        )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertEqual(
+            self.db.get(type(assistant_message), assistant_message.id).text_content,
+            "根据搜索结果，DeepSeek API 输入价格 1 元/百万 tokens。",
+        )
+        step_snapshots = [
+            item["data"]["message"]
+            for item in events
+            if item["event"] == "card_snapshot" and item["data"]["message"]["message_type"] == "reasoning_step"
+        ]
+        steps = step_snapshots[0]["structured_payload"]["steps"]
+        self.assertEqual([s["step_type"] for s in steps].count("act"), 2)
+        self.assertTrue(
+            any("尚未生成回答文本" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
+        )
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
     @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
     @patch("app.agent.llm.create_chat_model", return_value=_EmptyThenTextChatModel("你好！我是 Synora。", rounds_before_text=2))
     @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
