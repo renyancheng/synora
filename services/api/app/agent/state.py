@@ -42,6 +42,7 @@ class AgentState(TypedDict, total=False):
     pending_tool_calls: list[dict[str, Any]]
     observation: str
     tool_failed: bool
+    tool_failed_all: bool  # 本轮所有工具调用均失败（全部失败才收口，部分失败仍需回答轮）
     reflection: str
     current_aimessage: dict[str, Any] | None
     # 推理轨迹步骤（[{seq, step_type, label, content, status, iteration}]），add reducer 追加

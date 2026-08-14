@@ -125,33 +125,9 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("operation=agent_plan", record_text)
         self.assertIn("fallback=deterministic", record_text)
 
-    async def test_reflect_step_marks_degraded_and_closes_conservatively_on_llm_failure(self) -> None:
-        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=RuntimeError("llm down")):
-            with self.assertLogs("app.domains.conversation.agent_service", level="WARNING") as captured:
-                result = await reflect_step(
-                    self.db,
-                    self.thread,
-                    self.message,
-                    SimpleNamespace(),
-                    state=self._state(
-                        iteration_count=1,
-                        max_iterations=3,
-                        current_aimessage={"content": "", "tool_calls": [{"name": "get_current_time"}]},
-                        observation="get_current_time: 15:30",
-                        agent_messages=[{"role": "tool", "name": "get_current_time", "content": "15:30"}],
-                    ),
-                    emit=self.events.append,
-                )
-
-        self.assertEqual(result["loop_decision"], "done")
-        self.assertEqual(result["reflection"], "评估失败，保守收尾")
-        self.assertTrue(result["steps"][0].get("degraded"))
-        record_text = " ".join(captured.output)
-        self.assertIn("operation=agent_reflect", record_text)
-        self.assertIn("fallback=conservative_close", record_text)
-        self.assertNotIn("15:30", record_text)
-
-    async def test_reflect_step_normal_path_is_not_degraded(self) -> None:
+    async def test_reflect_step_tool_round_continues_without_llm_eval(self) -> None:
+        """工具轮确定性续跑：不调用 LLM 评估、不降级（修复前该场景走 LLM
+        评估，评估失败时降级保守收口；现工具轮一律确定性续跑回答轮）。"""
         with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as llm_mock:
             result = await reflect_step(
                 self.db,
@@ -161,14 +137,41 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 state=self._state(
                     iteration_count=1,
                     max_iterations=3,
-                    current_aimessage={"content": "现在是 15:30。", "tool_calls": [{"name": "get_current_time"}]},
+                    current_aimessage={"content": "", "tool_calls": [{"name": "get_current_time"}]},
                     observation="get_current_time: 15:30",
+                    agent_messages=[{"role": "tool", "name": "get_current_time", "content": "15:30"}],
                 ),
                 emit=self.events.append,
             )
 
         llm_mock.assert_not_awaited()
-        self.assertEqual(result["loop_decision"], "done")
+        self.assertEqual(result["loop_decision"], "continue")
+        self.assertEqual(result["reflection"], "工具已执行，需基于工具结果生成最终回答")
+        self.assertFalse(result["steps"][0].get("degraded"))
+
+    async def test_reflect_step_tool_round_with_preamble_text_continues(self) -> None:
+        """回归测试（线上问题）：工具轮即使已有“预告文本”（工具调用前流出，
+        如“我来为您搜索今天的热点新闻。”），也必须续跑回答轮，不能收口。"""
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as llm_mock:
+            result = await reflect_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(),
+                state=self._state(
+                    iteration_count=1,
+                    max_iterations=3,
+                    current_aimessage={
+                        "content": "我来为您搜索今天的热点新闻。",
+                        "tool_calls": [{"name": "web_search", "args": {"query": "今天的新闻"}}],
+                    },
+                    observation="web_search: 今日热点……",
+                ),
+                emit=self.events.append,
+            )
+
+        llm_mock.assert_not_awaited()
+        self.assertEqual(result["loop_decision"], "continue")
         self.assertFalse(result["steps"][0].get("degraded"))
 
     async def test_reflect_detects_repeated_answer_and_requests_rerun(self) -> None:

@@ -491,11 +491,12 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
     if not tool_calls:
         completed_step = {**running_step, "content": "本轮无工具调用", "status": "completed"}
         emit(build_reasoning_step_event(assistant_message.id, completed_step))
-        return {"tool_messages": [], "observation": "本轮无工具调用", "tool_failed": False, "pending_tool_calls": [], "steps": [completed_step]}
+        return {"tool_messages": [], "observation": "本轮无工具调用", "tool_failed": False, "tool_failed_all": False, "pending_tool_calls": [], "steps": [completed_step]}
     tool_map = {tool.name: tool for tool in await build_agent_tools(include_names=GENERAL_CHAT_ACTIVE_TOOLS)}
     tool_messages: list[dict[str, Any]] = []
     summaries: list[str] = []
     tool_failed = False
+    failures = 0
     for call in tool_calls:
         raise_if_stream_cancelled(db, state.get("stream_id"), force_database_check=True)
         name = str(call.get("name") or "").strip()
@@ -503,6 +504,7 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
         if not name:
             # 名称为空的残缺调用：直接按失败收口，不进入“未知工具”空转。
             tool_failed = True
+            failures += 1
             content_text = "模型尝试调用工具但未给出工具名，已忽略。"
             emit({"event": "tool_call_failed", "data": {"tool_name": "", "call_id": call_id, "message": content_text}})
             tool_messages.append({"role": "tool", "content": content_text, "name": "", "tool_call_id": call_id})
@@ -518,6 +520,7 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
         audit = start_tool_audit(db, agent_run_id=agent_run.id, tool_name=name, request_json={"arguments": args})
         if tool is None:
             tool_failed, content_text = True, f"未知工具：{name}"
+            failures += 1
             finish_tool_audit(db, audit, status="failed", response_json={}, error_message=content_text)
             emit({"event": "tool_call_failed", "data": {"tool_name": name, "call_id": call_id, "message": content_text}})
         else:
@@ -528,6 +531,7 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
                 emit({"event": "tool_call_completed", "data": {"tool_name": name, "call_id": call_id}})
             except Exception as exc:
                 tool_failed, content_text = True, f"工具执行失败：{exc}"
+                failures += 1
                 finish_tool_audit(db, audit, status="failed", response_json={}, error_message=str(exc))
                 emit({"event": "tool_call_failed", "data": {"tool_name": name, "call_id": call_id, "message": str(exc)}})
         tool_messages.append({"role": "tool", "content": content_text, "name": name, "tool_call_id": call_id})
@@ -535,7 +539,7 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
     observation = "；".join(summaries)[:120] or "本轮无工具调用"
     completed_step = {**running_step, "content": observation, "status": "completed"}
     emit(build_reasoning_step_event(assistant_message.id, completed_step))
-    return {"tool_messages": tool_messages, "observation": observation, "tool_failed": tool_failed, "pending_tool_calls": [], "steps": [completed_step]}
+    return {"tool_messages": tool_messages, "observation": observation, "tool_failed": tool_failed, "tool_failed_all": failures > 0 and failures >= len(tool_calls), "pending_tool_calls": [], "steps": [completed_step]}
 
 
 async def reflect_step(db: Session, thread: ConversationThread, assistant_message: ConversationMessage, agent_run: AgentRun, *, state: dict[str, Any], emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
@@ -550,6 +554,7 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
     # 否则上一轮承诺话术会让 reflect 误判“已有回答”而跳过工具轮。
     assistant_output = str(aimessage.get("content") or "").strip()
     tool_failed = bool(state.get("tool_failed"))
+    tool_failed_all = bool(state.get("tool_failed_all"))
     decision, rationale, follow_up_prompt = "done", "", None
     degraded = False
     anti_repeat_triggered = False
@@ -591,15 +596,24 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
         rationale = "仅给出承诺性答复未执行搜索，要求调用工具"
         follow_up_prompt = "你刚才只给出了承诺性的答复，没有实际调用任何工具。请立即调用 web_search 工具执行搜索，再基于搜索结果给出最终回答。"
         anti_commitment_triggered = True
-    elif not had_tool_calls:
-        rationale = "本轮无工具调用，回答完整"
     elif iteration >= max_iter:
         rationale = f"已达最大迭代次数（{max_iter}）"
-    elif tool_failed:
+    elif tool_failed_all:
         rationale = "工具执行失败，避免重复调用"
+    elif had_tool_calls:
+        # 核心修复：act 流中模型在发起工具调用之前会先流出“预告/承诺”文本
+        # （如“我来为您搜索……”），该文本不可能包含工具结果，绝不能当作
+        # 最终回答。因此只要本轮调用了工具，就必须再跑一轮 act，让模型基于
+        # ToolMessage 生成最终回答；部分失败（仍有工具成功）同样继续，只有
+        # 全部失败才收口，避免“搜索成功却直接收口、没有后文”的线上问题。
+        decision = "continue"
+        rationale = "工具已执行，需基于工具结果生成最终回答"
+        follow_up_prompt = "工具已执行完成。请直接基于工具返回的结果，针对用户当前输入整理出简洁的最终回答文本，必须输出非空内容。"
     elif assistant_output:
-        rationale = "工具已返回且已生成用户可读回答"
+        rationale = "本轮无工具调用，回答完整"
     else:
+        # 防御性兜底：正常流程下此分支不可达（工具轮已在上方确定性续跑），
+        # 保留 LLM 评估以兼容未来新增的循环形态与 legacy 调用方。
         try:
             evidence = {"user_goal": str(state.get("user_message") or "")[:1200], "plan": str(state.get("plan") or "")[:600], "iteration": iteration, "max_iterations": max_iter, "current_assistant_output": assistant_output[:2000], "observation": observation[:1600], "tool_failed": tool_failed, "tool_messages": [{"name": str(item.get("name") or "")[:120], "content": str(item.get("content") or "")[:1200]} for item in list(state.get("agent_messages") or []) if item.get("role") == "tool"][-4:]}
             result = await llm.ainvoke_structured(settings, schema=llm.ReflectDecision, system_prompt="你是 Synora 的执行评估器。根据提供的执行证据判断是否需要下一轮行动。只有当「已有面向用户的回答文本」时才可令 is_complete=true；如果工具结果已经充分，但还没有生成面向用户的回答文本，必须令 is_complete=false，并给出生成最终回答的任务指引。follow_up_prompt 只能是给模型的简短任务指引，不得包含密钥、令牌、完整附件、用户隐私原文或工具内部错误详情。", user_text=json.dumps(evidence, ensure_ascii=False), operation="agent_reflect")

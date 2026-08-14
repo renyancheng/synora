@@ -166,6 +166,7 @@ async def observe_node(state: AgentState) -> dict[str, Any]:
         "agent_messages": list(result.get("tool_messages") or []),
         "observation": result.get("observation") or "",
         "tool_failed": bool(result.get("tool_failed")),
+        "tool_failed_all": bool(result.get("tool_failed_all")),
         "pending_tool_calls": [],
         "reasoning_steps": list(result.get("steps") or []),
     }

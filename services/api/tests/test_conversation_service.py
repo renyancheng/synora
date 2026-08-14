@@ -316,7 +316,9 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             evidence_digest=["明天下午三点", "教学例会"],
         )
 
-    async def test_reflect_receives_execution_evidence_and_continues_when_answer_missing(self) -> None:
+    async def test_reflect_continues_deterministically_after_tool_call(self) -> None:
+        """工具轮必须确定性续跑回答轮（即使本轮尚无回答文本），不再调用 LLM
+        评估：保证工具结果一定能转化为面向用户的最终回答。"""
         assistant_message = ConversationMessage(
             conversation_id=1,
             role="assistant",
@@ -327,17 +329,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.db.add(assistant_message)
         self.db.commit()
-        captured: list[dict] = []
-
-        async def reflect(settings, **kwargs):
-            captured.append(kwargs)
-            return llm.ReflectDecision(
-                is_complete=False,
-                rationale="还需要组织答案",
-                follow_up_prompt="根据工具结果给出简洁答复",
-            )
-
-        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=reflect):
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as reflect_mock:
             result = await reflect_step(
                 self.db,
                 SimpleNamespace(),
@@ -357,13 +349,10 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                 emit=lambda _event: None,
             )
 
-        evidence = json.loads(captured[0]["user_text"])
-        self.assertEqual(evidence["plan"], "查询当前时间后回答")
-        self.assertEqual(evidence["observation"], "get_current_time: 2026-08-13 15:30")
-        self.assertEqual(evidence["tool_messages"][0]["content"], "2026-08-13 15:30")
-        self.assertEqual(evidence["current_assistant_output"], "")
         self.assertEqual(result["loop_decision"], "continue")
-        self.assertEqual(result["follow_up_prompt"], "根据工具结果给出简洁答复")
+        self.assertEqual(result["reflection"], "工具已执行，需基于工具结果生成最终回答")
+        self.assertIn("基于工具返回的结果", result["follow_up_prompt"])
+        reflect_mock.assert_not_awaited()
 
     async def test_reflect_does_not_loop_after_tool_failure(self) -> None:
         assistant_message = ConversationMessage(
@@ -382,6 +371,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                     "max_iterations": 3,
                     "current_aimessage": {"content": "", "tool_calls": [{"name": "get_current_time"}]},
                     "tool_failed": True,
+                    "tool_failed_all": True,
                 },
                 emit=lambda _event: None,
             )
@@ -390,9 +380,18 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reflection"], "工具执行失败，避免重复调用")
         reflect_mock.assert_not_awaited()
 
-    async def test_reflect_closes_after_successful_tool_and_user_answer(self) -> None:
+    async def test_reflect_requires_answer_round_after_tool_call_even_with_preamble_text(self) -> None:
+        """回归测试（线上问题）：act 流中模型先流出“预告文本”再调用工具
+        （如“我来为您搜索今天的热点新闻。”），该文本发生在工具执行之前，
+        不可能是最终回答。reflect 必须判定 continue 追加回答轮，绝不能
+        因为“已有文本”就直接收口。"""
         assistant_message = ConversationMessage(
-            conversation_id=1, role="assistant", message_type="text", status="streaming", text_content="现在是周四 15:30。", structured_payload_json={}
+            conversation_id=1,
+            role="assistant",
+            message_type="text",
+            status="streaming",
+            text_content="我来为您搜索今天的热点新闻。",
+            structured_payload_json={},
         )
         self.db.add(assistant_message)
         self.db.commit()
@@ -406,16 +405,17 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
                     "iteration_count": 1,
                     "max_iterations": 3,
                     "current_aimessage": {
-                        "content": "现在是周四 15:30。",
-                        "tool_calls": [{"name": "get_current_time"}],
+                        "content": "我来为您搜索今天的热点新闻。",
+                        "tool_calls": [{"name": "web_search", "args": {"query": "今天的热点新闻"}}],
                     },
-                    "observation": "get_current_time: 2026-08-13 15:30",
+                    "observation": "web_search: 今日热点……",
                 },
                 emit=lambda _event: None,
             )
 
-        self.assertEqual(result["loop_decision"], "done")
-        self.assertEqual(result["reflection"], "工具已返回且已生成用户可读回答")
+        self.assertEqual(result["loop_decision"], "continue")
+        self.assertEqual(result["reflection"], "工具已执行，需基于工具结果生成最终回答")
+        self.assertTrue(result["follow_up_prompt"])
         reflect_mock.assert_not_awaited()
 
     async def test_pending_stream_can_only_be_claimed_once_across_sessions(self) -> None:
@@ -766,7 +766,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
-    async def test_search_llm_complete_without_text_forces_answer_round(
+    async def test_search_tool_round_always_gets_answer_round(
         self,
         _extract_mock,
         memory_mock,
@@ -777,8 +777,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         tools_mock,
         _write_memory_mock,
     ) -> None:
-        """搜索成功后 reflect 判定“信息已充分”但没有回答文本：
-        必须强制再跑一轮 act 生成回答，避免“工具成功但空气泡”收尾。"""
+        """搜索工具轮后 reflect 确定性续跑回答轮（不再依赖 LLM 评估判定）：
+        工具结果必须转化为最终回答文本，避免“工具成功但空气泡”收尾。"""
         memory_mock.return_value = SimpleNamespace(summary="", items=[])
         captured: dict = {}
         tools_mock.return_value = [_FakeWebSearchTool(captured)]
@@ -817,7 +817,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         steps = step_snapshots[0]["structured_payload"]["steps"]
         self.assertEqual([s["step_type"] for s in steps].count("act"), 2)
         self.assertTrue(
-            any("尚未生成回答文本" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
+            any("需基于工具结果生成最终回答" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
         )
 
     @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
