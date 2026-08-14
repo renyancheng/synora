@@ -45,6 +45,10 @@ class AgentState(TypedDict, total=False):
     observation: str
     tool_failed: bool
     tool_failed_all: bool  # 本轮所有工具调用均失败（全部失败才收口，部分失败仍需回答轮）
+    # 强制联网搜索护栏：run 级累计是否已调用过 web_search；search_forced 标记
+    # “时效性/知识盲区问题未搜索直接作答”已强制过一轮（单次，防死循环）。
+    searched_in_run: bool
+    search_forced: bool
     reflection: str
     current_aimessage: dict[str, Any] | None
     # 推理轨迹步骤（[{seq, step_type, label, content, status, iteration}]），add reducer 追加

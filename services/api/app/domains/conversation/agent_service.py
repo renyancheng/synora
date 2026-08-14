@@ -15,7 +15,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -51,6 +51,17 @@ GENERAL_CHAT_EXCLUDED_TOOLS = {
 # 观察阶段同样白名单匹配，模型只能调用这两个真实存在的原生工具，
 # 不会产生“未知工具”空转；intake 写工具依旧完全排除。
 GENERAL_CHAT_ACTIVE_TOOLS = {"get_current_time", "web_search"}
+
+# general_chat 循环的系统提示词：训练知识盲区与时效性信息必须先联网搜索再回答。
+GENERAL_CHAT_SYSTEM_PROMPT = (
+    "你是 Synora 的私人智能助理，负责问答与信息查询。回答要自然、准确、简洁，"
+    "不要伪造工具执行结果。对于训练知识无法确认的内容，或涉及时效性信息的问题"
+    "（新闻、价格、行情、汇率、天气、赛事、最新进展、政策变动等），必须先调用 "
+    "web_search 工具获取最新资料，再基于搜索结果回答，并在回答中注明信息来源；"
+    "禁止仅凭训练知识臆测时效信息。常识性、稳定的知识问题可以直接回答，无需搜索。"
+    "需要实时时间时调用 get_current_time 工具。始终只回答「当前输入」中的最新问题，"
+    "历史对话仅作为背景参考，禁止重复或延续上一轮的回答。"
+)
 
 RECENT_MESSAGE_DB_WINDOW = 12
 RECENT_MESSAGE_LLM_WINDOW = 8
@@ -301,6 +312,8 @@ def build_general_chat_messages(
         user_message="\n\n".join(prompt_parts).strip(),
         attachment_parts=attachment_parts,
     )
+    # 系统提示词置于最前：知识盲区/时效性信息必须先联网搜索再回答。
+    messages.insert(0, SystemMessage(content=GENERAL_CHAT_SYSTEM_PROMPT))
     for item in agent_messages or []:
         messages.append(deserialize_message(item))
     if follow_up_prompt:
@@ -605,7 +618,7 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
     if not tool_calls:
         completed_step = {**running_step, "content": "本轮无工具调用", "status": "completed"}
         emit(build_reasoning_step_event(assistant_message.id, completed_step))
-        return {"tool_messages": [], "observation": "本轮无工具调用", "tool_failed": False, "tool_failed_all": False, "pending_tool_calls": [], "steps": [completed_step]}
+        return {"tool_messages": [], "observation": "本轮无工具调用", "tool_failed": False, "tool_failed_all": False, "web_search_called": False, "pending_tool_calls": [], "steps": [completed_step]}
     raise_if_stream_cancelled(db, state.get("stream_id"), force_database_check=True)
     tool_map = {tool.name: tool for tool in await build_agent_tools(include_names=GENERAL_CHAT_ACTIVE_TOOLS)}
     # 用 index 槽位回填结果，保证 tool_messages/summaries 与原始 tool_calls 顺序一致
@@ -614,6 +627,7 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
     summaries: list[str] = ["" for _ in tool_calls]
     tool_failed = False
     failures = 0
+    web_search_called = False  # 本轮是否尝试调用 web_search（供 run 级 searched_in_run 累计）
     real_jobs: list[dict[str, Any]] = []
 
     # 第一遍：空名 / 未知工具等廉价失败路径保持同步处理；真实工具收集起来并发执行。
@@ -629,11 +643,13 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
             tool_messages[idx] = {"role": "tool", "content": content_text, "name": "", "tool_call_id": call_id}
             summaries[idx] = content_text[:80]
             continue
-        if name == "web_search" and not str(args.get("query") or "").strip():
-            # 部分模型会以空参数调用联网搜索：回退用本轮用户消息作为搜索词。
-            user_query = str(state.get("user_message") or "").strip()
-            if user_query:
-                args = {"query": user_query}
+        if name == "web_search":
+            web_search_called = True
+            if not str(args.get("query") or "").strip():
+                # 部分模型会以空参数调用联网搜索：回退用本轮用户消息作为搜索词。
+                user_query = str(state.get("user_message") or "").strip()
+                if user_query:
+                    args = {"query": user_query}
         tool = tool_map.get(name)
         emit({"event": "tool_call_started", "data": {"tool_name": name, "call_id": call_id}})
         audit = start_tool_audit(db, agent_run_id=agent_run.id, tool_name=name, request_json={"arguments": args})
@@ -685,7 +701,7 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
     observation = "；".join(summaries)[:120] or "本轮无工具调用"
     completed_step = {**running_step, "content": observation, "status": "completed"}
     emit(build_reasoning_step_event(assistant_message.id, completed_step))
-    return {"tool_messages": tool_messages, "observation": observation, "tool_failed": tool_failed, "tool_failed_all": failures > 0 and failures >= len(tool_calls), "pending_tool_calls": [], "steps": [completed_step]}
+    return {"tool_messages": tool_messages, "observation": observation, "tool_failed": tool_failed, "tool_failed_all": failures > 0 and failures >= len(tool_calls), "web_search_called": web_search_called, "pending_tool_calls": [], "steps": [completed_step]}
 
 
 async def reflect_step(db: Session, thread: ConversationThread, assistant_message: ConversationMessage, agent_run: AgentRun, *, state: dict[str, Any], emit: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
@@ -705,6 +721,7 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
     degraded = False
     anti_repeat_triggered = False
     anti_commitment_triggered = False
+    search_forced_triggered = False
     empty_retries = int(state.get("anti_empty_retries") or 0)
     if not assistant_output and not had_tool_calls:
         if empty_retries < 2 and iteration < max_iter:
@@ -742,6 +759,21 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
         rationale = "仅给出承诺性答复未执行搜索，要求调用工具"
         follow_up_prompt = "你刚才只给出了承诺性的答复，没有实际调用任何工具。请立即调用 web_search 工具执行搜索，再基于搜索结果给出最终回答。"
         anti_commitment_triggered = True
+    elif (
+        not state.get("search_forced")
+        and not had_tool_calls
+        and assistant_output
+        and not state.get("searched_in_run")
+        and _requires_fresh_information(str(state.get("user_message") or ""))
+        and iteration < max_iter
+    ):
+        # 知识盲区强制搜索护栏：问题涉及时效性/无法确认的信息（新闻、价格、
+        # 行情、最新进展等），但本轮直接凭训练知识作答、且整个 run 从未调用过
+        # web_search —— 强制再跑一轮要求先搜索（单次，防死循环）。
+        decision = "continue"
+        rationale = "问题需要联网获取最新信息，强制要求调用搜索"
+        follow_up_prompt = "该问题涉及时效性或你的训练知识无法确认的信息。请立即调用 web_search 工具搜索后再回答，禁止仅凭训练知识作答。"
+        search_forced_triggered = True
     elif iteration >= max_iter:
         rationale = f"已达最大迭代次数（{max_iter}）"
     elif tool_failed_all:
@@ -797,6 +829,7 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
         "anti_repeat_used": bool(state.get("anti_repeat_used")) or anti_repeat_triggered,
         "anti_empty_retries": empty_retries,
         "anti_commitment_used": bool(state.get("anti_commitment_used")) or anti_commitment_triggered,
+        "search_forced": bool(state.get("search_forced")) or search_forced_triggered,
     }
 
 
@@ -828,6 +861,34 @@ _COMMITMENT_HINTS = (
     "请稍",
     "先帮",
 )
+# 时效性/无法确认信息提示词（命中即要求联网搜索，配合知识盲区强制搜索护栏）。
+# 刻意排除“现在/今天/多少”等易误伤日常表达的宽泛词。
+_FRESHNESS_HINTS = (
+    "最新",
+    "新闻",
+    "价格",
+    "行情",
+    "汇率",
+    "天气",
+    "目前",
+    "进展",
+    "更新",
+    "排名",
+    "榜单",
+    "比分",
+    "政策",
+    "现状",
+    "动态",
+    "多少钱",
+)
+_YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")
+
+
+def _requires_fresh_information(user_message: str) -> bool:
+    """判断问题是否依赖时效性/无法确认的信息（命中时效提示词或年份数字）。"""
+    if not user_message:
+        return False
+    return any(hint in user_message for hint in _FRESHNESS_HINTS) or bool(_YEAR_PATTERN.search(user_message))
 
 
 def _is_promise_only_answer(user_message: str, assistant_output: str) -> bool:

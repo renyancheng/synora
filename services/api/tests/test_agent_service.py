@@ -489,7 +489,9 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["anti_commitment_used"])
         self.assertIn("web_search", result["follow_up_prompt"] or "")
 
-    async def test_reflect_promise_guard_triggered_once(self) -> None:
+    async def test_freshness_guard_forces_search_after_second_promise(self) -> None:
+        """承诺话术护栏只触发一次；时效性问题第二次仍只承诺未执行时，由
+        知识盲区强制搜索护栏再拉一轮（search_forced 单次，之后收口防死循环）。"""
         result = await reflect_step(
             self.db,
             self.thread,
@@ -506,8 +508,10 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             emit=self.events.append,
         )
 
-        self.assertEqual(result["loop_decision"], "done")
-        self.assertEqual(result["reflection"], "本轮无工具调用，回答完整")
+        self.assertEqual(result["loop_decision"], "continue")
+        self.assertEqual(result["reflection"], "问题需要联网获取最新信息，强制要求调用搜索")
+        self.assertTrue(result["search_forced"])
+        self.assertIn("web_search", result["follow_up_prompt"] or "")
 
     async def test_reflect_normal_answer_not_marked_as_promise(self) -> None:
         result = await reflect_step(
@@ -577,6 +581,122 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["tool_failed"])
         self.assertIn("未给出工具名", result["observation"])
         self.assertIn("未给出工具名", str(self.events))
+
+    async def test_reflect_forces_search_when_freshness_query_answered_without_search(self) -> None:
+        """知识盲区强制搜索护栏：时效性问题直接凭训练知识作答、全程未搜索 →
+        强制再跑一轮要求调用 web_search（不调用 LLM 评估）。"""
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as llm_mock:
+            result = await reflect_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(),
+                state=self._state(
+                    user_message="今天有什么热点新闻",
+                    iteration_count=1,
+                    max_iterations=3,
+                    current_aimessage={"content": "据我所知，今天的新闻包括……（一段较长的知识性回答）", "tool_calls": []},
+                    observation="本轮无工具调用",
+                ),
+                emit=self.events.append,
+            )
+
+        llm_mock.assert_not_awaited()
+        self.assertEqual(result["loop_decision"], "continue")
+        self.assertEqual(result["reflection"], "问题需要联网获取最新信息，强制要求调用搜索")
+        self.assertIn("web_search", result["follow_up_prompt"])
+        self.assertTrue(result["search_forced"])
+
+    async def test_reflect_does_not_force_search_after_web_search_used(self) -> None:
+        """run 内已调用过 web_search：不再强制（避免死循环）。"""
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as llm_mock:
+            result = await reflect_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(),
+                state=self._state(
+                    user_message="今天有什么热点新闻",
+                    iteration_count=2,
+                    max_iterations=3,
+                    current_aimessage={"content": "根据搜索结果，今天的新闻……", "tool_calls": []},
+                    observation="web_search: ……",
+                    searched_in_run=True,
+                ),
+                emit=self.events.append,
+            )
+
+        llm_mock.assert_not_awaited()
+        self.assertEqual(result["loop_decision"], "done")
+        self.assertFalse(result["search_forced"])
+
+    async def test_reflect_force_search_only_once(self) -> None:
+        """强制搜索护栏单次触发：已强制过（search_forced）后直接收口。"""
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as llm_mock:
+            result = await reflect_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(),
+                state=self._state(
+                    user_message="今天有什么热点新闻",
+                    iteration_count=1,
+                    max_iterations=3,
+                    current_aimessage={"content": "据我所知……", "tool_calls": []},
+                    search_forced=True,
+                ),
+                emit=self.events.append,
+            )
+
+        llm_mock.assert_not_awaited()
+        self.assertEqual(result["loop_decision"], "done")
+
+    async def test_reflect_not_forced_for_stable_knowledge_query(self) -> None:
+        """稳定的常识性问题不触发强制搜索。"""
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as llm_mock:
+            result = await reflect_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(),
+                state=self._state(
+                    user_message="什么是大语言模型",
+                    iteration_count=1,
+                    max_iterations=3,
+                    current_aimessage={"content": "大语言模型是一种基于海量文本训练的……", "tool_calls": []},
+                ),
+                emit=self.events.append,
+            )
+
+        llm_mock.assert_not_awaited()
+        self.assertEqual(result["loop_decision"], "done")
+        self.assertFalse(result["search_forced"])
+
+    async def test_observe_marks_web_search_called(self) -> None:
+        """observe 对 web_search 调用打标记（供 run 级 searched_in_run 累计）。"""
+
+        class _FakeSearchTool:
+            name = "web_search"
+
+            async def ainvoke(self, args):
+                return {"status": "ok", "content": "搜索结果内容", "references": []}
+
+        with patch(
+            "app.domains.conversation.agent_service.build_agent_tools",
+            new_callable=AsyncMock,
+            return_value=[_FakeSearchTool()],
+        ):
+            result = await observe_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(id=1),
+                state=self._state(pending_tool_calls=[{"name": "web_search", "args": {"query": "热点新闻"}, "id": "c1"}]),
+                emit=self.events.append,
+            )
+
+        self.assertTrue(result["web_search_called"])
+        self.assertFalse(result["tool_failed"])
 
     async def test_build_recent_history_lines_returns_recent_window(self) -> None:
         """intake 近期历史窗口：返回当前消息之前的最近文本消息（时间正序、排除自身、

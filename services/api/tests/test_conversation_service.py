@@ -251,6 +251,32 @@ class _PromiseThenToolThenTextModel:
             yield AIMessageChunk(content=self._final_text)
 
 
+class _AnswerThenSearchThenAnswerModel:
+    """三轮模型：第一轮凭训练知识直接作答（未调用工具），第二轮调用 web_search，
+    第三轮基于结果输出最终文本（验证知识盲区强制搜索护栏的完整链路）。"""
+
+    def __init__(self, final_text: str) -> None:
+        self._final_text = final_text
+        self._rounds = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        self._rounds += 1
+        if self._rounds == 1:
+            yield AIMessageChunk(content="据我了解，今天的热点新闻主要包括……（这是一段凭训练知识给出的较长回答）")
+        elif self._rounds == 2:
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"query": "今天的热点新闻"}, "id": "call-1", "type": "tool_call"}],
+            )
+        else:
+            yield AIMessageChunk(content=self._final_text)
+
+
 class _FakeTimeTool:
     """模拟 MCP 返回的 get_current_time langchain 工具。"""
 
@@ -893,6 +919,64 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s["step_type"] for s in steps].count("act"), 3)
         self.assertTrue(
             any("承诺性答复" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
+        )
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock)
+    @patch(
+        "app.agent.llm.create_chat_model",
+        return_value=_AnswerThenSearchThenAnswerModel(final_text="根据搜索结果，今天的热点新闻主要包括……"),
+    )
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock)
+    @patch("app.agent.llm.generate_conversation_title", return_value="新闻问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_freshness_query_without_search_forces_search_round(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        """知识盲区强制搜索护栏（图级链路）：时效性问题直接凭训练知识作答且全程
+        未搜索 → reflect 强制一轮 web_search → 基于搜索结果给出最终回答。"""
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        captured: dict = {}
+        tools_mock.return_value = [_FakeWebSearchTool(captured)]
+
+        async def _reflect_side_effect(settings, **kwargs):
+            if kwargs.get("operation") == "agent_plan":
+                return llm.PlanResult(plan="回答用户")
+            raise AssertionError(f"unexpected operation: {kwargs.get('operation')}")
+
+        _ainvoke_mock.side_effect = _reflect_side_effect
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="今天有什么热点新闻"),
+        )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertTrue(captured)  # web_search 确实被执行
+        self.assertEqual(events[-1]["event"], "run_completed")
+        final_text = self.db.get(type(assistant_message), assistant_message.id).text_content or ""
+        self.assertIn("根据搜索结果", final_text)
+        step_snapshots = [
+            item["data"]["message"]
+            for item in events
+            if item["event"] == "card_snapshot" and item["data"]["message"]["message_type"] == "reasoning_step"
+        ]
+        steps = step_snapshots[0]["structured_payload"]["steps"]
+        self.assertTrue(
+            any("强制要求调用搜索" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
         )
 
     @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
