@@ -28,36 +28,27 @@ class WebSearchResult(BaseModel):
 
 
 def _extract_search_content(payload: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
-    """宽容解析官方响应：content 为文本列表/字符串，references 为引用列表。"""
+    """解析 v4/web_search 响应：正文来自 search_result 列表，引用提取标题与链接。"""
     text_parts: list[str] = []
-    raw_content = payload.get("content")
-    if isinstance(raw_content, str):
-        text_parts.append(raw_content)
-    elif isinstance(raw_content, list):
-        for item in raw_content:
-            if isinstance(item, str):
-                text_parts.append(item)
-            elif isinstance(item, dict):
-                if str(item.get("type") or "").strip() in {"", "text"}:
-                    text = item.get("text")
-                    if isinstance(text, str) and text.strip():
-                        text_parts.append(text)
-
     references: list[dict[str, str]] = []
-    for item in payload.get("references") or []:
-        if not isinstance(item, dict):
-            continue
-        reference: dict[str, str] = {}
-        title = item.get("title")
-        link = item.get("link") or item.get("url")
-        if title is not None:
-            reference["title"] = str(title)
-        if link is not None:
-            reference["link"] = str(link)
-        if reference:
-            references.append(reference)
-
-    return "\n\n".join(part.strip() for part in text_parts if part.strip()), references
+    raw_results = payload.get("search_result")
+    if isinstance(raw_results, list):
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                text_parts.append(content.strip())
+            reference: dict[str, str] = {}
+            title = item.get("title")
+            link = item.get("link") or item.get("url")
+            if title:
+                reference["title"] = str(title)
+            if link:
+                reference["link"] = str(link)
+            if reference:
+                references.append(reference)
+    return "\n\n".join(text_parts), references
 
 
 def _run_search(query: str) -> WebSearchResult:
@@ -75,11 +66,13 @@ def _run_search(query: str) -> WebSearchResult:
             content="联网搜索未配置（缺少 SYNORA_ZHIPU_WEB_SEARCH_API_KEY），请直接基于已有知识回答或告知用户搜索不可用。",
             references=[],
         )
-    url = f"{settings.zhipu_web_search_base_url.rstrip('/')}/tools"
+    url = f"{settings.zhipu_web_search_base_url.rstrip('/')}/web_search"
     payload = {
-        "tool": "web-search",
-        "messages": [{"role": "user", "content": query.strip()}],
-        "model": settings.zhipu_web_search_model,
+        "search_query": query.strip(),
+        "search_engine": settings.zhipu_web_search_model,
+        "search_intent": False,
+        "count": 10,
+        "search_recency_filter": "noLimit",
     }
     try:
         with httpx.Client(timeout=30.0) as client:

@@ -61,8 +61,18 @@ class WebSearchToolTests(unittest.IsolatedAsyncioTestCase):
         _FakeHttpClient.last_response = _FakeResponse(
             200,
             {
-                "content": [{"type": "text", "text": "今天北京晴，最高 25℃。"}],
-                "references": [{"title": "天气预报", "link": "https://example.com/weather"}],
+                "created": 1786691538,
+                "id": "req-1",
+                "search_intent": [],
+                "search_result": [
+                    {
+                        "content": "DeepSeek API 输入 1 元/百万 tokens。",
+                        "title": "DeepSeek 定价",
+                        "link": "https://example.com/pricing",
+                        "refer": "ref_1",
+                        "publish_date": "2026-08-06",
+                    }
+                ],
             },
         )
         with (
@@ -72,14 +82,15 @@ class WebSearchToolTests(unittest.IsolatedAsyncioTestCase):
             result = _run_search("今天天气")
 
         self.assertEqual(result.status, "ok")
-        self.assertIn("北京晴", result.content)
-        self.assertEqual(result.references[0]["title"], "天气预报")
+        self.assertIn("DeepSeek API 输入 1 元", result.content)
+        self.assertEqual(result.references[0]["title"], "DeepSeek 定价")
         url, headers, body = _FakeHttpClient.last_call
-        self.assertEqual(url, "https://open.bigmodel.cn/api/paas/v4/tools")
+        self.assertEqual(url, "https://open.bigmodel.cn/api/paas/v4/web_search")
         self.assertEqual(headers["Authorization"], "Bearer test-key")
-        self.assertEqual(body["tool"], "web-search")
-        self.assertEqual(body["model"], "search_std")
-        self.assertEqual(body["messages"][0]["content"], "今天天气")
+        self.assertEqual(body["search_query"], "今天天气")
+        self.assertEqual(body["search_engine"], "search_std")
+        self.assertEqual(body["search_recency_filter"], "noLimit")
+        self.assertFalse(body["search_intent"])
 
     def test_search_http_error_returns_structured_hint(self) -> None:
         _FakeHttpClient.last_response = _FakeResponse(401, {})
