@@ -546,11 +546,14 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
     aimessage = state.get("current_aimessage") or {}
     had_tool_calls = bool(aimessage.get("tool_calls"))
     observation = str(state.get("observation") or "")
-    assistant_output = str(aimessage.get("content") or assistant_message.text_content or "").strip()
+    # 本轮回答文本只取本轮 act 的输出；不要用历史累积的 text_content 兜底，
+    # 否则上一轮承诺话术会让 reflect 误判“已有回答”而跳过工具轮。
+    assistant_output = str(aimessage.get("content") or "").strip()
     tool_failed = bool(state.get("tool_failed"))
     decision, rationale, follow_up_prompt = "done", "", None
     degraded = False
     anti_repeat_triggered = False
+    anti_commitment_triggered = False
     empty_retries = int(state.get("anti_empty_retries") or 0)
     if not assistant_output and not had_tool_calls:
         if empty_retries < 2 and iteration < max_iter:
@@ -573,6 +576,21 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
         rationale = "检测到与上一轮完全重复的回答，要求重新作答"
         follow_up_prompt = "你刚才的回答与上一轮完全重复。请忽略历史回答，只针对当前输入重新作答，不要复述任何固定话术。"
         anti_repeat_triggered = True
+    elif (
+        not state.get("anti_commitment_used")
+        and not had_tool_calls
+        and assistant_output
+        and _is_promise_only_answer(
+            str(state.get("user_message") or ""),
+            assistant_output,
+        )
+    ):
+        # 承诺话术防呆：搜索/实时信息类请求，模型只给出“我来帮你搜索”等承诺
+        # 而没有实际调用工具时，强制再跑一轮并明确要求调用 web_search。
+        decision = "continue"
+        rationale = "仅给出承诺性答复未执行搜索，要求调用工具"
+        follow_up_prompt = "你刚才只给出了承诺性的答复，没有实际调用任何工具。请立即调用 web_search 工具执行搜索，再基于搜索结果给出最终回答。"
+        anti_commitment_triggered = True
     elif not had_tool_calls:
         rationale = "本轮无工具调用，回答完整"
     elif iteration >= max_iter:
@@ -618,7 +636,54 @@ async def reflect_step(db: Session, thread: ConversationThread, assistant_messag
         "steps": [step],
         "anti_repeat_used": bool(state.get("anti_repeat_used")) or anti_repeat_triggered,
         "anti_empty_retries": empty_retries,
+        "anti_commitment_used": bool(state.get("anti_commitment_used")) or anti_commitment_triggered,
     }
+
+
+# 搜索/实时信息类意图提示词（用户输入中命中任一即认为“需要工具”）
+_SEARCH_INTENT_HINTS = (
+    "搜",
+    "查",
+    "价格",
+    "最新",
+    "新闻",
+    "多少",
+    "情况",
+    "行情",
+    "天气",
+    "汇率",
+    "信息",
+    "动态",
+)
+# 承诺性话术提示词（assistant 输出短文本且含这些词，视为“只承诺未执行”）
+_COMMITMENT_HINTS = (
+    "帮你",
+    "我来",
+    "好的",
+    "让我",
+    "稍等",
+    "马上",
+    "正在",
+    "这就",
+    "请稍",
+    "先帮",
+)
+
+
+def _is_promise_only_answer(user_message: str, assistant_output: str) -> bool:
+    """检测“承诺性话术”：搜索/实时信息类请求只得到一句短承诺而没有实际动作。
+
+    同时满足：用户输入含搜索意图词、assistant 输出为短文本（<=60 字）、
+    文本含承诺话术词。正常的知识性回答（如“LLM 是大语言模型……”）不含
+    承诺词，不会被误判。
+    """
+    if not (user_message and assistant_output):
+        return False
+    if len(assistant_output) > 60:
+        return False
+    return any(hint in user_message for hint in _SEARCH_INTENT_HINTS) and any(
+        hint in assistant_output for hint in _COMMITMENT_HINTS
+    )
 
 
 def _normalize_answer_text(text: str) -> str:

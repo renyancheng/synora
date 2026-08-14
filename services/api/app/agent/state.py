@@ -36,6 +36,7 @@ class AgentState(TypedDict, total=False):
     follow_up_prompt: str | None
     anti_repeat_used: bool  # 防粘滞护栏：重复回答已触发过一次重跑
     anti_empty_retries: int  # 空回答护栏：已重跑次数（最多 2 次，随后兜底收口）
+    anti_commitment_used: bool  # 承诺话术护栏：只承诺未执行工具已触发过一次
     # 跨迭代累积的消息（AIMessage / ToolMessage 序列化 dict），用 add reducer 追加
     agent_messages: Annotated[list[dict[str, Any]], add]
     pending_tool_calls: list[dict[str, Any]]

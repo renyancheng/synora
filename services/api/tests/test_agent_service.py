@@ -465,6 +465,70 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["loop_decision"], "continue")
         self.assertIn("最终回答文本", result["follow_up_prompt"] or "")
 
+    async def test_reflect_promise_only_answer_forces_tool_round(self) -> None:
+        """搜索类请求只得到承诺话术而未调用工具时，强制再跑一轮并指向 web_search。"""
+        result = await reflect_step(
+            self.db,
+            self.thread,
+            self.message,
+            SimpleNamespace(),
+            state=self._state(
+                user_message="帮我搜一下 deepseek 现在的 api 价格",
+                iteration_count=1,
+                max_iterations=4,
+                current_aimessage={"content": "我来帮你搜索 DeepSeek API 的最新价格信息。", "tool_calls": []},
+                observation="本轮无工具调用",
+            ),
+            emit=self.events.append,
+        )
+
+        self.assertEqual(result["loop_decision"], "continue")
+        self.assertTrue(result["anti_commitment_used"])
+        self.assertIn("web_search", result["follow_up_prompt"] or "")
+
+    async def test_reflect_promise_guard_triggered_once(self) -> None:
+        result = await reflect_step(
+            self.db,
+            self.thread,
+            self.message,
+            SimpleNamespace(),
+            state=self._state(
+                user_message="帮我搜一下 deepseek 现在的 api 价格",
+                iteration_count=2,
+                max_iterations=4,
+                anti_commitment_used=True,
+                current_aimessage={"content": "好的，我马上帮你搜索。", "tool_calls": []},
+                observation="本轮无工具调用",
+            ),
+            emit=self.events.append,
+        )
+
+        self.assertEqual(result["loop_decision"], "done")
+        self.assertEqual(result["reflection"], "本轮无工具调用，回答完整")
+
+    async def test_reflect_normal_answer_not_marked_as_promise(self) -> None:
+        result = await reflect_step(
+            self.db,
+            self.thread,
+            self.message,
+            SimpleNamespace(),
+            state=self._state(
+                user_message="什么是大语言模型",
+                iteration_count=1,
+                max_iterations=4,
+                current_aimessage={
+                    "content": "大语言模型（LLM）是基于海量文本训练、能理解和生成自然语言的深度学习模型。",
+                    "tool_calls": [],
+                },
+                observation="本轮无工具调用",
+            ),
+            emit=self.events.append,
+        )
+
+        self.assertEqual(result["loop_decision"], "done")
+        self.assertEqual(result["reflection"], "本轮无工具调用，回答完整")
+        self.assertFalse(result.get("anti_commitment_used"))
+
     async def test_observe_web_search_falls_back_to_user_message_query(self) -> None:
         captured: dict = {}
 

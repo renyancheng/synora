@@ -225,6 +225,32 @@ class _FakeWebSearchTool:
         }
 
 
+class _PromiseThenToolThenTextModel:
+    """三轮模型：第一轮输出承诺话术（未调工具），第二轮调用 web_search，
+    第三轮基于结果输出最终文本。"""
+
+    def __init__(self, final_text: str) -> None:
+        self._final_text = final_text
+        self._rounds = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        self._rounds += 1
+        if self._rounds == 1:
+            yield AIMessageChunk(content="我来帮你搜索 DeepSeek API 的最新价格信息。")
+        elif self._rounds == 2:
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"query": "deepseek api 价格"}, "id": "call-1", "type": "tool_call"}],
+            )
+        else:
+            yield AIMessageChunk(content=self._final_text)
+
+
 class _FakeTimeTool:
     """模拟 MCP 返回的 get_current_time langchain 工具。"""
 
@@ -792,6 +818,81 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s["step_type"] for s in steps].count("act"), 2)
         self.assertTrue(
             any("尚未生成回答文本" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
+        )
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock)
+    @patch(
+        "app.agent.llm.create_chat_model",
+        return_value=_PromiseThenToolThenTextModel(
+            final_text="根据搜索结果，DeepSeek API 输入价格 2 元/百万 tokens。",
+        ),
+    )
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock)
+    @patch("app.agent.llm.generate_conversation_title", return_value="搜索问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_promise_only_answer_forces_search_then_final_answer(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        """模型第一轮只给承诺话术未调工具：承诺护栏强制第二轮调用 web_search，
+        第三轮基于结果输出最终文本，避免一轮空转。"""
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        captured: dict = {}
+        tools_mock.return_value = [_FakeWebSearchTool(captured)]
+
+        async def _reflect_side_effect(settings, **kwargs):
+            if kwargs.get("operation") == "agent_plan":
+                return llm.PlanResult(plan="联网搜索 DeepSeek API 价格")
+            if kwargs.get("operation") == "agent_reflect":
+                return llm.ReflectDecision(
+                    is_complete=False,
+                    rationale="需要基于搜索结果作答",
+                    follow_up_prompt="结合搜索结果给出最终回答",
+                )
+            raise AssertionError(f"unexpected operation: {kwargs.get('operation')}")
+
+        _ainvoke_mock.side_effect = _reflect_side_effect
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="帮我搜一下 deepseek 现在的 api 价格"),
+        )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(captured["query"], "deepseek api 价格")
+        self.assertTrue(
+            any(
+                item["event"] == "tool_call_completed" and item["data"]["tool_name"] == "web_search"
+                for item in events
+            )
+        )
+        self.assertEqual(events[-1]["event"], "run_completed")
+        # 最终文本包含基于搜索结果的回答（多轮追加：承诺话术 + 搜索结果回答）。
+        final_text = self.db.get(type(assistant_message), assistant_message.id).text_content or ""
+        self.assertIn("根据搜索结果", final_text)
+        self.assertIn("2 元/百万", final_text)
+        step_snapshots = [
+            item["data"]["message"]
+            for item in events
+            if item["event"] == "card_snapshot" and item["data"]["message"]["message_type"] == "reasoning_step"
+        ]
+        steps = step_snapshots[0]["structured_payload"]["steps"]
+        self.assertEqual([s["step_type"] for s in steps].count("act"), 3)
+        self.assertTrue(
+            any("承诺性答复" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
         )
 
     @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")

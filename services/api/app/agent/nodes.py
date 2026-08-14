@@ -185,6 +185,7 @@ async def reflect_node(state: AgentState) -> dict[str, Any]:
         "follow_up_prompt": result.get("follow_up_prompt"),
         "anti_repeat_used": bool(result.get("anti_repeat_used")),
         "anti_empty_retries": int(result.get("anti_empty_retries") or 0),
+        "anti_commitment_used": bool(result.get("anti_commitment_used")),
         "reasoning_steps": list(result.get("steps") or []),
     }
 
