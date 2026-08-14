@@ -18,7 +18,7 @@ from app.config import get_settings
 
 
 class WebSearchQuery(BaseModel):
-    query: str = Field(description="搜索关键词或需要核查的问题")
+    query: str = Field(default="", description="搜索关键词或需要核查的问题")
 
 
 class WebSearchResult(BaseModel):
@@ -62,6 +62,12 @@ def _extract_search_content(payload: dict[str, Any]) -> tuple[str, list[dict[str
 
 def _run_search(query: str) -> WebSearchResult:
     settings = get_settings()
+    if not str(query or "").strip():
+        return WebSearchResult(
+            status="error",
+            content="联网搜索未收到搜索关键词，请基于已有知识回答或让用户补充具体问题。",
+            references=[],
+        )
     api_key = settings.zhipu_web_search_api_key.strip()
     if not api_key:
         return WebSearchResult(

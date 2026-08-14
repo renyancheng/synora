@@ -164,6 +164,67 @@ class _ToolCallWithEmptyPlaceholdersModel:
             yield AIMessageChunk(content=self._final_text)
 
 
+class _WebSearchFragmentedModel:
+    """复刻 dashscope 真实流：web_search 调用 name 先到，args 以分片随后下发。"""
+
+    def __init__(self, final_text: str) -> None:
+        self._final_text = final_text
+        self._rounds = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        self._rounds += 1
+        if self._rounds == 1:
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {}, "id": "call-1", "type": "tool_call"}],
+                tool_call_chunks=[{"name": "web_search", "args": "", "index": 0, "id": "call-1"}],
+            )
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[{"name": "", "args": {}, "id": "", "type": "tool_call"}],
+                tool_call_chunks=[{"name": None, "args": '{"query": ', "index": 0, "id": ""}],
+            )
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[],
+                tool_call_chunks=[{"name": None, "args": '"DeepSeek API', "index": 0, "id": ""}],
+            )
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[],
+                tool_call_chunks=[{"name": None, "args": ' 价格 2026"}', "index": 0, "id": ""}],
+            )
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[{"name": "", "args": {}, "id": "", "type": "tool_call"}],
+                tool_call_chunks=[{"name": None, "args": "", "index": 0, "id": ""}],
+            )
+        else:
+            yield AIMessageChunk(content=self._final_text)
+
+
+class _FakeWebSearchTool:
+    """捕获调用参数的联网搜索假工具。"""
+
+    name = "web_search"
+
+    def __init__(self, capture: dict) -> None:
+        self._capture = capture
+
+    async def ainvoke(self, args):
+        self._capture.update(args)
+        return {
+            "status": "ok",
+            "content": "DeepSeek API 价格：输入 2 元/百万 tokens，输出 8 元/百万 tokens。",
+            "references": [{"title": "DeepSeek 定价", "link": "https://api-docs.deepseek.com/pricing"}],
+        }
+
+
 class _FakeTimeTool:
     """模拟 MCP 返回的 get_current_time langchain 工具。"""
 
@@ -604,6 +665,69 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             "现在是周四 15:30。",
         )
         self.assertEqual(events[-1]["event"], "run_completed")
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock)
+    @patch(
+        "app.agent.llm.create_chat_model",
+        return_value=_WebSearchFragmentedModel(final_text="根据搜索结果，DeepSeek API 输入价格 2 元/百万 tokens。"),
+    )
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock)
+    @patch("app.agent.llm.generate_conversation_title", return_value="搜索问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_web_search_args_fragments_are_reassembled_and_invoked(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        """dashscope 把 web_search 的 args 以 JSON 分片下发：分片必须拼回完整
+        query 后调用工具，否则参数校验失败并退化到空回答兜底。"""
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        captured: dict = {}
+        tools_mock.return_value = [_FakeWebSearchTool(captured)]
+
+        async def _reflect_side_effect(settings, **kwargs):
+            if kwargs.get("operation") == "agent_plan":
+                return llm.PlanResult(plan="联网搜索 DeepSeek API 价格")
+            if kwargs.get("operation") == "agent_reflect":
+                return llm.ReflectDecision(
+                    is_complete=False,
+                    rationale="需要搜索结果",
+                    follow_up_prompt="结合搜索结果给出回答",
+                )
+            raise AssertionError(f"unexpected operation: {kwargs.get('operation')}")
+
+        _ainvoke_mock.side_effect = _reflect_side_effect
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="帮我搜一下 deepseek 现在的 api 价格"),
+        )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(captured["query"], "DeepSeek API 价格 2026")
+        self.assertTrue(
+            any(
+                item["event"] == "tool_call_completed" and item["data"]["tool_name"] == "web_search"
+                for item in events
+            )
+        )
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertIn(
+            "2 元/百万",
+            self.db.get(type(assistant_message), assistant_message.id).text_content or "",
+        )
 
     @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
     @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])

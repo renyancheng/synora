@@ -105,13 +105,39 @@ def serialize_tool_calls(tool_calls: list[dict] | None) -> list[dict[str, Any]]:
     return result
 
 
-def _merge_streamed_tool_calls(chunk: Any, accumulated: list[dict]) -> list[dict]:
-    """合并流式工具调用：完整列表按位置合并，部分增量按 index 累积。
+def _part_field(part: Any, key: str, default: Any = "") -> Any:
+    """读取工具调用分片字段：兼容 dict（langchain 实际形态）与对象两种形态。"""
+    if isinstance(part, dict):
+        return part.get(key, default)
+    return getattr(part, key, default)
 
-    部分提供方（如 dashscope 兼容模式）在真实调用之后会追加若干
-    ``name=''`` 的空名占位条目：这些条目必须忽略而不是覆盖已捕获的调用，
-    否则 observe 阶段会误判为“未知工具”空转或丢失工具调用。
+
+def _merge_streamed_tool_calls(chunk: Any, accumulated: list[dict]) -> list[dict]:
+    """合并流式工具调用：分片增量始终累积，完整条目只补充不覆盖。
+
+    dashscope 兼容模式的真实流：首个 chunk 带完整 name（args 为空占位），
+    随后 args 以 ``tool_call_chunks`` 的 JSON 分片陆续下发，最后再追加
+    ``name=''`` 的空名占位条目。因此：
+    - ``tool_call_chunks`` 分片始终按 index 累积（args 拼接）；
+    - ``tool_calls`` 中 name 非空的条目用于补充 name/id，args 仅在非空时覆盖；
+    - name 为空的占位条目一律忽略。
     """
+    partials = list(getattr(chunk, "tool_call_chunks", None) or [])
+    for part in partials:
+        index = int(_part_field(part, "index", 0) or 0)
+        while len(accumulated) <= index:
+            accumulated.append({"name": "", "args": "", "id": ""})
+        target = accumulated[index]
+        name = str(_part_field(part, "name") or "").strip()
+        if name:
+            target["name"] = name
+        args = str(_part_field(part, "args") or "")
+        if args:
+            # args 以 JSON 字符串分片增量下发，按片段累积。
+            target["args"] = f"{target['args']}{args}"
+        call_id = str(_part_field(part, "id") or "")
+        if call_id:
+            target["id"] = call_id
     calls = list(getattr(chunk, "tool_calls", None) or [])
     for position, call in enumerate(calls):
         name = str((call.get("name") if isinstance(call, dict) else getattr(call, "name", "")) or "").strip()
@@ -126,24 +152,6 @@ def _merge_streamed_tool_calls(chunk: Any, accumulated: list[dict]) -> list[dict
         if args:
             target["args"] = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
         call_id = str((call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or "")
-        if call_id:
-            target["id"] = call_id
-    if calls:
-        return accumulated
-    partials = list(getattr(chunk, "tool_call_chunks", None) or [])
-    for part in partials:
-        index = int(getattr(part, "index", 0) or 0)
-        while len(accumulated) <= index:
-            accumulated.append({"name": "", "args": "", "id": ""})
-        target = accumulated[index]
-        name = str(getattr(part, "name", "") or "").strip()
-        if name:
-            target["name"] = name
-        args = str(getattr(part, "args", "") or "")
-        if args:
-            # args 以 JSON 字符串分片增量下发，按片段累积。
-            target["args"] = f"{target['args']}{args}"
-        call_id = str(getattr(part, "id", "") or "")
         if call_id:
             target["id"] = call_id
     return accumulated
@@ -492,7 +500,6 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
         raise_if_stream_cancelled(db, state.get("stream_id"), force_database_check=True)
         name = str(call.get("name") or "").strip()
         args, call_id = call.get("args") or {}, str(call.get("id") or mint_token())
-        tool = tool_map.get(name)
         if not name:
             # 名称为空的残缺调用：直接按失败收口，不进入“未知工具”空转。
             tool_failed = True
@@ -501,6 +508,12 @@ async def observe_step(db: Session, thread: ConversationThread, assistant_messag
             tool_messages.append({"role": "tool", "content": content_text, "name": "", "tool_call_id": call_id})
             summaries.append(f"{content_text[:80]}")
             continue
+        if name == "web_search" and not str(args.get("query") or "").strip():
+            # 部分模型会以空参数调用联网搜索：回退用本轮用户消息作为搜索词。
+            user_query = str(state.get("user_message") or "").strip()
+            if user_query:
+                args = {"query": user_query}
+        tool = tool_map.get(name)
         emit({"event": "tool_call_started", "data": {"tool_name": name, "call_id": call_id}})
         audit = start_tool_audit(db, agent_run_id=agent_run.id, tool_name=name, request_json={"arguments": args})
         if tool is None:

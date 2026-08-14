@@ -395,6 +395,81 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(serialized[0]["args"], {"query": "天气"})
         self.assertEqual(serialize_tool_calls([{"name": "", "args": {}, "id": "x"}]), [])
 
+    def test_merge_streamed_tool_calls_interleaved_name_and_arg_fragments(self) -> None:
+        """复刻 dashscope 真实流：首 chunk 带完整 name（args 空占位），
+        随后 args 分片（dict 形态 tool_call_chunks）穿插空名占位条目，
+        最终应拼出完整 JSON 参数。"""
+        accumulated: list[dict] = []
+        accumulated = _merge_streamed_tool_calls(
+            SimpleNamespace(
+                tool_calls=[{"name": "web_search", "args": {}, "id": "call-1", "type": "tool_call"}],
+                tool_call_chunks=[{"name": "web_search", "args": "", "index": 0, "id": "call-1"}],
+            ),
+            accumulated,
+        )
+        accumulated = _merge_streamed_tool_calls(
+            SimpleNamespace(
+                tool_calls=[{"name": "", "args": {}, "id": "", "type": "tool_call"}],
+                tool_call_chunks=[{"name": None, "args": '{"query": ', "index": 0, "id": ""}],
+            ),
+            accumulated,
+        )
+        accumulated = _merge_streamed_tool_calls(
+            SimpleNamespace(tool_calls=[], tool_call_chunks=[{"name": None, "args": '"DeepSeek API', "index": 0, "id": ""}]),
+            accumulated,
+        )
+        accumulated = _merge_streamed_tool_calls(
+            SimpleNamespace(tool_calls=[], tool_call_chunks=[{"name": None, "args": ' 价格 2026', "index": 0, "id": ""}]),
+            accumulated,
+        )
+        accumulated = _merge_streamed_tool_calls(
+            SimpleNamespace(tool_calls=[], tool_call_chunks=[{"name": None, "args": '"}', "index": 0, "id": ""}]),
+            accumulated,
+        )
+        accumulated = _merge_streamed_tool_calls(
+            SimpleNamespace(
+                tool_calls=[{"name": "", "args": {}, "id": "", "type": "tool_call"}],
+                tool_call_chunks=[{"name": None, "args": "", "index": 0, "id": ""}],
+            ),
+            accumulated,
+        )
+
+        serialized = serialize_tool_calls(accumulated)
+        self.assertEqual(serialized[0]["name"], "web_search")
+        self.assertEqual(serialized[0]["args"], {"query": "DeepSeek API 价格 2026"})
+        self.assertEqual(serialized[0]["id"], "call-1")
+
+    async def test_observe_web_search_falls_back_to_user_message_query(self) -> None:
+        captured: dict = {}
+
+        class _FakeWebSearchTool:
+            name = "web_search"
+
+            async def ainvoke(self, args):
+                captured.update(args)
+                return {"status": "ok", "content": "deepseek 价格 ...", "references": []}
+
+        with patch(
+            "app.domains.conversation.agent_service.build_agent_tools",
+            new_callable=AsyncMock,
+            return_value=[_FakeWebSearchTool()],
+        ):
+            result = await observe_step(
+                self.db,
+                self.thread,
+                self.message,
+                SimpleNamespace(id=1),
+                state=self._state(
+                    user_message="帮我搜一下 deepseek 现在的 api 价格",
+                    pending_tool_calls=[{"name": "web_search", "args": {}, "id": "c1"}],
+                ),
+                emit=self.events.append,
+            )
+
+        self.assertFalse(result["tool_failed"])
+        self.assertEqual(captured["query"], "帮我搜一下 deepseek 现在的 api 价格")
+        self.assertIn("deepseek 价格", result["observation"])
+
     async def test_observe_empty_name_tool_call_fails_closed(self) -> None:
         with patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[]):
             result = await observe_step(
