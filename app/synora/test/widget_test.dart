@@ -927,6 +927,41 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('失败回答下方有推理卡时仍可重试', (tester) async {
+    final controller = buildTestController(
+      conversationMessages: <ConversationMessageItem>[
+        ConversationMessageItem(
+          id: 1,
+          role: 'user',
+          messageType: 'text',
+          status: 'completed',
+          textContent: '帮我搜一下 deepseek 现在的 api 价格',
+          structuredPayload: const <String, dynamic>{},
+          createdAt: DateTime.parse('2026-05-23T10:00:00Z'),
+        ),
+        ConversationMessageItem(
+          id: 2,
+          role: 'assistant',
+          messageType: 'text',
+          status: 'failed',
+          textContent: '请求失败',
+          structuredPayload: const <String, dynamic>{},
+          createdAt: DateTime.parse('2026-05-23T10:00:01Z'),
+        ),
+        reasoningStepMessage(),
+      ],
+    );
+    await controller.login('han.teacher@example.com', 'SynoraMVP123!');
+    await tester.pumpWidget(SynoraApp(controller: controller));
+    await tester.pumpAndSettle();
+    await controller.selectConversation(1);
+    await tester.pumpAndSettle();
+
+    // reasoning_step 卡片不渲染，不应挡住失败回答的重试按钮。
+    expect(controller.canRetryOrRegenerate(controller.messages[1]), isTrue);
+    expect(find.byTooltip(AppStrings.retry), findsOneWidget);
+  });
+
   testWidgets('减少动态效果开启时流式生成无无限动画', (tester) async {
     tester.platformDispatcher.accessibilityFeaturesTestValue =
         const FakeAccessibilityFeatures(disableAnimations: true);

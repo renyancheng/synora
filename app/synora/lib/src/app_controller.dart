@@ -487,8 +487,9 @@ class AppController extends ChangeNotifier {
   }
 
   /// 失败回答可重试、已完成回答可重新生成。
-  /// 只允许当前会话最后一轮的最后一条 assistant 文本消息：绑定会话与消息，
-  /// 避免误操作其他会话或历史轮次；生成中/取消中不提供操作。
+  /// 只允许当前会话最后一条“可见”的 assistant 文本消息（reasoning_step 卡片
+  /// 不渲染 UI，不算可见）：绑定会话与消息，避免误操作其他会话或历史轮次；
+  /// 生成中/取消中不提供操作。
   bool canRetryOrRegenerate(ConversationMessageItem message) {
     if (!message.isAssistant || message.messageType != 'text') {
       return false;
@@ -497,7 +498,17 @@ class AppController extends ChangeNotifier {
       return false;
     }
     final messages = activeState.messages;
-    if (messages.isEmpty || messages.last.id != message.id) {
+    if (messages.isEmpty) {
+      return false;
+    }
+    ConversationMessageItem? lastVisible;
+    for (var i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].messageType != 'reasoning_step') {
+        lastVisible = messages[i];
+        break;
+      }
+    }
+    if (lastVisible == null || lastVisible.id != message.id) {
       return false;
     }
     return message.status == 'failed' || message.status == 'completed';
