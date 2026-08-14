@@ -1,8 +1,8 @@
 """LangGraph 图状态定义。
 
 状态字段均为可 JSON 序列化的基本类型，便于 checkpointer 持久化。
-ORM 对象（db / thread / agent_run / assistant_message）通过
-``get_config()["configurable"]`` 传递，不进入图状态。
+节点仅通过状态中的稳定 ID 重载数据库资源；checkpoint 和 config 均不保存
+活跃 ORM Session/实例。
 """
 
 from __future__ import annotations
@@ -34,10 +34,13 @@ class AgentState(TypedDict, total=False):
     max_iterations: int
     loop_decision: str  # "continue" | "done"
     follow_up_prompt: str | None
+    anti_repeat_used: bool  # 防粘滞护栏：重复回答已触发过一次重跑
+    anti_empty_retries: int  # 空回答护栏：已重跑次数（最多 2 次，随后兜底收口）
     # 跨迭代累积的消息（AIMessage / ToolMessage 序列化 dict），用 add reducer 追加
     agent_messages: Annotated[list[dict[str, Any]], add]
     pending_tool_calls: list[dict[str, Any]]
     observation: str
+    tool_failed: bool
     reflection: str
     current_aimessage: dict[str, Any] | None
     # 推理轨迹步骤（[{seq, step_type, label, content, status, iteration}]），add reducer 追加

@@ -7,11 +7,11 @@
   派发 ``handle_cross_day_intent`` 主动跟进（单次触发）。
 
 防打扰：nudge 次数上限与冷却（``meta_json.nudge_count`` / ``last_nudge_at``），
-由 handle 任务执行前判断；用户确认/取消走 ``_clear_pending_state`` 删除行。
+由 handle 任务执行前判断；用户确认/取消走 ``pending_service.clear_pending_state`` 删除行。
 
 核心逻辑抽成 ``*_core`` 函数接收显式 db（便于测试注入内存库），celery task 包装器
-负责 ``SessionLocal`` 生命周期。service 层的 ``_append_message`` /
-``queue_notification_audit`` 在函数内延迟 import，避免
+负责 ``SessionLocal`` 生命周期。消息写入复用 ``conversation.stream_runtime`` 的
+``append_message``（公开运行时服务），在函数内延迟 import，避免
 ``conversation.service → tasks.memory → celery_app → pending → service`` 循环依赖。
 """
 
@@ -135,7 +135,7 @@ def collect_due_cross_day_intents(db: Session) -> list[ConversationPendingState]
 
 
 def handle_draft_timeout_core(db: Session, pending_id: int) -> str:
-    from app.domains.conversation.service import _append_message
+    from app.domains.conversation.stream_runtime import append_message
 
     pending = db.get(ConversationPendingState, pending_id)
     if not pending:
@@ -152,7 +152,7 @@ def handle_draft_timeout_core(db: Session, pending_id: int) -> str:
     start = str(draft.get("start_at") or draft.get("scheduled_at") or "").strip()
     nudge = _generate_followup(title=title, start=start, cross_day=False)
 
-    _append_message(
+    append_message(
         db,
         thread,
         role="assistant",
@@ -172,7 +172,7 @@ def handle_draft_timeout_core(db: Session, pending_id: int) -> str:
 
 
 def handle_cross_day_intent_core(db: Session, pending_id: int) -> str:
-    from app.domains.conversation.service import _append_message
+    from app.domains.conversation.stream_runtime import append_message
 
     pending = db.get(ConversationPendingState, pending_id)
     if not pending:
@@ -189,7 +189,7 @@ def handle_cross_day_intent_core(db: Session, pending_id: int) -> str:
     start = str(draft.get("start_at") or draft.get("scheduled_at") or "").strip()
     follow = _generate_followup(title=title, start=start, cross_day=True)
 
-    _append_message(
+    append_message(
         db,
         thread,
         role="assistant",

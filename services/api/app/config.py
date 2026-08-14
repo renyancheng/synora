@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 90
     llm_max_pdf_pages: int = 6
     llm_max_image_side: int = 1568
+    # 联网搜索（智谱 bigmodel 网络搜索 API，模型 search_std）。
+    # Key 通过环境变量 SYNORA_ZHIPU_WEB_SEARCH_API_KEY 配置；为空时工具返回未配置提示。
+    zhipu_web_search_api_key: str = ""
+    zhipu_web_search_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    zhipu_web_search_model: str = "search_std"
     memory_enabled: bool = True
     memory_embedding_model: str = "text-embedding-v4"
     memory_top_k: int = 6

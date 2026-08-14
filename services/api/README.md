@@ -64,7 +64,7 @@ SSE 事件契约（`run_started / reasoning_step / message_delta / tool_call_* /
 - **跨天意图唤醒**：通过 `mark_cross_day_intent` 将挂起标记为 `intent_type=cross_day` + `planned_at`，
   到期后 LLM 主动跟进一次（`meta_json.intent_triggered` 去重，单次触发）。
 
-用户确认/取消走 `_clear_pending_state` 删除行。
+用户确认/取消走 `pending_service.clear_pending_state` 删除行。
 
 可通过环境变量回滚到旧编排：
 
@@ -83,6 +83,17 @@ SYNORA_MCP_SERVERS=[{"name":"files","transport":"streamable_http","url":"http://
 # stdio server（本地进程）
 SYNORA_MCP_SERVERS=[{"name":"files","transport":"stdio","command":"python","args":["-m","mcp_server_files"],"env":{"FOO":"bar"}}]
 ```
+
+## 联网搜索工具（智谱 bigmodel）
+
+general_chat 分支注入两个原生只读工具：`get_current_time`（时间查询）与
+`web_search`（联网搜索，模型 `search_std`）。联网搜索 API Key 通过环境变量配置：
+
+- `SYNORA_ZHIPU_WEB_SEARCH_API_KEY`：智谱 API Key（为空时工具返回未配置提示，不阻断对话）
+- `SYNORA_ZHIPU_WEB_SEARCH_BASE_URL`：默认 `https://open.bigmodel.cn/api/paas/v4`
+- `SYNORA_ZHIPU_WEB_SEARCH_MODEL`：默认 `search_std`
+
+接口文档：https://docs.bigmodel.cn/api-reference/工具-api/网络搜索
 
 ## LangGraph checkpointer
 
