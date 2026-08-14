@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
@@ -19,10 +20,12 @@ from app.agent.state import AgentState
 from app.config import get_settings
 from app.db import SessionLocal
 from app.domains.conversation.agent_service import act_step, observe_step, plan_step, reflect_step
-from app.domains.conversation.intake_service import process_quick_note_intake, process_schedule_intake
+from app.domains.conversation.intake_service import build_recent_history_lines, process_quick_note_intake, process_schedule_intake
 from app.domains.conversation.pending_service import get_pending_state, prepare_pending_regeneration, resolve_contextual_draft_followup
 from app.domains.conversation.stream_runtime import build_reasoning_step_event, emit_text_stream
 from app.models import AgentRun, ConversationMessage, ConversationThread
+
+logger = logging.getLogger(__name__)
 
 
 class _NodeResources:
@@ -93,6 +96,15 @@ async def route_intent(state: AgentState) -> dict[str, Any]:
     context = dict(state.get("context") or {})
     selected_tool = state.get("selected_tool")
 
+    # 近期对话窗口补充：_resolve_conversation_history_lines 只返回最近 12 条之外的
+    # 旧相关历史，而路由与日程/速记提取都需要紧邻轮次（如“把刚才说的那个会议加上”）。
+    # 近期行在前、旧历史行去重后追加，路由（取最近 6 条）与 intake 上下文均受益。
+    recent_lines = build_recent_history_lines(db, resources.thread, agent_run.user_message_id)
+    if recent_lines:
+        existing_lines = list(context.get("conversation_history_lines") or [])
+        old_lines = [line for line in existing_lines if line not in recent_lines]
+        context["conversation_history_lines"] = recent_lines + old_lines
+
     try:
         pending = get_pending_state(db, conversation_id)
         if pending:
@@ -113,6 +125,10 @@ async def route_intent(state: AgentState) -> dict[str, Any]:
         agent_run.workflow = intent
         agent_run.output_json = {**dict(agent_run.output_json or {}), "workflow": intent, "model_name": get_settings().llm_model, "provider_name": "dashscope"}
         db.commit()
+        logger.info(
+            "agent_routing run_id=%s conversation_id=%s intent=%s pending=%s recent_history_lines=%s",
+            agent_run.id, conversation_id, intent, bool(pending), len(recent_lines),
+        )
         return {"intent": intent, "user_message": text_content, "attachment_ids": attachment_ids, "attachment_parts": attachment_parts, "context": context}
     finally:
         resources.close()

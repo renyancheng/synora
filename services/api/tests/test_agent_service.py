@@ -578,6 +578,47 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("未给出工具名", result["observation"])
         self.assertIn("未给出工具名", str(self.events))
 
+    async def test_build_recent_history_lines_returns_recent_window(self) -> None:
+        """intake 近期历史窗口：返回当前消息之前的最近文本消息（时间正序、排除自身、
+        跳过空文本占位），修复“日程/速记卡片缺少前面对话上下文”问题。"""
+        from app.domains.conversation.intake_service import build_recent_history_lines
+
+        for role, text in (
+            ("user", "我明天下午想开个会"),
+            ("assistant", "好的，我帮你记一下，需要定会议室吗？"),
+            ("user", "对，学院会议室"),
+        ):
+            self.db.add(
+                ConversationMessage(
+                    conversation_id=self.thread.id,
+                    role=role,
+                    message_type="text",
+                    status="completed",
+                    text_content=text,
+                    structured_payload_json={},
+                )
+            )
+        self.db.commit()
+        current = ConversationMessage(
+            conversation_id=self.thread.id,
+            role="user",
+            message_type="text",
+            status="streaming",
+            text_content="把刚才说的那个会议加上",
+            structured_payload_json={},
+        )
+        self.db.add(current)
+        self.db.commit()
+
+        lines = build_recent_history_lines(self.db, self.thread, current.id, limit=8)
+
+        joined = "\n".join(lines)
+        self.assertIn("我明天下午想开个会", joined)
+        self.assertIn("学院会议室", joined)
+        self.assertIn("助手：", joined)
+        self.assertNotIn("把刚才说的那个会议加上", joined)
+        self.assertEqual(lines[0].startswith("用户"), True)
+
 
 if __name__ == "__main__":
     unittest.main()

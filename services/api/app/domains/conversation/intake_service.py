@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domains.conversation.pending_service import (
@@ -28,10 +29,48 @@ from app.domains.conversation.stream_runtime import (
     start_tool_audit,
 )
 from app.domains.schedule.service import build_draft_hash
-from app.models import AgentRun, ConversationThread
+from app.models import AgentRun, ConversationMessage, ConversationThread
 from app.runtime.mcp_client import invoke_synora_tool
 from app.schemas.schedule import ScheduleEventDraft
 from app.security import mint_token
+
+
+# intake 流程补充的“最近对话窗口”：_resolve_conversation_history_lines 只返回
+# 最近 12 条之外的旧相关历史（对 general_chat 合理，它自带最近 8 条消息窗口），
+# 但日程/速记提取的 LLM 没有近期窗口，必须额外注入紧邻轮次，否则
+# “把刚才说的那个会议加上”这类引用会丢失上下文。
+RECENT_HISTORY_LINES_LIMIT = 8
+
+
+def build_recent_history_lines(
+    db: Session,
+    thread: ConversationThread,
+    current_user_message_id: int | None,
+    limit: int = RECENT_HISTORY_LINES_LIMIT,
+) -> list[str]:
+    """取当前用户消息之前的最近 N 条文本消息，按时间正序格式化为
+    “用户：… / 助手：…” 行（与 _resolve_conversation_history_lines 格式一致）。"""
+    if not current_user_message_id:
+        return []
+    rows = db.scalars(
+        select(ConversationMessage)
+        .where(
+            ConversationMessage.conversation_id == thread.id,
+            ConversationMessage.message_type == "text",
+            ConversationMessage.id != current_user_message_id,
+        )
+        .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+        .limit(limit + 4)
+    ).all()
+    lines: list[str] = []
+    for row in reversed(rows):
+        text = str(row.text_content or "").strip()
+        if not text:
+            continue
+        lines.append(f"{'用户' if row.role == 'user' else '助手'}：{text[:200]}")
+        if len(lines) >= limit:
+            break
+    return lines
 
 
 async def process_schedule_intake(
