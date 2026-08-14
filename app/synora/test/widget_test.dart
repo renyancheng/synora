@@ -1038,7 +1038,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(announcementSemantics('正在处理'), findsOneWidget);
+    expect(announcementSemantics('正在查询时间'), findsOneWidget);
 
     // 流式 delta 不改变播报标签（不逐 token 播报）。
     streamController.add(
@@ -1048,7 +1048,7 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(announcementSemantics('正在处理'), findsOneWidget);
+    expect(announcementSemantics('正在查询时间'), findsOneWidget);
 
     // 完成播报
     streamController.add(

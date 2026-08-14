@@ -1394,6 +1394,10 @@ class AppController extends ChangeNotifier {
         return '正在创建日程并安排提醒';
       case 'create_quick_note_after_approval':
         return '正在保存速记';
+      case 'web_search':
+        return '正在联网搜索';
+      case 'get_current_time':
+        return '正在查询时间';
       default:
         return '正在处理';
     }
