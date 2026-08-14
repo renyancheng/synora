@@ -7,11 +7,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.db import Base
-from app.domains.conversation.service import (
-    _upsert_pending_state,
-    create_conversation,
+from app.domains.conversation.pending_service import (
     mark_cross_day_intent,
+    upsert_pending_state,
 )
+from app.domains.conversation.service import create_conversation
 from app.models import (
     ConversationMessage,
     ConversationPendingState,
@@ -65,7 +65,7 @@ class PendingServiceTests(unittest.TestCase):
         meta_json: dict | None = None,
     ) -> ConversationPendingState:
         thread = create_conversation(self.db, self.user.id)
-        pending = _upsert_pending_state(
+        pending = upsert_pending_state(
             self.db,
             thread.id,
             self.user.id,

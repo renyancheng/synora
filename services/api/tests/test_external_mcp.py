@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.agent.external_mcp import McpServerSettings
@@ -61,14 +62,19 @@ class ExternalMcpTests(unittest.IsolatedAsyncioTestCase):
         async def fake_get_tools(*, server_name: str | None = None):
             if server_name == "ext":
                 raise ConnectionError("server down")
-            return ["tool-a"]
+            return [SimpleNamespace(name="tool-a")]
 
         mock_client = unittest.mock.MagicMock()
         mock_client.get_tools = fake_get_tools
         with patch("app.agent.tools.get_mcp_client", return_value=mock_client):
             tools = await build_agent_tools()
 
-        self.assertEqual(tools, ["tool-a"])
+        # ext 不可达时仅跳过该 server；MCP 工具与原生工具（get_current_time /
+        # web_search）照常返回，不阻断主流程。
+        names = [getattr(item, "name", None) for item in tools]
+        self.assertIn("tool-a", names)
+        self.assertIn("get_current_time", names)
+        self.assertIn("web_search", names)
 
 
 if __name__ == "__main__":

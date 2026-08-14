@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -12,10 +13,23 @@ from app.agent.graph import build_graph
 from app.config import get_settings
 from app.db import Base
 from app.domains.approval.service import create_approval_request
-from app.domains.conversation.service import GENERAL_CHAT_EXCLUDED_TOOLS, apply_action, consume_stream, create_conversation, delete_conversation, queue_message, rewind_last_turn, update_conversation_title
+from app.domains.conversation.agent_service import reflect_step
+from app.domains.conversation.service import (
+    _claim_pending_stream,
+    resume_stream_from_checkpoint,
+    abort_stream,
+    apply_action,
+    consume_stream,
+    create_conversation,
+    delete_conversation,
+    queue_message,
+    rewind_last_turn,
+    update_conversation_title,
+)
+from app.domains.conversation.stream_runtime import AgentRunCancelled, is_stream_cancelled, raise_if_stream_cancelled
 from app.domains.quick_note.service import delete_note
 from app.domains.schedule.service import build_approval_draft_hash, build_draft_hash, delete_schedule
-from app.models import ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
+from app.models import AgentRun, ApprovalRequest, Attachment, ConversationMessage, ConversationPendingState, NotificationAudit, QuickNote, ReminderJob, Schedule, User
 from app.schemas.common import EventDateTimeValue
 from app.schemas.conversation import ConversationActionRequest, ConversationSendMessageRequest
 from app.schemas.schedule import ScheduleEventDraft
@@ -29,6 +43,11 @@ def _fake_ainvoke_structured(settings, **kwargs):
     if operation == "agent_reflect":
         return llm.ReflectDecision(is_complete=True, rationale="信息已充分")
     raise AssertionError(f"unexpected ainvoke_structured operation: {operation}")
+
+
+async def _collect_stream(agen):
+    """把 async generator 收集成事件列表（供并发 abort 测试使用）。"""
+    return [item async for item in agen]
 
 
 class _FakeStreamingChatModel:
@@ -53,6 +72,114 @@ class _FakeStreamingChatModel:
             yield AIMessageChunk(content="", tool_calls=[tc])
 
 
+class _ToolThenTextChatModel:
+    """两轮模型：第一轮产出工具调用，第二轮产出最终文本；记录 bind_tools 收到的工具。"""
+
+    def __init__(self, tool_call: dict, final_text: str) -> None:
+        self._tool_call = tool_call
+        self._final_text = final_text
+        self._rounds = 0
+        self.bound_tools: list | None = None
+
+    def bind_tools(self, tools):
+        self.bound_tools = tools
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        self._rounds += 1
+        if self._rounds == 1:
+            yield AIMessageChunk(content="", tool_calls=[self._tool_call])
+        else:
+            yield AIMessageChunk(content=self._final_text)
+
+
+class _EmptyThenTextChatModel:
+    """前 N 轮返回空流（触发空回答护栏重跑），之后返回正常文本。"""
+
+    def __init__(self, final_text: str, rounds_before_text: int = 1) -> None:
+        self._final_text = final_text
+        self._rounds_before_text = rounds_before_text
+        self._rounds = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        self._rounds += 1
+        if self._rounds <= self._rounds_before_text:
+            return
+        yield AIMessageChunk(content=self._final_text)
+
+
+class _AlwaysEmptyChatModel:
+    """永远返回空流：验证空回答兜底文案收口。"""
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        if False:
+            yield None
+        return
+
+
+class _ToolCallWithEmptyPlaceholdersModel:
+    """复刻 dashscope 兼容模式的真实流：工具调用之后追加空名占位条目。
+
+    第一轮：真实调用 + 两个 name='' 占位条目（不得覆盖真调用）；
+    第二轮：输出最终文本。
+    """
+
+    def __init__(self, final_text: str) -> None:
+        self._final_text = final_text
+        self._rounds = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        from langchain_core.messages import AIMessageChunk
+
+        self._rounds += 1
+        if self._rounds == 1:
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[
+                    {"name": "get_current_time", "args": {}, "id": "call-1", "type": "tool_call"}
+                ],
+            )
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[{"name": "", "args": {}, "id": "", "type": "tool_call"}],
+            )
+            yield AIMessageChunk(
+                content="",
+                tool_calls=[{"name": "", "args": {}, "id": "", "type": "tool_call"}],
+            )
+        else:
+            yield AIMessageChunk(content=self._final_text)
+
+
+class _FakeTimeTool:
+    """模拟 MCP 返回的 get_current_time langchain 工具。"""
+
+    name = "get_current_time"
+
+    async def ainvoke(self, args):
+        return {
+            "status": "ok",
+            "local_time": "2026-08-13 15:30:00",
+            "timezone": "Asia/Shanghai",
+            "weekday": "周四",
+            "utc_time": "2026-08-13 07:30:00",
+            "iso": "2026-08-13T07:30:00+00:00",
+        }
+
+
 class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # 测试强制 sqlite :memory: checkpointer，隔离 dev postgres checkpoint
@@ -66,6 +193,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
         Base.metadata.create_all(self.engine)
         self.db = self.session_factory()
+        self._nodes_session_patch = patch("app.agent.nodes.SessionLocal", side_effect=self.session_factory)
+        self._nodes_session_patch.start()
         self.user = User(
             email="han.teacher@example.com",
             display_name="韩老师",
@@ -78,6 +207,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self.db.close()
+        self._nodes_session_patch.stop()
         self.engine.dispose()
         get_settings().langgraph_checkpoint_backend = self._prev_ckpt_backend
         get_settings().langgraph_checkpoint_sqlite_path = self._prev_ckpt_path
@@ -99,8 +229,269 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             evidence_digest=["明天下午三点", "教学例会"],
         )
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    async def test_reflect_receives_execution_evidence_and_continues_when_answer_missing(self) -> None:
+        assistant_message = ConversationMessage(
+            conversation_id=1,
+            role="assistant",
+            message_type="text",
+            status="streaming",
+            text_content="",
+            structured_payload_json={},
+        )
+        self.db.add(assistant_message)
+        self.db.commit()
+        captured: list[dict] = []
+
+        async def reflect(settings, **kwargs):
+            captured.append(kwargs)
+            return llm.ReflectDecision(
+                is_complete=False,
+                rationale="还需要组织答案",
+                follow_up_prompt="根据工具结果给出简洁答复",
+            )
+
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=reflect):
+            result = await reflect_step(
+                self.db,
+                SimpleNamespace(),
+                assistant_message,
+                SimpleNamespace(),
+                state={
+                    "user_message": "现在几点了",
+                    "plan": "查询当前时间后回答",
+                    "iteration_count": 1,
+                    "max_iterations": 3,
+                    "current_aimessage": {"content": "", "tool_calls": [{"name": "get_current_time"}]},
+                    "observation": "get_current_time: 2026-08-13 15:30",
+                    "agent_messages": [
+                        {"role": "tool", "name": "get_current_time", "content": "2026-08-13 15:30"}
+                    ],
+                },
+                emit=lambda _event: None,
+            )
+
+        evidence = json.loads(captured[0]["user_text"])
+        self.assertEqual(evidence["plan"], "查询当前时间后回答")
+        self.assertEqual(evidence["observation"], "get_current_time: 2026-08-13 15:30")
+        self.assertEqual(evidence["tool_messages"][0]["content"], "2026-08-13 15:30")
+        self.assertEqual(evidence["current_assistant_output"], "")
+        self.assertEqual(result["loop_decision"], "continue")
+        self.assertEqual(result["follow_up_prompt"], "根据工具结果给出简洁答复")
+
+    async def test_reflect_does_not_loop_after_tool_failure(self) -> None:
+        assistant_message = ConversationMessage(
+            conversation_id=1, role="assistant", message_type="text", status="streaming", text_content="", structured_payload_json={}
+        )
+        self.db.add(assistant_message)
+        self.db.commit()
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as reflect_mock:
+            result = await reflect_step(
+                self.db,
+                SimpleNamespace(),
+                assistant_message,
+                SimpleNamespace(),
+                state={
+                    "iteration_count": 1,
+                    "max_iterations": 3,
+                    "current_aimessage": {"content": "", "tool_calls": [{"name": "get_current_time"}]},
+                    "tool_failed": True,
+                },
+                emit=lambda _event: None,
+            )
+
+        self.assertEqual(result["loop_decision"], "done")
+        self.assertEqual(result["reflection"], "工具执行失败，避免重复调用")
+        reflect_mock.assert_not_awaited()
+
+    async def test_reflect_closes_after_successful_tool_and_user_answer(self) -> None:
+        assistant_message = ConversationMessage(
+            conversation_id=1, role="assistant", message_type="text", status="streaming", text_content="现在是周四 15:30。", structured_payload_json={}
+        )
+        self.db.add(assistant_message)
+        self.db.commit()
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock) as reflect_mock:
+            result = await reflect_step(
+                self.db,
+                SimpleNamespace(),
+                assistant_message,
+                SimpleNamespace(),
+                state={
+                    "iteration_count": 1,
+                    "max_iterations": 3,
+                    "current_aimessage": {
+                        "content": "现在是周四 15:30。",
+                        "tool_calls": [{"name": "get_current_time"}],
+                    },
+                    "observation": "get_current_time: 2026-08-13 15:30",
+                },
+                emit=lambda _event: None,
+            )
+
+        self.assertEqual(result["loop_decision"], "done")
+        self.assertEqual(result["reflection"], "工具已返回且已生成用户可读回答")
+        reflect_mock.assert_not_awaited()
+
+    async def test_pending_stream_can_only_be_claimed_once_across_sessions(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="测试并发消费"),
+        )
+        first_consumer = self.session_factory()
+        second_consumer = self.session_factory()
+        try:
+            # 两个消费者都先读到 pending，模拟它们在旧实现中会同时进入执行路径。
+            self.assertEqual(first_consumer.get(AgentRun, agent_run.id).stream_status, "pending")
+            self.assertEqual(second_consumer.get(AgentRun, agent_run.id).stream_status, "pending")
+
+            self.assertTrue(_claim_pending_stream(first_consumer, agent_run.id))
+            self.assertFalse(_claim_pending_stream(second_consumer, agent_run.id))
+            self.db.expire_all()
+            self.assertEqual(self.db.get(AgentRun, agent_run.id).stream_status, "active")
+        finally:
+            first_consumer.close()
+            second_consumer.close()
+
+    async def test_abort_persists_cancelling_state_for_another_worker(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="测试跨实例取消"),
+        )
+        stream_worker = self.session_factory()
+        abort_worker = self.session_factory()
+        try:
+            self.assertTrue(_claim_pending_stream(stream_worker, agent_run.id))
+            self.assertTrue(
+                abort_stream(
+                    abort_worker,
+                    user_id=self.user.id,
+                    conversation_id=thread.id,
+                    stream_id=agent_run.stream_token,
+                )
+            )
+            # stream_worker 在 abort 前已读取过 run；检查必须重新查库才能看到取消请求。
+            with self.assertRaises(AgentRunCancelled):
+                raise_if_stream_cancelled(
+                    stream_worker,
+                    agent_run.stream_token,
+                    force_database_check=True,
+                )
+            self.db.expire_all()
+            self.assertEqual(self.db.get(AgentRun, agent_run.id).stream_status, "cancelling")
+        finally:
+            stream_worker.close()
+            abort_worker.close()
+
+    async def test_abort_does_not_cancel_a_stream_from_another_conversation(self) -> None:
+        first_thread = create_conversation(self.db, self.user.id)
+        second_thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            second_thread.id,
+            ConversationSendMessageRequest(text_content="隔离取消请求"),
+        )
+
+        self.assertFalse(
+            abort_stream(
+                self.db,
+                user_id=self.user.id,
+                conversation_id=first_thread.id,
+                stream_id=agent_run.stream_token,
+            )
+        )
+        self.db.expire_all()
+        self.assertEqual(self.db.get(AgentRun, agent_run.id).stream_status, "pending")
+
+    async def test_cancelling_stream_is_closed_without_starting_agent(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="取消先于消费启动"),
+        )
+        self.assertTrue(
+            abort_stream(
+                self.db,
+                user_id=self.user.id,
+                conversation_id=thread.id,
+                stream_id=agent_run.stream_token,
+            )
+        )
+
+        events = [
+            item
+            async for item in consume_stream(
+                self.db,
+                self.user.id,
+                thread.id,
+                agent_run.stream_token,
+            )
+        ]
+
+        self.assertEqual([item["event"] for item in events], ["run_cancelled"])
+        self.db.expire_all()
+        self.assertEqual(self.db.get(AgentRun, agent_run.id).stream_status, "cancelled")
+        self.assertEqual(self.db.get(ConversationMessage, assistant_message.id).status, "completed")
+
+    async def test_resume_rejects_active_run_and_marks_it_failed(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="恢复中断流"),
+        )
+        self.assertTrue(_claim_pending_stream(self.db, agent_run.id))
+        agent_run.checkpoint_thread_id = f"agent_run_{agent_run.id}"
+        self.db.commit()
+
+        with self.assertRaisesRegex(ValueError, "已安全终止"):
+            _ = [
+                item
+                async for item in resume_stream_from_checkpoint(
+                    self.db, self.user.id, thread.id, agent_run.stream_token
+                )
+            ]
+
+        self.db.expire_all()
+        refreshed = self.db.get(AgentRun, agent_run.id)
+        self.assertEqual(refreshed.stream_status, "failed")
+        self.assertIn("可能重复执行工具", refreshed.error_message or "")
+
+    async def test_resume_rejects_failed_checkpoint_before_side_effects(self) -> None:
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="拒绝不安全恢复"),
+        )
+        agent_run.stream_status = "failed"
+        agent_run.status = "failed"
+        agent_run.checkpoint_thread_id = f"agent_run_{agent_run.id}"
+        self.db.commit()
+
+        with patch("app.agent.checkpointer.setup_checkpointer", new_callable=AsyncMock), patch(
+            "app.agent.graph.build_graph",
+            return_value=SimpleNamespace(aget_state=AsyncMock(return_value=SimpleNamespace(next=("observe",)))),
+        ):
+            with self.assertRaisesRegex(ValueError, "已拒绝恢复"):
+                _ = [
+                    item
+                    async for item in resume_stream_from_checkpoint(
+                        self.db, self.user.id, thread.id, agent_run.stream_token
+                    )
+                ]
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
     @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的，我来帮你一起整理。"))
     @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学安排")
@@ -149,8 +540,315 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s["step_type"] for s in steps], ["plan", "act", "observe", "reflect"])
         self.assertTrue(all(s["status"] == "completed" for s in steps))
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock)
+    @patch(
+        "app.agent.llm.create_chat_model",
+        return_value=_ToolCallWithEmptyPlaceholdersModel(final_text="现在是周四 15:30。"),
+    )
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock)
+    @patch("app.agent.llm.generate_conversation_title", return_value="时间问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_tool_call_survives_empty_name_placeholder_chunks(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        """dashscope 兼容模式会在真实工具调用后追加 name='' 占位条目，
+        工具调用不能被占位条目覆盖，否则 observe 空转并落到空回答兜底。"""
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        tools_mock.return_value = [_FakeTimeTool()]
+        reflect_calls = {"n": 0}
+
+        async def _reflect_side_effect(settings, **kwargs):
+            if kwargs.get("operation") == "agent_plan":
+                return llm.PlanResult(plan="查询当前时间后回答")
+            if kwargs.get("operation") == "agent_reflect":
+                reflect_calls["n"] += 1
+                if reflect_calls["n"] == 1:
+                    return llm.ReflectDecision(
+                        is_complete=False,
+                        rationale="需要时间信息",
+                        follow_up_prompt="结合工具返回的时间给出回答",
+                    )
+                return llm.ReflectDecision(is_complete=True, rationale="信息已充分")
+            raise AssertionError(f"unexpected operation: {kwargs.get('operation')}")
+
+        _ainvoke_mock.side_effect = _reflect_side_effect
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="现在几点了"),
+        )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertTrue(
+            any(
+                item["event"] == "tool_call_completed" and item["data"]["tool_name"] == "get_current_time"
+                for item in events
+            )
+        )
+        self.assertEqual(
+            self.db.get(type(assistant_message), assistant_message.id).text_content,
+            "现在是周四 15:30。",
+        )
+        self.assertEqual(events[-1]["event"], "run_completed")
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.create_chat_model", return_value=_EmptyThenTextChatModel("你好！我是 Synora。", rounds_before_text=2))
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
+    @patch("app.agent.llm.generate_conversation_title", return_value="打招呼")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_empty_first_answer_triggers_rerun_and_completes_with_text(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="hi"),
+        )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        # 前两轮空流被空回答护栏拦截并重跑，最终以非空文本完成。
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "你好！我是 Synora。")
+        step_snapshots = [
+            item["data"]["message"]
+            for item in events
+            if item["event"] == "card_snapshot" and item["data"]["message"]["message_type"] == "reasoning_step"
+        ]
+        steps = step_snapshots[0]["structured_payload"]["steps"]
+        self.assertEqual([s["step_type"] for s in steps].count("act"), 3)
+        self.assertTrue(
+            any("未生成任何回答文本" in str(s.get("content")) for s in steps if s["step_type"] == "reflect")
+        )
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.create_chat_model", return_value=_AlwaysEmptyChatModel())
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
+    @patch("app.agent.llm.generate_conversation_title", return_value="空回答兜底")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_always_empty_answer_falls_back_to_explicit_text(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        from app.domains.conversation.service import EMPTY_ANSWER_FALLBACK_TEXT
+
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="what time is it now"),
+        )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        # 重试用尽后以明确兜底文案收口：绝不出现空回答气泡。
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertEqual(
+            self.db.get(type(assistant_message), assistant_message.id).text_content,
+            EMPTY_ANSWER_FALLBACK_TEXT,
+        )
+        refreshed = self.db.get(AgentRun, agent_run.id)
+        self.assertEqual(refreshed.output_json.get("completion_status"), "degraded")
+        self.assertEqual(
+            [item["operation"] for item in refreshed.output_json.get("degradations") or []][-1],
+            "empty_answer_fallback",
+        )
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的，我来帮你一起整理。"))
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
+    @patch("app.agent.llm.generate_conversation_title", return_value="教学安排")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_rewind_after_graph_run_removes_reasoning_step_message(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _ainvoke_mock,
+        _chat_model_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="你好，帮我看看今天安排"),
+        )
+        _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertIsNotNone(
+            self.db.scalar(
+                select(ConversationMessage).where(
+                    ConversationMessage.conversation_id == thread.id,
+                    ConversationMessage.message_type == "reasoning_step",
+                )
+            )
+        )
+
+        rewind_last_turn(self.db, self.user.id, thread.id)
+
+        # 撤回后本轮 reasoning_step 消息随 output_json.created_message_ids 一并删除。
+        self.assertIsNone(
+            self.db.scalar(
+                select(ConversationMessage).where(
+                    ConversationMessage.conversation_id == thread.id,
+                    ConversationMessage.message_type == "reasoning_step",
+                )
+            )
+        )
+        remaining = self.db.scalars(
+            select(ConversationMessage).where(ConversationMessage.conversation_id == thread.id)
+        ).all()
+        self.assertEqual(remaining, [])
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的，我来帮你整理。"))
+    @patch("app.agent.llm.generate_conversation_title", return_value="降级问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_plan_llm_failure_completes_run_as_degraded(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _chat_model_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+
+        async def _plan_fails_reflect_ok(settings, **kwargs):
+            if kwargs.get("operation") == "agent_plan":
+                raise RuntimeError("plan llm down")
+            if kwargs.get("operation") == "agent_reflect":
+                return llm.ReflectDecision(is_complete=True, rationale="信息已充分")
+            raise AssertionError(f"unexpected operation: {kwargs.get('operation')}")
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="帮我看看这周的工作安排，顺便整理一下下周的出差计划"),
+        )
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_plan_fails_reflect_ok):
+            events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(events[-1]["event"], "run_completed")
+        refreshed = self.db.get(AgentRun, agent_run.id)
+        self.assertEqual(refreshed.status, "completed")
+        self.assertEqual(refreshed.output_json.get("completion_status"), "degraded")
+        self.assertEqual([item["operation"] for item in refreshed.output_json.get("degradations") or []], ["plan"])
+        # 降级步骤在推理轨迹卡中可见，供前端明确区分降级完成。
+        step_snapshots = [
+            item["data"]["message"]
+            for item in events
+            if item["event"] == "card_snapshot" and item["data"]["message"]["message_type"] == "reasoning_step"
+        ]
+        steps = step_snapshots[0]["structured_payload"]["steps"]
+        self.assertTrue(steps[0].get("degraded"))
+        self.assertEqual(steps[0]["plan_source"], "llm")
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="现在是 15:30。"))
+    @patch("app.agent.llm.generate_conversation_title", return_value="时间问答")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    async def test_simple_question_skips_plan_llm_call(
+        self,
+        _extract_mock,
+        memory_mock,
+        _intent_mock,
+        _title_mock,
+        _chat_model_mock,
+        _tools_mock,
+        _write_memory_mock,
+    ) -> None:
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+        plan_calls = {"n": 0}
+
+        async def _no_plan(settings, **kwargs):
+            if kwargs.get("operation") == "agent_plan":
+                plan_calls["n"] += 1
+                raise AssertionError("简单问答不应调用 plan LLM")
+            if kwargs.get("operation") == "agent_reflect":
+                return llm.ReflectDecision(is_complete=True, rationale="信息已充分")
+            raise AssertionError(f"unexpected operation: {kwargs.get('operation')}")
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, _, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="现在几点了"),
+        )
+        with patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_no_plan):
+            events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        self.assertEqual(events[-1]["event"], "run_completed")
+        self.assertEqual(plan_calls["n"], 0)
+        # 确定性 plan 仍进入 act 上下文并展示为推理步骤，但不是装饰性的伪计划。
+        step_snapshots = [
+            item["data"]["message"]
+            for item in events
+            if item["event"] == "card_snapshot" and item["data"]["message"]["message_type"] == "reasoning_step"
+        ]
+        plan_steps = [s for s in step_snapshots[0]["structured_payload"]["steps"] if s["step_type"] == "plan"]
+        self.assertEqual(plan_steps[0]["plan_source"], "deterministic")
+        self.assertEqual(plan_steps[0]["content"], "回答用户问题")
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
     @patch("app.agent.llm.create_chat_model")
     @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="历史问答")
@@ -212,9 +910,10 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         refreshed = self.db.get(type(assistant_message), assistant_message.id)
         self.assertEqual(refreshed.status, "failed")
         self.assertEqual(refreshed.text_content, "")
+        self.assertEqual(self.db.get(AgentRun, agent_run.id).output_json.get("completion_status"), "failed")
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
     @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel())
     @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="测试聊天")
@@ -232,6 +931,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         _tools_mock,
         _write_memory_mock,
     ) -> None:
+        from app.domains.conversation.service import EMPTY_ANSWER_FALLBACK_TEXT
+
         memory_mock.return_value = SimpleNamespace(summary="", items=[])
         thread = create_conversation(self.db, self.user.id)
         _, _, assistant_message, agent_run = queue_message(
@@ -244,10 +945,14 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
         self.assertEqual(events[-1]["event"], "run_completed")
-        self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "")
+        # 空模型输出不泄露 langchain 内部表示，而是空回答兜底文案收口。
+        self.assertEqual(
+            self.db.get(type(assistant_message), assistant_message.id).text_content,
+            EMPTY_ANSWER_FALLBACK_TEXT,
+        )
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
@@ -301,14 +1006,14 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
         card_events = [item for item in events if item["event"] == "card_snapshot"]
-        self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["schedule_draft_card", "conflict_card"])
+        self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["schedule_draft_card", "conflict_card", "reasoning_step"])
         self.assertTrue(any(item["event"] == "approval_required" for item in events))
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNotNone(pending)
         self.assertEqual(pending.stage, "approval_pending")
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     @patch("app.domains.conversation.service.ConversationHistorySearchService.retrieve_history_lines")
@@ -364,8 +1069,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         first_tool_payload = invoke_tool_mock.await_args_list[0].args[1]
         self.assertEqual(first_tool_payload["context"]["conversation_history_lines"], ["用户：之前说过地点在学院会议室"])
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     @patch("app.domains.conversation.service._build_conversation_history_recall")
@@ -438,8 +1143,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         upsert_mock.assert_called_once()
         self.assertEqual(upsert_mock.call_args.args[0].id, user_message.id)
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.build_agent_tools", new_callable=AsyncMock, return_value=[])
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock, return_value=[])
     @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的，我来帮你一起整理。"))
     @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学安排")
@@ -505,9 +1210,9 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delete_mock.call_args.kwargs["conversation_id"], thread.id)
         self.assertCountEqual(delete_mock.call_args.kwargs["message_ids"], [user_message.id, assistant_message.id])
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.create_schedule_after_approval")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.pending_service.create_schedule_after_approval")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_updates_existing_cards_in_place(
@@ -588,8 +1293,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(pending)
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_uses_real_schedule_creation_path(
@@ -672,8 +1377,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(pending)
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_accepts_non_default_reminder_preset(
@@ -755,9 +1460,9 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed_approval.status, "confirmed")
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.create_schedule_after_approval")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.pending_service.create_schedule_after_approval")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_confirm_schedule_action_succeeds_when_card_finalize_fails(
@@ -820,7 +1525,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
 
-        with patch("app.domains.conversation.service._mark_action_group_status", side_effect=RuntimeError("card finalize failed")):
+        with patch("app.domains.conversation.pending_service.mark_action_group_status", side_effect=RuntimeError("card finalize failed")):
             _, assistant_messages = apply_action(
                 self.db,
                 self.user.id,
@@ -833,9 +1538,9 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         pending = self.db.scalar(select(ConversationPendingState).where(ConversationPendingState.conversation_id == thread.id))
         self.assertIsNotNone(pending)
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.save_note_after_approval")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.pending_service.write_user_memory.delay")
+    @patch("app.domains.conversation.pending_service.save_note_after_approval")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="实验记录")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
     async def test_quick_note_message_and_confirm(
@@ -877,7 +1582,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
         card_events = [item for item in events if item["event"] == "card_snapshot"]
 
-        self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["quick_note_preview_card"])
+        self.assertEqual([item["data"]["message"]["message_type"] for item in card_events], ["quick_note_preview_card", "reasoning_step"])
 
         _, confirm_messages = apply_action(
             self.db,
@@ -894,8 +1599,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all((item.structured_payload_json or {}).get("lifecycle_status") == "confirmed" for item in cards))
         self.assertGreaterEqual(write_memory_mock.call_count, 1)
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="实验记录")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="quick_note_intake")
     async def test_pending_quick_note_regenerates_new_revision(
@@ -957,7 +1662,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         second_events = [item async for item in consume_stream(self.db, self.user.id, thread.id, second_run.stream_token)]
 
         cards = [item["data"]["message"] for item in second_events if item["event"] == "card_snapshot"]
-        self.assertEqual([item["message_type"] for item in cards], ["quick_note_preview_card"])
+        self.assertEqual([item["message_type"] for item in cards], ["quick_note_preview_card", "reasoning_step"])
         self.assertEqual(cards[0]["revision"], 2)
         second_tool_call = invoke_tool_mock.await_args_list[1].args[1]
         self.assertEqual(second_tool_call["content"], "改成下周三，并补充图表")
@@ -1248,8 +1953,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(self.db.get(QuickNote, note.id))
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="蓝桥杯安排")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_schedule_regeneration_keeps_user_history_in_source_text(
@@ -1359,8 +2064,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             "用户下周周六要去沈阳东北大学浑南校区比赛蓝桥杯国赛，比赛时间是 9:00-13:00。",
         )
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="教学例会")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_pending_schedule_regenerates_new_revision_with_cards(
@@ -1459,7 +2164,7 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(any("当前还有一项待确认内容" in str(item) for item in second_events))
         cards = [item["data"]["message"] for item in second_events if item["event"] == "card_snapshot"]
-        self.assertEqual([item["revision"] for item in cards], [2, 2])
+        self.assertEqual([item["revision"] for item in cards], [2, 2, 1])
         history = self.db.scalars(
             select(ConversationMessage)
             .where(ConversationMessage.conversation_id == thread.id)
@@ -1514,8 +2219,8 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             draft_hash="draft-2",
         )
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="创建提醒")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_conversation_without_selected_tool_auto_routes_to_schedule_intake(
@@ -1602,8 +2307,90 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("补充、修正或继续", call_kwargs["system_prompt"])
         self.assertIn("schedule_intake", call_kwargs["system_prompt"])
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
-    @patch("app.domains.conversation.service.invoke_synora_tool", new_callable=AsyncMock)
+    async def test_aroute_conversation_intent_has_tightened_rules(self) -> None:
+        """R3：收紧后的路由规则必须在 system_prompt 中——泛咨询（如"帮我规划旅行"）
+        无明确时间锚点/未要求创建日程时仍归 general_chat。"""
+        with patch(
+            "app.agent.llm.ainvoke_structured",
+            new_callable=AsyncMock,
+            return_value=SimpleNamespace(workflow="general_chat"),
+        ) as structured_mock:
+            result = await llm.aroute_conversation_intent(
+                get_settings(),
+                {
+                    "text_content": "帮我规划旅行",
+                    "attachment_ids": [],
+                    "selected_tool": None,
+                    "context": {},
+                },
+            )
+        self.assertEqual(result, "general_chat")
+        system_prompt = structured_mock.await_args.kwargs["system_prompt"]
+        self.assertIn("明确要求创建可提醒的日程", system_prompt)
+        self.assertIn("仅泛泛表达", system_prompt)
+        self.assertIn("未要求创建日程", system_prompt)
+
+    async def test_abort_emits_run_cancelled_and_marks_cancelled(self) -> None:
+        """R6：发送中点击停止 → abort_stream 命中检查点 → run_cancelled 收口，DB 落 cancelled。"""
+        started = asyncio.Event()
+
+        async def fake_astream(initial, config, stream_mode=None):
+            stream_id = initial.get("stream_id")
+            yield "updates", {}
+            started.set()
+            # 模拟跨 worker 的 LLM 长时间生成：运行 worker 只检查持久化状态。
+            while True:
+                try:
+                    raise_if_stream_cancelled(
+                        self.db,
+                        stream_id,
+                        force_database_check=True,
+                    )
+                except AgentRunCancelled:
+                    raise
+                await asyncio.sleep(0)
+
+        with patch(
+            "app.agent.graph.build_graph",
+            return_value=SimpleNamespace(astream=fake_astream),
+        ), patch(
+            "app.agent.checkpointer.setup_checkpointer",
+            new_callable=AsyncMock,
+        ):
+            thread = create_conversation(self.db, self.user.id)
+            _, _, _, agent_run = queue_message(
+                self.db,
+                self.user.id,
+                thread.id,
+                ConversationSendMessageRequest(text_content="你好"),
+            )
+            events_future = asyncio.ensure_future(
+                _collect_stream(
+                    consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)
+                )
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            self.assertTrue(
+                abort_stream(
+                    self.db,
+                    user_id=self.user.id,
+                    conversation_id=thread.id,
+                    stream_id=agent_run.stream_token,
+                )
+            )
+            events = await asyncio.wait_for(events_future, timeout=5)
+
+        self.assertEqual(events[-1]["event"], "run_cancelled")
+        self.assertEqual(events[-1]["data"]["stream_status"], "cancelled")
+        agent_run = self.db.get(AgentRun, agent_run.id)
+        self.assertEqual(agent_run.status, "cancelled")
+        self.assertEqual(agent_run.stream_status, "cancelled")
+        self.assertEqual(agent_run.output_json.get("completion_status"), "cancelled")
+        # abort 后取消标记被清理，防内存泄漏
+        self.assertFalse(is_stream_cancelled(agent_run.stream_token))
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.intake_service.invoke_synora_tool", new_callable=AsyncMock)
     @patch("app.agent.llm.generate_conversation_title", return_value="创建提醒")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="schedule_intake")
     async def test_followup_message_resumes_last_draft_card_without_pending(
@@ -1699,14 +2486,14 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_tool_payload["context"]["supersede_action_group_id"], second_tool_payload["context"]["pending_action_group_id"])
         self.assertIn("教学例会", second_tool_payload["context"]["previous_draft_summary"])
 
-    @patch("app.domains.conversation.service.write_user_memory.delay")
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
     @patch("app.agent.llm.create_chat_model", return_value=_FakeStreamingChatModel(text="好的"))
     @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock, side_effect=_fake_ainvoke_structured)
     @patch("app.agent.llm.generate_conversation_title", return_value="测试聊天")
     @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
     @patch("app.domains.conversation.service.MemoryService.retrieve_context")
     @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
-    async def test_general_chat_excludes_intake_write_tools(
+    async def test_general_chat_never_binds_intake_tools(
         self,
         _extract_mock,
         memory_mock,
@@ -1725,17 +2512,99 @@ class ConversationServiceTests(unittest.IsolatedAsyncioTestCase):
             ConversationSendMessageRequest(text_content="你好"),
         )
         with patch(
-            "app.domains.conversation.service.build_agent_tools",
+            "app.domains.conversation.agent_service.build_agent_tools",
             new_callable=AsyncMock,
             return_value=[],
         ) as tools_mock:
-            _ = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+            events = [
+                item
+                async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)
+            ]
 
-        # 无工具路径：仅 act 取工具表（observe 无 tool_calls 时跳过）
+        # general_chat 只绑定只读原生工具白名单（get_current_time / web_search）：
+        # intake 写工具依旧不注入，observe 阶段同样白名单匹配，杜绝"未知工具"空转。
         self.assertEqual(tools_mock.await_count, 1)
-        self.assertTrue(
-            all(call.kwargs["exclude_names"] == GENERAL_CHAT_EXCLUDED_TOOLS for call in tools_mock.await_args_list)
+        self.assertEqual(tools_mock.await_args.kwargs["include_names"], {"get_current_time", "web_search"})
+        self.assertTrue(any(item["event"] == "run_completed" for item in events))
+
+    @patch("app.domains.conversation.stream_runtime.write_user_memory.delay")
+    @patch("app.domains.conversation.service.MemoryService.extract_memory_facts", return_value=[])
+    @patch("app.domains.conversation.service.MemoryService.retrieve_context")
+    @patch("app.agent.llm.aroute_conversation_intent", new_callable=AsyncMock, return_value="general_chat")
+    @patch("app.agent.llm.generate_conversation_title", return_value="时间问答")
+    @patch("app.agent.llm.ainvoke_structured", new_callable=AsyncMock)
+    @patch(
+        "app.agent.llm.create_chat_model",
+        return_value=_ToolThenTextChatModel(
+            tool_call={"name": "get_current_time", "args": {}, "id": "call-1", "type": "tool_call"},
+            final_text="现在是周四 15:30。",
+        ),
+    )
+    @patch("app.domains.conversation.agent_service.build_agent_tools", new_callable=AsyncMock)
+    async def test_general_chat_time_tool_call_executes(
+        self,
+        tools_mock,
+        _chat_model_mock,
+        _ainvoke_mock,
+        _title_mock,
+        _intent_mock,
+        memory_mock,
+        _extract_mock,
+        _write_memory_mock,
+    ) -> None:
+        tools_mock.return_value = [_FakeTimeTool()]
+        memory_mock.return_value = SimpleNamespace(summary="", items=[])
+
+        reflect_calls = {"n": 0}
+
+        async def _reflect_side_effect(settings, **kwargs):
+            operation = kwargs.get("operation")
+            if operation == "agent_plan":
+                return llm.PlanResult(plan="回答用户")
+            if operation == "agent_reflect":
+                reflect_calls["n"] += 1
+                if reflect_calls["n"] == 1:
+                    return llm.ReflectDecision(
+                        is_complete=False,
+                        rationale="需要时间信息",
+                        follow_up_prompt="结合工具返回的时间给出回答",
+                    )
+                return llm.ReflectDecision(is_complete=True, rationale="信息已充分")
+            raise AssertionError(f"unexpected ainvoke_structured operation: {operation}")
+
+        _ainvoke_mock.side_effect = _reflect_side_effect
+
+        thread = create_conversation(self.db, self.user.id)
+        _, _, assistant_message, agent_run = queue_message(
+            self.db,
+            self.user.id,
+            thread.id,
+            ConversationSendMessageRequest(text_content="现在几点了"),
         )
+        events = [item async for item in consume_stream(self.db, self.user.id, thread.id, agent_run.stream_token)]
+
+        # act 只绑定 get_current_time，observe 白名单匹配并执行该工具。
+        bound_names = [t.name for t in _chat_model_mock.return_value.bound_tools]
+        self.assertEqual(bound_names, ["get_current_time"])
+        # 每轮 act 绑定一次 + 有 tool_calls 的 observe 执行一次（首轮 act/observe + 第二轮 act）。
+        self.assertGreaterEqual(tools_mock.await_count, 2)
+        for call in tools_mock.await_args_list:
+            self.assertEqual(call.kwargs["include_names"], {"get_current_time", "web_search"})
+        self.assertTrue(
+            any(
+                item["event"] == "tool_call_started" and item["data"]["tool_name"] == "get_current_time"
+                for item in events
+            )
+        )
+        self.assertTrue(
+            any(
+                item["event"] == "tool_call_completed" and item["data"]["tool_name"] == "get_current_time"
+                for item in events
+            )
+        )
+        # 第二轮 act 结合工具结果输出最终文本，run_completed 收口。
+        self.assertEqual(self.db.get(type(assistant_message), assistant_message.id).text_content, "现在是周四 15:30。")
+        self.assertEqual(events[-1]["event"], "run_completed")
 
 
 if __name__ == "__main__":
