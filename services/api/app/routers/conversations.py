@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.dependencies import get_current_user
 from app.domains.conversation.service import (
+    abort_stream,
     apply_action,
     consume_stream,
     create_conversation,
@@ -15,6 +16,7 @@ from app.domains.conversation.service import (
     list_conversations,
     list_messages,
     queue_message,
+    resume_stream_from_checkpoint,
     rewind_last_turn,
     update_conversation_title,
 )
@@ -181,6 +183,60 @@ async def stream_conversation_message(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post("/{conversation_id}/streams/{stream_id}/abort", status_code=status.HTTP_202_ACCEPTED)
+def abort_conversation_stream(
+    conversation_id: int,
+    stream_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, str]:
+    """中断一个进行中的 SSE 流（发送中点击停止）。
+
+    持久化标记当前用户会话下的 pending/active 流为 cancelling；运行节点在
+    下一检查点读取该状态后以 run_cancelled 收口，跨 worker 和重启同样有效。
+    """
+    try:
+        get_conversation(db, current_user.id, conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if not abort_stream(
+        db,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        stream_id=stream_id,
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话流不存在或已结束。")
+    return {"status": "cancelling"}
+
+
+@router.post("/{conversation_id}/streams/{stream_id}/resume")
+async def resume_conversation_stream(
+    conversation_id: int,
+    stream_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """仅继续已到 finalize 前的安全 checkpoint；其它中断位置拒绝恢复。"""
+    try:
+        get_conversation(db, current_user.id, conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    async def event_source():
+        try:
+            async for item in resume_stream_from_checkpoint(db, current_user.id, conversation_id, stream_id):
+                yield f"event: {item['event']}\ndata: {json.dumps(item['data'], ensure_ascii=False)}\n\n"
+        except ValueError as exc:
+            payload = json.dumps({"code": "conversation_stream_resume_error", "message": str(exc), "retryable": False}, ensure_ascii=False)
+            yield f"event: run_failed\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 

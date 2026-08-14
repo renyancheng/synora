@@ -15,6 +15,7 @@ from app.mcp.tools import (
     create_schedule_after_approval_tool,
     detect_schedule_conflicts_tool,
     dispatch_notification_tool,
+    get_current_time_tool,
     get_notification_status_tool,
     parse_schedule_draft_tool,
     prepare_quick_note_draft_tool,
@@ -147,6 +148,15 @@ def get_mcp_server() -> FastMCP:
         get_notification_status_tool,
         name="get_notification_status",
         description="Get delivery status and retry information for a notification audit record.",
+        structured_output=True,
+    )
+    server.add_tool(
+        get_current_time_tool,
+        name="get_current_time",
+        description=(
+            "Get the current time: business-timezone local time, UTC time, weekday, and timezone. "
+            "Use when the user asks what time or what day it is now."
+        ),
         structured_output=True,
     )
     return server

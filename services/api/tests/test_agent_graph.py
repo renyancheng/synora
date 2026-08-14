@@ -28,12 +28,11 @@ class AgentGraphTests(unittest.IsolatedAsyncioTestCase):
         return {
             "configurable": {
                 "thread_id": "test-graph",
-                "db": None,
-                "agent_run": None,
-                "assistant_message": None,
-                "thread": None,
             }
         }
+
+    def test_graph_config_contains_only_stable_thread_id(self) -> None:
+        self.assertEqual(set(self._config()["configurable"]), {"thread_id"})
 
     def test_route_branch_mapping(self) -> None:
         self.assertEqual(_route_branch({"intent": "general_chat"}), "general_chat")

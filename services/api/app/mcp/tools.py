@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import SessionLocal
 from app.domains.auth.service import ensure_bootstrap_user
 from app.domains.notification.service import dispatch_notification_core, get_notification_status_core
@@ -12,6 +16,7 @@ from app.schemas.mcp import (
     McpCreateScheduleAfterApprovalResult,
     McpDetectScheduleConflictsResult,
     McpDispatchNotificationResult,
+    McpGetCurrentTimeResult,
     McpGetNotificationStatusResult,
     McpParseScheduleDraftResult,
     McpPrepareQuickNoteDraftResult,
@@ -247,3 +252,28 @@ def get_notification_status_tool(delivery_id: int) -> McpGetNotificationStatusRe
         return McpGetNotificationStatusResult(status="error", error_code="business_error", message=str(exc))
     finally:
         db.close()
+
+
+_WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def get_current_time_tool() -> McpGetCurrentTimeResult:
+    """查看当前时间：返回业务时区本地时间、UTC、星期几（无副作用，不依赖 db）。"""
+    settings = get_settings()
+    try:
+        tz = ZoneInfo(settings.default_timezone or "Asia/Shanghai")
+        local_now = datetime.now(tz)
+        tz_name = str(settings.default_timezone)
+    except Exception:
+        # 时区配置非法时降级为 UTC，保证工具始终可用。
+        local_now = datetime.now(timezone.utc)
+        tz_name = "UTC"
+    utc_now = datetime.now(timezone.utc)
+    return McpGetCurrentTimeResult(
+        status="ok",
+        local_time=local_now.strftime("%Y-%m-%d %H:%M:%S"),
+        timezone=tz_name,
+        weekday=_WEEKDAY_CN[local_now.weekday()],
+        utc_time=utc_now.strftime("%Y-%m-%d %H:%M:%S"),
+        iso=utc_now.isoformat(),
+    )

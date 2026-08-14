@@ -127,6 +127,7 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
                 "create_quick_note_after_approval",
                 "dispatch_notification",
                 "get_notification_status",
+                "get_current_time",
             ],
         )
 

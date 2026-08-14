@@ -60,3 +60,11 @@ class McpGetNotificationStatusResult(McpResultBase):
     delivery_id: int | None = None
     channel_status: str | None = None
     retry_info: dict[str, Any] | None = None
+
+
+class McpGetCurrentTimeResult(McpResultBase):
+    local_time: str | None = None
+    timezone: str | None = None
+    weekday: str | None = None
+    utc_time: str | None = None
+    iso: str | None = None
